@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Trader Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: #0d1117; color: #c9d1d9; padding: 20px; }
+h1 { color: #58a6ff; margin-bottom: 20px; font-size: 24px; }
+h2 { color: #8b949e; font-size: 14px; text-transform: uppercase; letter-spacing: 1px;
+     margin-bottom: 10px; margin-top: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 12px; margin-bottom: 12px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+.card h3 { color: #58a6ff; font-size: 13px; margin-bottom: 8px; }
+.value-lg { font-size: 28px; font-weight: 700; color: #f0f6fc; }
+.value { font-size: 20px; font-weight: 600; color: #f0f6fc; }
+.label { font-size: 12px; color: #8b949e; margin-top: 2px; }
+.green { color: #3fb950; }
+.red { color: #f85149; }
+.yellow { color: #d29922; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: #8b949e; padding: 8px 4px; border-bottom: 1px solid #30363d; }
+td { padding: 8px 4px; border-bottom: 1px solid #21262d; }
+.signal-buy { background: rgba(63,185,80,0.2); color: #3fb950; padding: 2px 8px;
+              border-radius: 4px; font-weight: 700; font-size: 11px; }
+.signal-sell { background: rgba(248,81,73,0.2); color: #f85149; padding: 2px 8px;
+               border-radius: 4px; font-weight: 700; font-size: 11px; }
+.signal-hold { background: rgba(210,153,34,0.2); color: #d29922; padding: 2px 8px;
+               border-radius: 4px; font-weight: 700; font-size: 11px; }
+.chart-box { height: 220px; margin-top: 10px; }
+#trades-scroll { max-height: 350px; overflow-y: auto; }
+.status-bar { margin-top: 16px; padding: 10px; background: #0d1117;
+              border: 1px solid #30363d; border-radius: 6px; font-size: 13px; }
+.insight { padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+.insight:last-child { border-bottom: none; }
+.refresh-note { font-size: 11px; color: #484f58; text-align: center; margin-top: 12px; }
+.mode-tag { display: inline-block; padding: 2px 8px; border-radius: 12px;
+            font-size: 12px; font-weight: 600; background: rgba(88,166,255,0.15); color: #58a6ff; }
+pre { font-size: 12px; color: #8b949e; }
+</style>
+</head>
+<body>
+
+<div style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
+  <h1 style="margin-bottom:0;">📊 Crypto Trader</h1>
+  <span class="mode-tag" id="mode-tag">PAPER</span>
+</div>
+
+<!-- Portfolio Overview -->
+<div class="grid" id="portfolio-row">
+  <div class="card">
+    <h3>Portfolio Value</h3>
+    <div class="value-lg" id="portfolio-value">$10,000.00</div>
+    <div class="label" id="portfolio-pnl-label">Waiting for trades...</div>
+  </div>
+  <div class="card">
+    <h3>Cash</h3>
+    <div class="value-lg" id="cash-value">$10,000.00</div>
+    <div class="label">Available for trading</div>
+  </div>
+  <div class="card">
+    <h3>Open Positions</h3>
+    <div class="value-lg" id="open-positions">0</div>
+    <div class="label" id="daily-trades-label">0 trades today</div>
+  </div>
+  <div class="card">
+    <h3>Win Rate</h3>
+    <div class="value-lg green" id="win-rate">—</div>
+    <div class="label" id="total-trades-label">No closed trades</div>
+  </div>
+</div>
+
+<!-- Performance Metrics -->
+<div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+  <div class="card">
+    <h3>Total P&L</h3>
+    <div class="value" id="total-pnl">$0.00</div>
+  </div>
+  <div class="card">
+    <h3>Profit Factor</h3>
+    <div class="value" id="profit-factor">—</div>
+  </div>
+  <div class="card">
+    <h3>Sharpe Ratio</h3>
+    <div class="value" id="sharpe-ratio">—</div>
+  </div>
+  <div class="card">
+    <h3>Max Drawdown</h3>
+    <div class="value" id="max-drawdown">0%</div>
+  </div>
+</div>
+
+<!-- Market Data -->
+<h2>📈 Market</h2>
+<div class="grid" id="market-grid"></div>
+
+<!-- Equity Curve -->
+<h2>📉 Equity Curve</h2>
+<div class="card">
+  <div class="chart-box"><canvas id="equity-chart"></canvas></div>
+</div>
+
+<!-- Trades + Insights row -->
+<div style="display:grid; grid-template-columns: 2fr 1fr; gap:12px; margin-top:12px;">
+  <div class="card">
+    <h3>Recent Trades</h3>
+    <div id="trades-scroll">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>P&L</th><th>Conf</th>
+        </tr></thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div>
+    <div class="card" style="margin-bottom:12px;">
+      <h3>🧠 Learning Insights</h3>
+      <div id="insights-container" style="max-height:180px; overflow-y:auto;"></div>
+    </div>
+    <div class="card">
+      <h3>Strategy Params</h3>
+      <pre id="strategy-params">Loading...</pre>
+    </div>
+  </div>
+</div>
+
+<div class="status-bar" id="status-bar">⏳ Connecting to trading engine...</div>
+<div class="refresh-note">Data updates in real-time via Server-Sent Events</div>
+
+<script>
+let equityChart = null;
+const es = new EventSource('/events');
+
+es.addEventListener('message', (e) => {
+  try { updateDashboard(JSON.parse(e.data)); } catch {}
+});
+
+es.addEventListener('init', (e) => {
+  try { updateDashboard(JSON.parse(e.data)); } catch {}
+});
+
+es.addEventListener('market', (e) => {
+  try { updateDashboard(JSON.parse(e.data)); } catch {}
+});
+
+es.addEventListener('trade', (e) => {
+  try {
+    const d = JSON.parse(e.data);
+    if (d.tradeHistory) updateTrades(d.tradeHistory);
+    if (d.performanceReport) updatePerformance(d.performanceReport);
+    if (d.learningInsights) updateInsights(d.learningInsights);
+    if (d.strategyParams) updateParams(d.strategyParams);
+  } catch {}
+});
+
+es.addEventListener('learning', (e) => {
+  try {
+    const d = JSON.parse(e.data);
+    if (d.insights) updateInsights(d.insights);
+    if (d.params) updateParams(d.params);
+    if (d.report) updatePerformance(d.report);
+  } catch {}
+});
+
+es.onerror = () => {
+  document.getElementById('status-bar').textContent = '⚠️ Disconnected. Reconnecting...';
+};
+
+function updateDashboard(data) {
+  if (data.mode) document.getElementById('mode-tag').textContent = data.mode.toUpperCase();
+  if (data.marketData) updateMarket(data.marketData);
+  if (data.portfolio) updatePortfolio(data.portfolio);
+  if (data.performanceReport) updatePerformance(data.performanceReport);
+  if (data.tradeHistory) updateTrades(data.tradeHistory);
+  if (data.learningInsights) updateInsights(data.learningInsights);
+  if (data.strategyParams) updateParams(data.strategyParams);
+  if (data.statusMessage) document.getElementById('status-bar').textContent = '🟢 ' + data.statusMessage;
+}
+
+function updateMarket(data) {
+  const grid = document.getElementById('market-grid');
+  grid.innerHTML = '';
+  if (!data) { grid.innerHTML = '<div class="card"><div class="label">Waiting for market data...</div></div>'; return; }
+  for (const [sym, snap] of Object.entries(data)) {
+    const c = document.createElement('div'); c.className = 'card';
+    const color = snap.change24h > 2 ? 'green' : snap.change24h < -2 ? 'red' : 'yellow';
+    const arrow = snap.change24h > 0 ? '▲' : snap.change24h < 0 ? '▼' : '◆';
+    c.innerHTML = '<h3>'+sym+'</h3>'+
+      '<div class="value-lg">$'+Number(snap.price).toFixed(2)+'</div>'+
+      '<div class="label '+color+'">'+arrow+' '+Number(snap.change24h).toFixed(2)+'% &nbsp; Vol: '+Number(snap.volume24h).toFixed(0)+'</div>';
+    grid.appendChild(c);
+  }
+}
+
+function updatePortfolio(p) {
+  if (!p) return;
+  document.getElementById('portfolio-value').textContent = '$'+Number(p.totalValueUsd).toLocaleString(undefined,{minimumFractionDigits:2});
+  document.getElementById('cash-value').textContent = '$'+Number(p.cashUsd).toLocaleString(undefined,{minimumFractionDigits:2});
+  document.getElementById('open-positions').textContent = p.positions.length;
+  document.getElementById('daily-trades-label').textContent = p.dailyTradeCount+' trades today';
+}
+
+function updatePerformance(r) {
+  if (!r) return;
+  document.getElementById('win-rate').textContent = (r.winRate*100).toFixed(1)+'%';
+  document.getElementById('win-rate').className = 'value-lg '+(r.winRate>=0.5?'green':'red');
+  document.getElementById('total-trades-label').textContent = r.closedTrades+' closed / '+r.totalTrades+' total';
+  const pnlEl = document.getElementById('total-pnl');
+  pnlEl.textContent = (r.totalPnl>=0?'+':'')+'$'+r.totalPnl.toFixed(2);
+  pnlEl.className = 'value '+(r.totalPnl>=0?'green':'red');
+  document.getElementById('portfolio-pnl-label').textContent =
+    (r.totalPnlPercent>=0?'+':'')+r.totalPnlPercent.toFixed(2)+'% total return';
+  document.getElementById('profit-factor').textContent =
+    r.profitFactor===Infinity?'∞':r.profitFactor.toFixed(2);
+  document.getElementById('sharpe-ratio').textContent = r.sharpeRatio.toFixed(2);
+  document.getElementById('sharpe-ratio').className = 'value '+
+    (r.sharpeRatio>=1?'green':r.sharpeRatio>=0?'yellow':'red');
+  document.getElementById('max-drawdown').textContent = r.maxDrawdown.toFixed(1)+'%';
+  document.getElementById('max-drawdown').className = 'value '+(r.maxDrawdown<10?'green':r.maxDrawdown<20?'yellow':'red');
+  if (r.portfolioValues && r.portfolioValues.length > 1) drawEquityChart(r.portfolioValues);
+}
+
+function drawEquityChart(values) {
+  if (equityChart) equityChart.destroy();
+  const startVal = values[0];
+  const endVal = values[values.length-1];
+  const up = endVal >= startVal;
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: values.map((_,i)=>i),
+      datasets: [{
+        label: 'Portfolio',
+        data: values,
+        borderColor: up ? '#3fb950' : '#f85149',
+        backgroundColor: up ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)',
+        fill: true, tension: 0.3, pointRadius: 0,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: { grid: { color: '#21262d' }, ticks: { color: '#8b949e', callback: v => '$'+v.toLocaleString() } }
+      }
+    }
+  });
+}
+
+function updateTrades(trades) {
+  const body = document.getElementById('trades-body');
+  body.innerHTML = '';
+  if (!trades || trades.length===0) {
+    body.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#484f58;">No trades yet</td></tr>';
+    return;
+  }
+  for (const t of trades.slice(-20).reverse()) {
+    const tr = document.createElement('tr');
+    const sc = t.side==='buy'?'signal-buy':'signal-sell';
+    const pnl = t.pnl!==undefined ? (t.pnl>=0?'+':'')+'$'+t.pnl.toFixed(2) : '—';
+    const pc = t.pnl!==undefined ? (t.pnl>=0?'green':'red') : '';
+    const tm = new Date(t.entryTime).toLocaleTimeString();
+    tr.innerHTML = '<td>'+tm+'</td><td>'+t.symbol+'</td><td><span class="'+sc+'">'+t.side.toUpperCase()+'</span></td>'+
+      '<td>$'+t.entryPrice.toFixed(2)+'</td><td>'+t.quantity.toFixed(4)+'</td>'+
+      '<td class="'+pc+'">'+pnl+'</td><td>'+(t.confidence*100).toFixed(0)+'%</td>';
+    body.appendChild(tr);
+  }
+}
+
+function updateInsights(insights) {
+  const c = document.getElementById('insights-container');
+  c.innerHTML = '';
+  if (!insights || insights.length===0) {
+    c.innerHTML = '<div class="label">No insights yet. The system learns as trades accumulate.</div>';
+    return;
+  }
+  for (const ins of insights.slice(-10).reverse()) {
+    const d = document.createElement('div'); d.className = 'insight';
+    d.innerHTML = '<span class="green">◆</span> '+ins.reason;
+    c.appendChild(d);
+  }
+}
+
+function updateParams(p) {
+  if (!p) return;
+  document.getElementById('strategy-params').textContent =
+    'RSI oversold: '+p.rsiOversoldThreshold+'\n'+
+    'RSI overbought: '+p.rsiOverboughtThreshold+'\n'+
+    'Min buy score: '+p.minBuyScore+'\n'+
+    'Momentum range: '+p.momentumMin+'% – '+p.momentumMax+'%\n'+
+    'Volatility cap: '+p.volatilityCap+'%';
+}
+
+// Initial fetch for when SSE init is missed
+fetch('/api/state').then(r=>r.json()).then(d=>updateDashboard(d)).catch(()=>{});
+</script>
+</body>
+</html>

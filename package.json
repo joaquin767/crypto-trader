@@ -1,21 +1,22 @@
 {
   "name": "crypto-trader",
-  "version": "0.1.0",
-  "description": "A terminal-based crypto trading assistant with configurable risk thresholds and paper trading mode.",
+  "version": "0.2.0",
+  "description": "Expert crypto trading assistant with multi-indicator strategy, learning system, and real-time web dashboard.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types \"tests/*.test.ts\"",
-    "verify": "npm run typecheck && npm run test"
+    "verify": "npm run typecheck && npm run test",
+    "start": "node --experimental-strip-types src/main.ts --config ./config.json",
+    "dashboard": "node --experimental-strip-types src/main.ts --config ./config.json --port 3081"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "ccxt": "^4.0.0",
-    "blessed": "^0.1.81",
-    "blessed-contrib": "^4.11.0"
+    "hono": "^4.0.0",
+    "@hono/node-server": "^1.0.0"
   },
   "license": "MIT"
 }

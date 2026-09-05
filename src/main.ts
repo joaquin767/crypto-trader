@@ -1,82 +1,216 @@
 import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
-import { evaluate, type TradeSignal } from "./risk.ts";
+import { analyze, type TradeSignal, clearHistory } from "./strategy/signals.ts";
+import { calcPositionSize } from "./strategy/risk.ts";
 import { empty, update, type Portfolio } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
+import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, type TradeRecord } from "./learning/journal.ts";
+import { analyze as analyzePerformance, type PerformanceReport } from "./learning/analyzer.ts";
+import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
+import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
-export { evaluate, type TradeSignal };
-export { empty, update, type Portfolio };
-export { execute, type TradeResult };
-export { render, type AppState };
+export { analyze, type TradeSignal, getHistory as getSignalHistory } from "./strategy/signals.ts";
+export { type TradeRecord, getHistory as getJournalHistory } from "./learning/journal.ts";
 
 /** CLI argument parser. */
-function parseArgs(argv: string[]): { configPath?: string; live: boolean } {
-  const args = { configPath: undefined as string | undefined, live: false };
+function parseArgs(argv: string[]): { configPath?: string; live: boolean; port: number } {
+  const args = { configPath: undefined as string | undefined, live: false, port: 3081 };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--config" && argv[i + 1]) args.configPath = argv[++i]!;
     if (argv[i] === "--live") args.live = true;
+    if (argv[i] === "--port" && argv[i + 1]) args.port = parseInt(argv[++i]!);
   }
   return args;
 }
 
 /**
- * Bootstrap and run the crypto-trader app.
- * Loads config, starts market watcher, evaluates risk, executes trades,
- * updates portfolio, and renders the TUI — all in a loop.
+ * Bootstrap and run the expert crypto-trader with web dashboard.
  *
- * Pass an AbortSignal to stop the loop (e.g. in tests).
+ * 1. Loads config
+ * 2. Starts market watcher
+ * 3. For each snapshot: analyzes indicators → generates signal → executes → journals → broadcasts
+ * 4. Periodically runs learning: analyze performance → optimize strategy params → broadcast insights
+ * 5. Web dashboard at http://localhost:<port>
  */
 export async function start(config: Config, signal?: AbortSignal): Promise<void> {
-  const mode = process.argv.includes("--live") ? "live" : "paper";
+  const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live";
+  const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
+
   let portfolio: Portfolio = empty();
   let lastSignal: TradeSignal | null = null;
   let statusMessage = "starting...";
+  let strategyParams: StrategyParams = defaultParams();
+  let performanceReport: PerformanceReport | null = null;
+  const learningInsights: LearningInsight[] = [];
 
-  const state: AppState = {
+  // Learning timer
+  let lastLearningRound = Date.now();
+  const learningInterval = 30000; // every 30s
+
+  // Track the last price per symbol for exit recording
+  const lastPrices = new Map<string, number>();
+
+  // Dashboard state
+  const dashboardState: DashboardState = {
     marketData: new Map(),
     portfolio,
-    lastSignal,
+    lastSignal: null,
+    statusMessage,
+    mode,
+    tradeHistory: [],
+    performanceReport: null,
+    learningInsights: [],
+    strategyParams,
+  };
+
+  // Start the web server
+  const server = await createServer(dashboardState, port);
+  console.log(`[crypto-trader] Dashboard: http://localhost:${port}`);
+  console.log(`[crypto-trader] Mode: ${mode.toUpperCase()}`);
+
+  // Initial render
+  const appState: AppState = {
+    marketData: new Map(),
+    portfolio,
+    lastSignal: null,
     statusMessage,
     mode,
   };
+  render(appState);
 
-  // Initial render
-  render(state);
+  const initialCash = portfolio.cashUsd;
 
   for await (const snapshots of watch(config.symbols, config.refreshIntervalMs, signal)) {
-    state.marketData = snapshots;
+    dashboardState.marketData = snapshots;
+    appState.marketData = snapshots;
 
-    // Evaluate each symbol
     for (const [symbol, snapshot] of snapshots) {
-      const signal = evaluate(snapshot, portfolio, config);
-      lastSignal = signal;
+      lastPrices.set(symbol, snapshot.price);
 
-      if (signal.type !== "hold") {
-        // Check daily trade limit before executing
-        if (config.maxDailyTrades > 0 && portfolio.dailyTradeCount >= config.maxDailyTrades) {
-          statusMessage = `daily trade limit reached (${config.maxDailyTrades})`;
+      // Check daily trade limit
+      if (config.maxDailyTrades > 0 && portfolio.dailyTradeCount >= config.maxDailyTrades) {
+        statusMessage = `daily trade limit reached (${config.maxDailyTrades})`;
+        continue;
+      }
+
+      // Expert analysis with multiple indicators
+      const tradeSignal = analyze(snapshot, portfolio, config);
+      lastSignal = tradeSignal;
+
+      if (tradeSignal.type === "buy" || tradeSignal.type === "sell") {
+        // Kelly Criterion position sizing
+        const positionUsd = calcPositionSize(tradeSignal.confidence, portfolio, config);
+
+        if (positionUsd <= 0) {
+          statusMessage = `${mode.toUpperCase()} | insufficient cash for ${tradeSignal.symbol}`;
           continue;
         }
 
-        const trade: TradeResult = await execute(signal, config);
-        portfolio = update(portfolio, trade);
-        statusMessage = `${mode.toUpperCase()} | ${trade.side} ${trade.symbol} @ $${trade.price.toFixed(2)}`;
+        // Execute
+        const result: TradeResult = await execute(tradeSignal, config);
+        portfolio = update(portfolio, result);
+        statusMessage = `${mode.toUpperCase()} | ${result.side} ${result.symbol} @ $${result.price.toFixed(2)}`;
+
+        // Journal the trade
+        if (result.side === "buy") {
+          recordEntry(tradeSignal, result);
+        }
+
+        // If selling, close the journal entry
+        if (result.side === "sell") {
+          const closed = recordExit(symbol, result.price, result.timestamp, result.fee);
+          if (closed) {
+            statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
+          }
+        }
+
+        // Broadcast trade event
+        broadcast("trade", {
+          tradeHistory: getHistory(),
+          performanceReport: null,
+          learningInsights: [],
+          strategyParams,
+        });
       } else {
-        statusMessage = `${mode.toUpperCase()} | ${signal.reason}`;
+        statusMessage = `${mode.toUpperCase()} | ${tradeSignal.reason || "no signal"}`;
       }
     }
 
-    state.portfolio = portfolio;
-    state.lastSignal = lastSignal;
-    state.statusMessage = statusMessage;
-    render(state);
+    // Periodic learning cycle
+    const now = Date.now();
+    if (now - lastLearningRound >= learningInterval) {
+      lastLearningRound = now;
+
+      const closedTrades = getClosedTrades();
+      if (closedTrades.length >= 3) {
+        performanceReport = analyzePerformance(initialCash);
+
+        // Calculate metrics for optimizer
+        const recentPnls = closedTrades.slice(-10).map(t => t.pnl ?? 0);
+
+        strategyParams = optimize(
+          strategyParams,
+          performanceReport.winRate,
+          closedTrades.length,
+          performanceReport.avgWin,
+          Math.abs(performanceReport.avgLoss),
+          performanceReport.maxDrawdown,
+          recentPnls,
+        );
+
+        // Collect new insights
+        const newInsights = getInsights().filter(
+          i => !learningInsights.find(e => e.round === i.round)
+        );
+        learningInsights.push(...newInsights);
+
+        console.log(`[learning] Win rate: ${(performanceReport.winRate * 100).toFixed(1)}% | Trades: ${closedTrades.length}`);
+        if (newInsights.length > 0) {
+          console.log(`[learning] Adjustments: ${newInsights.map(i => i.reason).join("; ")}`);
+        }
+
+        // Broadcast learning event
+        broadcast("learning", {
+          insights: newInsights,
+          params: strategyParams,
+          report: performanceReport,
+        });
+      }
+    }
+
+    // Update dashboard state
+    portfolio = portfolio; // already updated above
+    dashboardState.portfolio = portfolio;
+    dashboardState.lastSignal = lastSignal;
+    dashboardState.statusMessage = statusMessage;
+    dashboardState.tradeHistory = getHistory();
+    dashboardState.performanceReport = performanceReport;
+    dashboardState.learningInsights = learningInsights;
+    dashboardState.strategyParams = strategyParams;
+
+    // Update terminal render
+    appState.portfolio = portfolio;
+    appState.lastSignal = lastSignal;
+    appState.statusMessage = statusMessage;
+    render(appState);
+
+    // Broadcast market update
+    broadcast("market", {
+      marketData: Object.fromEntries(snapshots),
+      portfolio,
+      statusMessage,
+      mode,
+    });
   }
+
+  // Cleanup
+  await server.close();
 }
 
-// CLI entry point when run directly
+// CLI entry point
 const cliArgs = parseArgs(process.argv.slice(2));
 if (cliArgs.configPath) {
   try {
@@ -90,6 +224,6 @@ if (cliArgs.configPath) {
     process.exit(1);
   }
 } else if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  console.error("Usage: node src/main.ts --config ./config.json [--live]");
+  console.error("Usage: node src/main.ts --config ./config.json [--live] [--port 3081]");
   process.exit(1);
 }

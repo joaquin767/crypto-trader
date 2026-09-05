@@ -1,4 +1,4 @@
-import type { TradeSignal } from "./risk.ts";
+import type { TradeSignal } from "./strategy/signals.ts";
 import type { Config } from "./config.ts";
 
 export interface TradeResult {

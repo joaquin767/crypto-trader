@@ -1,6 +1,6 @@
 import type { MarketSnapshot } from "./market.ts";
 import type { Portfolio } from "./portfolio.ts";
-import type { TradeSignal } from "./risk.ts";
+import type { TradeSignal } from "./strategy/signals.ts";
 
 export interface AppState {
   marketData: Map<string, MarketSnapshot>;
