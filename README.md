@@ -97,6 +97,26 @@ npm run dashboard
 node --experimental-strip-types src/main.ts --config ./config.json --live --port 3081
 ```
 
+## 🔒 Security
+
+### API Keys — Critical Rules
+
+1. **NEVER commit config.json** — it's in `.gitignore` and blocked by a pre-commit hook
+2. **Use `config.template.json`** — copy it to `config.json` and fill in your keys locally
+3. **Revoke exposed keys immediately** — if a key is accidentally committed, revoke it on Bybit right away
+4. **IP whitelist** your API keys in Bybit settings for an extra layer of protection
+5. **Withdraw permission OFF** — your API key should never have withdraw permissions
+
+### Pre-commit Hook
+
+The repo includes a `.githooks/pre-commit` hook that blocks commits containing `config.json`
+or `config.bybit.json`. It also warns about any file with suspicious API key patterns.
+
+To enable it:
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Test Results
 
 | Suite | Count | Status |
