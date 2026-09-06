@@ -10,6 +10,7 @@ import { analyze as analyzePerformance, type PerformanceReport } from "./learnin
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
+import { BybitInsufficientBalanceError } from "./bybit/types.ts";
 import { appSymbolToBybit } from "./bybit/adapters.ts";
 import type { BybitConfig } from "./bybit/types.ts";
 
@@ -41,7 +42,7 @@ function parseArgs(argv: string[]): { configPath?: string; live: boolean; port: 
 export async function start(config: Config, signal?: AbortSignal): Promise<void> {
   const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live" | "testnet";
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
-  const useBybit = config.exchange.toLowerCase() === "bybit";
+  let useBybit = config.exchange.toLowerCase() === "bybit";
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
   let lastSignal: TradeSignal | null = null;
@@ -136,7 +137,22 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           }
 
           // Execute via Bybit REST API
-          result = await bybit.placeOrder(tradeSignal, qty);
+          try {
+            result = await bybit.placeOrder(tradeSignal, qty);
+          } catch (bybitErr) {
+            if (bybitErr instanceof BybitInsufficientBalanceError) {
+              statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
+              console.warn(`[bybit] ${statusMessage}`);
+              useBybit = false; // fall back to paper for subsequent trades
+              bybit.disconnect();
+              dashboardState.bybitConnected = false;
+              dashboardState.bybitError = "Insufficient balance — fund your testnet wallet";
+              // Execute via paper instead
+              result = await execute(tradeSignal, config);
+            } else {
+              throw bybitErr; // re-throw other errors for the outer catch
+            }
+          }
         } else {
           // Execute via simulated paper trading
           result = await execute(tradeSignal, config);

@@ -202,6 +202,13 @@ export class BybitRateLimitError extends BybitApiError {
   }
 }
 
+export class BybitInsufficientBalanceError extends BybitApiError {
+  constructor(retCode: number, retMsg: string) {
+    super(retCode, retMsg);
+    this.name = "BybitInsufficientBalanceError";
+  }
+}
+
 export class BybitConnectionError extends Error {
   constructor(msg: string) {
     super(`Bybit connection error: ${msg}`);
@@ -229,6 +236,8 @@ export function classifyError(retCode: number, retMsg: string): BybitApiError {
       return new BybitAuthError(retCode, retMsg);
     case 10006:
       return new BybitRateLimitError(retCode, retMsg);
+    case 110007:
+      return new BybitInsufficientBalanceError(retCode, retMsg);
     default:
       return new BybitApiError(retCode, retMsg);
   }
