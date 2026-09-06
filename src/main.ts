@@ -251,12 +251,15 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
     // Real-time tickers → latestMarketData (used by the timer loop)
     bybit.onTicker((snapshots: Map<string, MarketSnapshot>) => {
-      latestMarketData = snapshots;
+      // Merge updates so we keep all symbols on the dashboard
+      for (const [sym, snap] of snapshots) {
+        latestMarketData.set(sym, snap);
+      }
 
       // Push to dashboard immediately (tickers stream at 100ms)
-      dashboardState.marketData = snapshots;
+      dashboardState.marketData = latestMarketData;
       broadcast("market", {
-        marketData: Object.fromEntries(snapshots),
+        marketData: Object.fromEntries(latestMarketData),
         portfolio,
         statusMessage,
         mode,

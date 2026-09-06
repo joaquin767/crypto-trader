@@ -75,9 +75,11 @@ export class BybitConnector {
       this.wsPublic.subscribe(tickerTopics);
 
       // Handle ticker data
-      this.wsPublic.on("ticker", (topic: string, data: unknown) => {
-        this.handleTicker(topic, data);
-      });
+      for (const topic of tickerTopics) {
+        this.wsPublic.on(topic, (topicName: string, data: unknown) => {
+          this.handleTicker(topicName, data);
+        });
+      }
 
       // 3. Connect private WebSocket (for order confirmations)
       if (this.config.apiKey && this.config.apiSecret) {
