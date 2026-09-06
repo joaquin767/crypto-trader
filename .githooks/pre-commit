@@ -1,0 +1,40 @@
+#!/bin/sh
+# 🔒 PRE-COMMIT HOOK — Prevent API keys from being committed
+# This hook checks for any file that looks like it contains API keys or secrets.
+# It runs BEFORE every commit and blocks it if suspicious patterns are found.
+
+echo "🔍 [pre-commit] Scanning for exposed secrets..."
+
+# Files that should NEVER be committed (config files with real API keys)
+FORBIDDEN_FILES="config.json config.bybit.json"
+
+# Check if any forbidden file is being committed
+for f in $FORBIDDEN_FILES; do
+    if git diff --cached --name-only | grep -q "^$f$"; then
+        echo "❌ BLOCKED: '$f' contains API keys and cannot be committed."
+        echo "   If you want to save your config, copy it to a file outside the repo."
+        echo "   To commit anyway (not recommended), use: git commit --no-verify"
+        exit 1
+    fi
+done
+
+# Check for files that look like they contain API keys or secrets
+# Patterns that indicate exposed credentials
+SUSPICIOUS_PATTERNS="api[Kk]ey|api[Ss]ecret|api_secret|api_key|password|passwd|secret|token|credential"
+
+git diff --cached --name-only | while read -r file; do
+    # Skip template files
+    case "$file" in
+        *.template.*|*.md|*.sh|*.txt|.gitignore) continue ;;
+    esac
+    
+    # If the file exists in the index, check its content
+    if git show :"$file" 2>/dev/null | grep -qiE "$SUSPICIOUS_PATTERNS" && \
+       git show :"$file" 2>/dev/null | grep -qiE "[A-Za-z0-9]{20,}|sk-[a-zA-Z0-9]+|api[A-Za-z]*['\"]?\s*[:=]\s*['\"][A-Za-z0-9]{10,}"; then
+        echo "⚠️  WARNING: '$file' appears to contain API keys or secrets."
+        echo "   If this is intentional, use: git commit --no-verify"
+        echo "   Otherwise, remove the secrets from this file."
+    fi
+done
+
+echo "✅ [pre-commit] Scan complete — no secrets detected."
