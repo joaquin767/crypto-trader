@@ -1,31 +1,11 @@
-// Bybit REST API V5 client with HMAC-SHA256 authentication,
-// per-endpoint token bucket rate limiting, and error classification.
+// Bybit REST API client — wraps the official bybit-official-ts-sdk
+// and exposes the same interface our custom RestClient used to.
+// This gives us Bybit-maintained REST logic with our custom WebSocket/connector layers.
 
-import { createHmac } from "node:crypto";
-import {
-  type BybitConfig,
-  type BybitApiResponse,
-  type BybitTicker,
-  type BybitKline,
-  type BybitOrderbook,
-  type BybitOrderRequest,
-  type BybitOrderResponse,
-  type BybitPosition,
-  type BybitWalletBalance,
-  BYBIT_HOSTS,
-  classifyError,
-  getEndpointLimit,
-  BybitApiError,
-  BybitConnectionError,
-  BybitConfigError,
-} from "./types.ts";
-
-interface TokenBucket {
-  tokens: number;
-  lastRefill: number;
-  maxTokens: number;
-  refillRate: number; // tokens per second
-}
+import { BybitClient, BybitApiError as SdkApiError, BybitAuthError as SdkAuthError, BybitRateLimitError as SdkRateLimitError } from "bybit-official-ts-sdk";
+import type { BybitConfig } from "./types.ts";
+import { BybitConnectionError, BybitConfigError } from "./types.ts";
+import { classifyError } from "./types.ts";
 
 export interface RestClientOptions {
   timeoutMs?: number;
@@ -34,347 +14,128 @@ export interface RestClientOptions {
 
 export class RestClient {
   private config: BybitConfig;
-  private host: string;
-  private buckets: Map<string, TokenBucket> = new Map();
-  private timeoutMs: number;
-  private recvWindowMs: number;
-  private serverTimeDiff = 0; // ms difference between local and server time
+  private client: BybitClient;
+  private serverTimeDiff = 0;
   private lastTimeSync = 0;
 
   constructor(config: BybitConfig, opts: RestClientOptions = {}) {
     this.config = config;
-    this.host = config.testnet ? BYBIT_HOSTS.testnet : BYBIT_HOSTS.mainnet;
-    this.timeoutMs = opts.timeoutMs ?? 10000;
-    this.recvWindowMs = opts.recvWindowMs ?? 5000;
 
     if (!config.apiKey || !config.apiSecret) {
       throw new BybitConfigError("API key and secret are required");
     }
+
+    const recvWindow = opts.recvWindowMs ?? 5000;
+    const timeout = opts.timeoutMs ?? 10000;
+
+    this.client = new BybitClient({
+      apiKey: config.apiKey,
+      apiSecret: config.apiSecret,
+      testnet: config.testnet,
+      recvWindow: String(recvWindow),
+      timeout,
+    });
   }
 
-  // ── Authentication ─────────────────────────────────────────────────
-
-  /**
-   * Sync local clock with Bybit server time.
-   * Must be called on startup and periodically (every hour).
-   * Auth will fail if clock skew > 30s (retCode 10002).
-   */
   async syncTime(): Promise<number> {
     const start = Date.now();
-    const res = await fetch(`${this.host}/v5/market/time`, { signal: AbortSignal.timeout(5000) });
-    const data: BybitApiResponse<{ timeSecond: string; timeNano: string }> = await res.json();
-    const end = Date.now();
-    const rtt = end - start;
-
-    // Parse the server time. Bybit returns timeSecond in seconds (10 digits).
-    // But to be safe, detect if it's already in milliseconds (13 digits).
-    const rawTime = Number.parseInt(data.result.timeSecond);
-    const serverTime = rawTime > 1e12 ? rawTime : rawTime * 1000;
-
-    this.serverTimeDiff = serverTime - (start + rtt / 2);
-    this.lastTimeSync = Date.now();
-
-    // Log the time sync result for debugging
-    console.log(`[bybit] Time synced: diff=${this.serverTimeDiff}ms, rtt=${rtt}ms`);
-
-    return this.serverTimeDiff;
-  }
-
-  /** Get the current timestamp adjusted for server time difference. */
-  private getTimestamp(): number {
-    // Fallback to local time if server time diff is invalid
-    if (this.serverTimeDiff === 0 || Number.isNaN(this.serverTimeDiff) || !Number.isFinite(this.serverTimeDiff)) {
-      return Date.now();
-    }
-    return Date.now() + this.serverTimeDiff;
-  }
-
-  /**
-   * Generate HMAC-SHA256 signature for a request.
-   * Format:
-   * - GET: HMAC-SHA256(api_secret, timestamp + api_key + recv_window + query_string)
-   * - POST: HMAC-SHA256(api_secret, timestamp + api_key + recv_window + body_json)
-   */
-  private sign(method: string, path: string, body?: string): { timestamp: number; signature: string } {
-    const timestamp = this.getTimestamp();
-    const recvWindow = this.recvWindowMs;
-
-    // Bybit V5 signature uses query parameters for GET and body for POST/PUT
-    let paramStr = "";
-    if (method === "GET") {
-      const parts = path.split("?");
-      paramStr = parts[1] || "";
-    } else {
-      paramStr = body ?? "";
-    }
-
-    const payload = `${timestamp}${this.config.apiKey}${recvWindow}${paramStr}`;
-    const signature = createHmac("sha256", this.config.apiSecret)
-      .update(payload)
-      .digest("hex");
-
-    return { timestamp, signature };
-  }
-
-  // ── Rate Limiting ──────────────────────────────────────────────────
-
-  private getBucket(path: string): TokenBucket {
-    let bucket = this.buckets.get(path);
-    if (!bucket) {
-      const limits = getEndpointLimit(path);
-      bucket = {
-        tokens: limits.maxBurst,
-        lastRefill: Date.now(),
-        maxTokens: limits.maxBurst,
-        refillRate: limits.maxPerSecond,
-      };
-      this.buckets.set(path, bucket);
-    }
-    return bucket;
-  }
-
-  /**
-   * Wait for a token from the rate limiter.
-   * Blocks until a token is available (queues, never throws for rate limits).
-   */
-  private async waitForToken(path: string): Promise<void> {
-    const bucket = this.getBucket(path);
-    while (true) {
-      const now = Date.now();
-      const elapsed = (now - bucket.lastRefill) / 1000;
-      bucket.tokens = Math.min(bucket.maxTokens, bucket.tokens + elapsed * bucket.refillRate);
-      bucket.lastRefill = now;
-
-      if (bucket.tokens >= 1) {
-        bucket.tokens -= 1;
-        return;
-      }
-
-      // Wait for the next token (at least 50ms to avoid busy-wait)
-      await new Promise(r => setTimeout(r, 50));
-    }
-  }
-
-  /**
-   * Update token bucket from response headers (X-Bapi-Limit-Status).
-   * This syncs our local bucket with the server's actual state.
-   */
-  private syncFromHeaders(path: string, headers: Headers): void {
-    const remaining = headers.get("X-Bapi-Limit-Status");
-    const limit = headers.get("X-Bapi-Limit");
-    const resetTime = headers.get("X-Bapi-Limit-Reset-Timestamp");
-
-    if (remaining !== null && limit !== null) {
-      const bucket = this.getBucket(path);
-      bucket.tokens = Math.min(bucket.maxTokens, Number.parseInt(remaining));
-      // If we're below 20% of the limit, reduce our rate
-      const limitNum = Number.parseInt(limit);
-      if (Number.parseInt(remaining) < limitNum * 0.2) {
-        bucket.refillRate = bucket.refillRate * 0.5; // cut in half
-      }
-    }
-  }
-
-  // ── Core Request Method ────────────────────────────────────────────
-
-  private async request<T>(
-    method: string,
-    path: string,
-    body?: Record<string, unknown>,
-    retries = 0,
-  ): Promise<T> {
-    const fullUrl = `${this.host}${path}`;
-
-    // Rate limit: wait for a token
-    await this.waitForToken(path);
-
-    // Build headers
-    const bodyStr = body ? JSON.stringify(body) : undefined;
-    const { timestamp, signature } = this.sign(method, path, bodyStr);
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "X-BAPI-API-KEY": this.config.apiKey,
-      "X-BAPI-TIMESTAMP": String(timestamp),
-      "X-BAPI-SIGN": signature,
-      "X-BAPI-RECV-WINDOW": String(this.recvWindowMs),
-    };
-
     try {
-      const response = await fetch(fullUrl, {
-        method,
-        headers,
-        body: bodyStr,
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-
-      // Sync rate limits from response headers
-      this.syncFromHeaders(path, response.headers);
-
-      // Handle HTTP-level errors
-      if (response.status === 403) {
-        if (retries < 2) {
-          // IP banned, wait 30s before retrying
-          await new Promise(r => setTimeout(r, 30000));
-          return this.request<T>(method, path, body, retries + 1);
-        }
-        throw new BybitConnectionError(`IP banned (HTTP 403). Waited 30s. Reduce request rate.`);
-      }
-
-      if (response.status === 429) {
-        // System-level frequency protection
-        await new Promise(r => setTimeout(r, 5000));
-        return this.request<T>(method, path, body, retries + 1);
-      }
-
-      const data: BybitApiResponse<T> = await response.json();
-
-      // Handle API-level errors
-      if (data.retCode !== 0) {
-        if (data.retCode === 10006) {
-          // Rate limited — backoff heavily
-          await new Promise(r => setTimeout(r, 2000));
-          return this.request<T>(method, path, body, retries + 1);
-        }
-
-        // Re-sync time on timestamp errors and retry
-        if (data.retCode === 10001 && data.retMsg.includes("req_timestamp")) {
-          const currentTs = this.getTimestamp();
-          console.log(`[bybit] Timestamp invalid (${currentTs}), re-syncing time...`);
-          await this.syncTime();
-          const newTs = this.getTimestamp();
-          console.log(`[bybit] Time re-synced. New timestamp diff: ${this.serverTimeDiff}ms`);
-          if (retries < 2) {
-            return this.request<T>(method, path, body, retries + 1);
-          }
-        }
-
-        const error = classifyError(data.retCode, data.retMsg);
-        throw error;
-      }
-
-      return data.result;
+      const res = await this.client.market.getServerTime();
+      const end = Date.now();
+      const rtt = end - start;
+      const serverTime = Number(res.result.timeSecond) * 1000;
+      this.serverTimeDiff = serverTime - (start + rtt / 2);
+      this.lastTimeSync = Date.now();
+      console.log(`[bybit] Time synced: diff=${this.serverTimeDiff}ms, rtt=${rtt}ms`);
+      return this.serverTimeDiff;
     } catch (err) {
-      if (err instanceof BybitApiError) throw err;
-      if (err instanceof BybitConnectionError) throw err;
-
-      // Retry on network errors
-      if (retries < 2) {
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, retries)));
-        return this.request<T>(method, path, body, retries + 1);
-      }
-
-      throw new BybitConnectionError(
-        `Request failed after ${retries + 1} retries: ${(err as Error).message}`,
-      );
+      throw new BybitConnectionError(`Time sync failed: ${(err as Error).message}`);
     }
   }
 
-  private async get<T>(path: string): Promise<T> {
-    return this.request<T>("GET", path);
+  async getTickers(category: string, symbol?: string): Promise<{ category: string; list: unknown[] }> {
+    const res = await this.client.market.getTickers({ category, symbol });
+    return res.result as any;
   }
 
-  private async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    return this.request<T>("POST", path, body);
-  }
-
-  // ── Public Endpoints (no auth beyond key) ──────────────────────────
-
-  /** Get the server time and sync local clock. */
-  async getServerTime(): Promise<number> {
-    const data = await this.get<{ timeSecond: string; timeNano: string }>("/v5/market/time");
-    return Number.parseInt(data.timeSecond) * 1000;
-  }
-
-  /** Get tickers for one or all symbols. */
-  async getTickers(category: string, symbol?: string): Promise<{ category: string; list: BybitTicker[] }> {
-    let path = `/v5/market/tickers?category=${category}`;
-    if (symbol) path += `&symbol=${symbol}`;
-    return this.get<{ category: string; list: BybitTicker[] }>(path);
-  }
-
-  /** Get kline/candlestick data. */
   async getKline(
-    category: string,
-    symbol: string,
-    interval: string,
-    start?: number,
-    end?: number,
-    limit?: number,
+    category: string, symbol: string, interval: string,
+    start?: number, end?: number, limit?: number,
   ): Promise<{ category: string; symbol: string; list: string[][] }> {
-    let path = `/v5/market/kline?category=${category}&symbol=${symbol}&interval=${interval}`;
-    if (start) path += `&start=${start}`;
-    if (end) path += `&end=${end}`;
-    if (limit) path += `&limit=${limit}`;
-    return this.get<{ category: string; symbol: string; list: string[][] }>(path);
+    const res = await this.client.market.getMarketKline({
+      category, symbol, interval,
+      start: start ?? 0,
+      end: end ?? 0,
+      limit: limit ?? 200,
+    });
+    return res.result as any;
   }
 
-  /** Get orderbook snapshot. */
-  async getOrderbook(category: string, symbol: string, level = 25): Promise<BybitOrderbook> {
-    const data = await this.get<{
-      category: string; symbol: string; bids: [string, string][]; asks: [string, string][];
-    }>(`/v5/market/orderbook?category=${category}&symbol=${symbol}&limit=${level}`);
-    return { bids: data.bids, asks: data.asks, timestamp: Date.now() };
+  async getOrderbook(category: string, symbol: string, level = 25): Promise<{ bids: [string, string][]; asks: [string, string][]; timestamp: number }> {
+    const res = await this.client.market.getOrderbook({ category, symbol, limit: level });
+    const data = res.result as any;
+    return { bids: data.b, asks: data.a, timestamp: res.time };
   }
 
-  /** Get recent public trades. */
-  async getRecentTrades(
-    category: string, symbol: string, limit?: number,
-  ): Promise<{ category: string; list: unknown[] }> {
-    let path = `/v5/market/recent-trade?category=${category}&symbol=${symbol}`;
-    if (limit) path += `&limit=${limit}`;
-    return this.get<{ category: string; list: unknown[] }>(path);
-  }
-
-  /** Get instruments info (including lot size filters). */
   async getInstruments(category: string, symbol?: string): Promise<{ category: string; list: unknown[] }> {
-    let path = `/v5/market/instruments?category=${category}`;
-    if (symbol) path += `&symbol=${symbol}`;
-    return this.get<{ category: string; list: unknown[] }>(path);
+    const res = await this.client.market.getInstrumentsInfo({ category, symbol });
+    return res.result as any;
   }
 
-  // ── Authenticated Trading Endpoints ────────────────────────────────
-
-  /** Place an order. */
-  async placeOrder(order: BybitOrderRequest): Promise<BybitOrderResponse> {
-    return this.post<BybitOrderResponse>("/v5/order/create", order as unknown as Record<string, unknown>);
+  async getRecentTrades(category: string, symbol: string, limit?: number): Promise<{ category: string; list: unknown[] }> {
+    const res = await this.client.market.getRecentPublicTrades({ category, symbol, limit });
+    return res.result as any;
   }
 
-  /** Cancel an order. */
+  async placeOrder(order: {
+    category: string; symbol: string; side: string; orderType: string;
+    qty: string; price?: string; timeInForce?: string;
+    reduceOnly?: boolean; orderLinkId?: string;
+    takeProfit?: string; stopLoss?: string;
+  }): Promise<{
+    orderId: string; orderLinkId: string; orderStatus: string;
+    symbol: string; side: string; price: string; qty: string;
+    leavesQty: string; cumExecQty: string; cumExecFee: string;
+    cumExecValue?: string; avgPrice?: string; createdTime: string;
+  }> {
+    try {
+      const res = await this.client.trade.createOrder(order);
+      return res.result as any;
+    } catch (err) {
+      if (err instanceof SdkAuthError) {
+        throw classifyError(err.retCode ?? 10003, err.message);
+      }
+      if (err instanceof SdkRateLimitError) {
+        throw classifyError(err.retCode ?? 10006, err.message);
+      }
+      if (err instanceof SdkApiError) {
+        throw classifyError(err.retCode ?? 10001, err.message);
+      }
+      throw err;
+    }
+  }
+
   async cancelOrder(category: string, symbol: string, orderId: string): Promise<void> {
-    await this.post("/v5/order/cancel", { category, symbol, orderId });
+    await this.client.trade.cancelOrder({ category, symbol, orderId });
   }
 
-  /** Get open orders. */
-  async getOpenOrders(category: string, symbol?: string): Promise<{ list: BybitOrderResponse[] }> {
-    let path = `/v5/order/realtime?category=${category}`;
-    if (symbol) path += `&symbol=${symbol}`;
-    return this.get<{ list: BybitOrderResponse[] }>(path);
+  async getOpenOrders(category: string, symbol?: string): Promise<{ list: unknown[] }> {
+    const res = await this.client.trade.getOpenOrders({ category, symbol });
+    return res.result as any;
   }
 
-  /** Get order history (up to 2 years). */
-  async getOrderHistory(
-    category: string, symbol?: string, limit?: number,
-  ): Promise<{ list: BybitOrderResponse[] }> {
-    let path = `/v5/order/history?category=${category}`;
-    if (symbol) path += `&symbol=${symbol}`;
-    if (limit) path += `&limit=${limit}`;
-    return this.get<{ list: BybitOrderResponse[] }>(path);
+  async getOrderHistory(category: string, symbol?: string, limit?: number): Promise<{ list: unknown[] }> {
+    const res = await this.client.trade.getOrderHistory({ category, symbol, limit });
+    return res.result as any;
   }
 
-  /** Get positions. */
-  async getPositions(
-    category: string, symbol?: string,
-  ): Promise<{ list: BybitPosition[] }> {
-    let path = `/v5/position/list?category=${category}`;
-    if (symbol) path += `&symbol=${symbol}`;
-    return this.get<{ list: BybitPosition[] }>(path);
+  async getPositions(category: string, symbol?: string): Promise<{ list: unknown[] }> {
+    const res = await this.client.position.getPositionInfo({ category, symbol });
+    return res.result as any;
   }
 
-  /** Get wallet balance. */
-  async getWalletBalance(coin?: string): Promise<{ list: BybitWalletBalance[] }> {
-    let path = "/v5/account/wallet-balance?accountType=UNIFIED";
-    if (coin) path += `&coin=${coin}`;
-    return this.get<{ list: BybitWalletBalance[] }>(path);
+  async getWalletBalance(coin?: string): Promise<{ list: unknown[] }> {
+    const res = await this.client.account.getWalletBalance({ accountType: "UNIFIED", coin });
+    return res.result as any;
   }
 }

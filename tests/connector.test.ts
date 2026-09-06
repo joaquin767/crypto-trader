@@ -412,7 +412,7 @@ test("getPositions fetches and converts positions", async () => {
   try {
     const positions = await connector.getPositions();
     assert.equal(positions.length, 1);
-    assert.equal(positions[0].symbol, "BTC/USDT");
+    assert.equal(positions[0]!.symbol, "BTC/USDT");
   } finally {
     connector.rest.getPositions = originalGetPositions;
   }
@@ -428,8 +428,8 @@ test("getWalletBalance fetches and formats balances", async () => {
   try {
     const balances = await connector.getWalletBalance();
     assert.equal(balances.length, 1);
-    assert.equal(balances[0].coin, "USDT");
-    assert.equal(balances[0].totalUsd, 1000);
+    assert.equal(balances[0]!.coin, "USDT");
+    assert.equal(balances[0]!.totalUsd, 1000);
   } finally {
     connector.rest.getWalletBalance = originalGetWallet;
   }

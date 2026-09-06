@@ -3,7 +3,7 @@
 
 import { RestClient } from "./rest.ts";
 import { WsClient } from "./ws.ts";
-import { BybitConnectionError, type BybitConfig, type BybitApiError } from "./types.ts";
+import { BybitConnectionError, type BybitConfig, type BybitApiError, type BybitOrderResponse, type BybitPosition, type BybitWalletBalance } from "./types.ts";
 import type { MarketSnapshot } from "../market.ts";
 import type { TradeResult } from "../executor.ts";
 import type { TradeSignal } from "../strategy/signals.ts";
@@ -208,19 +208,19 @@ export class BybitConnector {
       reduceOnly: false,
     });
 
-    return orderResponseToTradeResult(order);
+    return orderResponseToTradeResult(order as unknown as BybitOrderResponse);
   }
 
   /** Get current positions from Bybit. */
   async getPositions(): Promise<Position[]> {
     const result = await this.rest.getPositions("linear");
-    return result.list.map(bybitPositionToPosition);
+    return (result.list as BybitPosition[]).map(bybitPositionToPosition);
   }
 
   /** Get wallet balance (for display only — NEVER used as operating capital). */
   async getWalletBalance(): Promise<{ totalUsd: number; coin: string; available: string }[]> {
     const result = await this.rest.getWalletBalance();
-    return result.list.map(w => ({
+    return (result.list as BybitWalletBalance[]).map(w => ({
       totalUsd: Number.parseFloat(w.usdValue || "0"),
       coin: w.coin,
       available: w.availableBalance,

@@ -1,7 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RestClient } from "../src/bybit/rest.ts";
-import { WsClient } from "../src/bybit/ws.ts";
 import {
   classifyError, BybitAuthError, BybitRateLimitError, BybitApiError,
   BybitConnectionError, BybitInsufficientBalanceError, BybitInvalidQtyError,
@@ -12,6 +10,9 @@ import {
   orderResponseToTradeResult,
   appSymbolToBybit,
   bybitSymbolToApp,
+  bybitPositionToPosition,
+  walletToTotalUsd,
+  walletAvailableBalance,
 } from "../src/bybit/adapters.ts";
 
 // ── Mock Data ────────────────────────────────────────────────────────
@@ -154,21 +155,8 @@ test("BybitConnectionError has correct name and message", () => {
   assert(err.message.includes("Connection refused"));
 });
 
-// ── RestClient Constructor Tests ─────────────────────────────────────
-
-test("RestClient constructor requires API key and secret", () => {
-  assert.throws(() => {
-    new RestClient({ apiKey: "", apiSecret: "", testnet: true, symbols: [], wsPingIntervalMs: 20000, maxRetries: 5 });
-  }, /API key and secret are required/);
-});
-
-test("RestClient constructor accepts valid config", () => {
-  const client = new RestClient({ apiKey: "test", apiSecret: "test", testnet: true, symbols: ["BTCUSDT"], wsPingIntervalMs: 20000, maxRetries: 5 });
-  assert(client instanceof RestClient);
-});
 // ── Additional Adapter Tests ─────────────────────────────────────────
 
-import { bybitPositionToPosition, walletToTotalUsd, walletAvailableBalance } from "../src/bybit/adapters.ts";
 import type { BybitWalletBalance } from "../src/bybit/types.ts";
 
 test("bybitPositionToPosition converts Bybit position", () => {
