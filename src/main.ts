@@ -121,8 +121,22 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         let result: TradeResult;
 
         if (useBybit && bybit?.state.connected) {
+          // Determine the correct quantity to buy or sell
+          let qty = 0;
+          if (tradeSignal.type === "buy") {
+            qty = positionUsd / snapshot.price;
+          } else if (tradeSignal.type === "sell") {
+            const existing = portfolio.positions.find(p => p.symbol === tradeSignal.symbol);
+            qty = existing ? existing.quantity : 0.01; // fallback
+          }
+
+          if (qty <= 0) {
+            statusMessage = `${mode.toUpperCase()} | zero quantity for ${tradeSignal.symbol}`;
+            continue;
+          }
+
           // Execute via Bybit REST API
-          result = await bybit.placeOrder(tradeSignal);
+          result = await bybit.placeOrder(tradeSignal, qty);
         } else {
           // Execute via simulated paper trading
           result = await execute(tradeSignal, config);

@@ -122,18 +122,29 @@ export class BybitConnector {
     this.notifyConnection();
   }
 
-  /** Place an order via REST API. */
-  async placeOrder(signal: TradeSignal): Promise<TradeResult> {
+  /** Place an order via REST API with exact quantity. */
+  async placeOrder(signal: TradeSignal, qty: number): Promise<TradeResult> {
     // Convert app signal to Bybit order
     const symbol = signal.symbol.replace("/", "");
     const side = signal.type === "buy" ? "Buy" : "Sell";
+
+    // Format quantity based on size (Bybit has strict precision per symbol)
+    // E.g., BTC minQty is 0.001, ETH is 0.01, SOL is 0.1
+    let formattedQty = "";
+    if (qty < 0.1) {
+      formattedQty = qty.toFixed(4);
+    } else if (qty < 1) {
+      formattedQty = qty.toFixed(3);
+    } else {
+      formattedQty = qty.toFixed(2);
+    }
 
     const order = await this.rest.placeOrder({
       category: "linear",
       symbol,
       side,
       orderType: "Market",
-      qty: "1", // Will be set by the caller based on position sizing
+      qty: formattedQty,
       reduceOnly: false,
     });
 

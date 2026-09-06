@@ -78,15 +78,28 @@ export class RestClient {
 
   /**
    * Generate HMAC-SHA256 signature for a request.
-   * Format: HMAC-SHA256(api_secret, api_key + timestamp + recv_window + body_json)
+   * Format:
+   * - GET: HMAC-SHA256(api_secret, timestamp + api_key + recv_window + query_string)
+   * - POST: HMAC-SHA256(api_secret, timestamp + api_key + recv_window + body_json)
    */
   private sign(method: string, path: string, body?: string): { timestamp: number; signature: string } {
     const timestamp = this.getTimestamp();
     const recvWindow = this.recvWindowMs;
-    const payload = `${this.config.apiKey}${timestamp}${recvWindow}${body ?? ""}`;
+
+    // Bybit V5 signature uses query parameters for GET and body for POST/PUT
+    let paramStr = "";
+    if (method === "GET") {
+      const parts = path.split("?");
+      paramStr = parts[1] || "";
+    } else {
+      paramStr = body ?? "";
+    }
+
+    const payload = `${timestamp}${this.config.apiKey}${recvWindow}${paramStr}`;
     const signature = createHmac("sha256", this.config.apiSecret)
       .update(payload)
       .digest("hex");
+
     return { timestamp, signature };
   }
 
