@@ -36,7 +36,7 @@ npm run start
 | Document | What it covers |
 |----------|---------------|
 | **[SETUP.md](docs/SETUP.md)** | Installation, configuration, running the app |
-| **[USER_GUIDE.md](docs/USER_GUIDE.md)** | Dashboard walkthrough, interpreting signals, monitoring risk |
+| **[USER_GUIDE.md](docs/USER_GUIDE.md)** | Dashboard walkthrough, interpreting signals, monitoring risk, **FAQ** |
 | **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** | The three pillars: Trading Engine, Learning System, Web Dashboard |
 | **[STRATEGY.md](docs/STRATEGY.md)** | Full indicator reference, scoring rules, learning optimizer |
 | **[RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md)** | Cash guardrail, Kelly Criterion, risk params, emergency procedures |
