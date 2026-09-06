@@ -65,14 +65,27 @@ export class RestClient {
     const data: BybitApiResponse<{ timeSecond: string; timeNano: string }> = await res.json();
     const end = Date.now();
     const rtt = end - start;
-    const serverTime = Number.parseInt(data.result.timeSecond) * 1000;
+
+    // Parse the server time. Bybit returns timeSecond in seconds (10 digits).
+    // But to be safe, detect if it's already in milliseconds (13 digits).
+    const rawTime = Number.parseInt(data.result.timeSecond);
+    const serverTime = rawTime > 1e12 ? rawTime : rawTime * 1000;
+
     this.serverTimeDiff = serverTime - (start + rtt / 2);
     this.lastTimeSync = Date.now();
+
+    // Log the time sync result for debugging
+    console.log(`[bybit] Time synced: diff=${this.serverTimeDiff}ms, rtt=${rtt}ms`);
+
     return this.serverTimeDiff;
   }
 
   /** Get the current timestamp adjusted for server time difference. */
   private getTimestamp(): number {
+    // Fallback to local time if server time diff is invalid
+    if (this.serverTimeDiff === 0 || Number.isNaN(this.serverTimeDiff) || !Number.isFinite(this.serverTimeDiff)) {
+      return Date.now();
+    }
     return Date.now() + this.serverTimeDiff;
   }
 
@@ -222,6 +235,18 @@ export class RestClient {
           // Rate limited — backoff heavily
           await new Promise(r => setTimeout(r, 2000));
           return this.request<T>(method, path, body, retries + 1);
+        }
+
+        // Re-sync time on timestamp errors and retry
+        if (data.retCode === 10001 && data.retMsg.includes("req_timestamp")) {
+          const currentTs = this.getTimestamp();
+          console.log(`[bybit] Timestamp invalid (${currentTs}), re-syncing time...`);
+          await this.syncTime();
+          const newTs = this.getTimestamp();
+          console.log(`[bybit] Time re-synced. New timestamp diff: ${this.serverTimeDiff}ms`);
+          if (retries < 2) {
+            return this.request<T>(method, path, body, retries + 1);
+          }
         }
 
         const error = classifyError(data.retCode, data.retMsg);
