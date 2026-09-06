@@ -7,7 +7,7 @@ export interface AppState {
   portfolio: Portfolio;
   lastSignal: TradeSignal | null;
   statusMessage: string;
-  mode: "paper" | "live";
+  mode: "paper" | "live" | "testnet";
 }
 
 /**

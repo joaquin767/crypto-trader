@@ -6,6 +6,7 @@ An **expert-level** crypto trading assistant with multi-indicator strategy analy
 Built by the **blueprint app factory** (spec: `blueprint/specs/crypto-trader.md`).
 
 ## Features
+- **Live trading** — real-time Bybit WebSocket tickers (50-100ms) + REST order execution via the Bybit V5 API
 - **Expert trading engine** — evaluates RSI, MACD, Bollinger Bands, SMA, ATR, momentum, and volume before every trade
 - **Kelly Criterion position sizing** — mathematical position sizing that scales with confidence
 - **Learning from mistakes** — tracks every trade, analyzes performance (win rate, Sharpe, drawdown), and automatically adjusts strategy parameters

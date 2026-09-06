@@ -9,11 +9,15 @@ import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, typ
 import { analyze as analyzePerformance, type PerformanceReport } from "./learning/analyzer.ts";
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
+import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
+import { appSymbolToBybit } from "./bybit/adapters.ts";
+import type { BybitConfig } from "./bybit/types.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
 export { analyze, type TradeSignal, getHistory as getSignalHistory } from "./strategy/signals.ts";
 export { type TradeRecord, getHistory as getJournalHistory } from "./learning/journal.ts";
+export { BybitConnector };
 
 /** CLI argument parser. */
 function parseArgs(argv: string[]): { configPath?: string; live: boolean; port: number } {
@@ -29,15 +33,15 @@ function parseArgs(argv: string[]): { configPath?: string; live: boolean; port: 
 /**
  * Bootstrap and run the expert crypto-trader with web dashboard.
  *
- * 1. Loads config
- * 2. Starts market watcher
- * 3. For each snapshot: analyzes indicators → generates signal → executes → journals → broadcasts
- * 4. Periodically runs learning: analyze performance → optimize strategy params → broadcast insights
- * 5. Web dashboard at http://localhost:<port>
+ * Architecture:
+ * - WebSocket feeds real-time tickers → dashboard display (50-100ms updates)
+ * - A timer loop (every refreshIntervalMs) evaluates signals and executes trades
+ * - REST API handles order placement (reliable ack)
  */
 export async function start(config: Config, signal?: AbortSignal): Promise<void> {
-  const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live";
+  const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live" | "testnet";
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
+  const useBybit = config.exchange.toLowerCase() === "bybit";
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
   let lastSignal: TradeSignal | null = null;
@@ -46,12 +50,12 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   let performanceReport: PerformanceReport | null = null;
   const learningInsights: LearningInsight[] = [];
 
+  // Shared market data (updated by WebSocket or simulated watch)
+  let latestMarketData = new Map<string, MarketSnapshot>();
+
   // Learning timer
   let lastLearningRound = Date.now();
-  const learningInterval = 30000; // every 30s
-
-  // Track the last price per symbol for exit recording
-  const lastPrices = new Map<string, number>();
+  const learningInterval = 30000;
 
   // Dashboard state
   const dashboardState: DashboardState = {
@@ -77,6 +81,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   const server = await createServer(dashboardState, port);
   console.log(`[crypto-trader] Dashboard: http://localhost:${port}`);
   console.log(`[crypto-trader] Mode: ${mode.toUpperCase()}`);
+  if (useBybit) console.log("[crypto-trader] Exchange: BYBIT (WebSocket tickers + REST orders)");
 
   // Initial render
   const appState: AppState = {
@@ -90,25 +95,22 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
   const initialCash = portfolio.cashUsd;
 
-  for await (const snapshots of watch(config.symbols, config.refreshIntervalMs, signal)) {
-    dashboardState.marketData = snapshots;
-    appState.marketData = snapshots;
+  // ── Shared trading cycle ───────────────────────────────────────────
+  // This function runs every refreshIntervalMs to evaluate signals and trade.
+  // It uses the latest market data regardless of source (Bybit or simulated).
+  async function runTradingCycle(): Promise<void> {
+    if (latestMarketData.size === 0) return;
 
-    for (const [symbol, snapshot] of snapshots) {
-      lastPrices.set(symbol, snapshot.price);
-
-      // Check daily trade limit
+    for (const [symbol, snapshot] of latestMarketData) {
       if (config.maxDailyTrades > 0 && portfolio.dailyTradeCount >= config.maxDailyTrades) {
         statusMessage = `daily trade limit reached (${config.maxDailyTrades})`;
         continue;
       }
 
-      // Expert analysis with multiple indicators
       const tradeSignal = analyze(snapshot, portfolio, config);
       lastSignal = tradeSignal;
 
       if (tradeSignal.type === "buy" || tradeSignal.type === "sell") {
-        // Kelly Criterion position sizing
         const positionUsd = calcPositionSize(tradeSignal.confidence, portfolio, config);
 
         if (positionUsd <= 0) {
@@ -116,25 +118,25 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           continue;
         }
 
-        // Execute
-        const result: TradeResult = await execute(tradeSignal, config);
+        let result: TradeResult;
+
+        if (useBybit && bybit?.state.connected) {
+          // Execute via Bybit REST API
+          result = await bybit.placeOrder(tradeSignal);
+        } else {
+          // Execute via simulated paper trading
+          result = await execute(tradeSignal, config);
+        }
+
         portfolio = update(portfolio, result);
         statusMessage = `${mode.toUpperCase()} | ${result.side} ${result.symbol} @ $${result.price.toFixed(2)}`;
 
-        // Journal the trade
-        if (result.side === "buy") {
-          recordEntry(tradeSignal, result);
-        }
-
-        // If selling, close the journal entry
+        if (result.side === "buy") recordEntry(tradeSignal, result);
         if (result.side === "sell") {
           const closed = recordExit(symbol, result.price, result.timestamp, result.fee);
-          if (closed) {
-            statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
-          }
+          if (closed) statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
         }
 
-        // Broadcast trade event
         broadcast("trade", {
           tradeHistory: getHistory(),
           performanceReport: null,
@@ -145,51 +147,11 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         statusMessage = `${mode.toUpperCase()} | ${tradeSignal.reason || "no signal"}`;
       }
     }
+  }
 
-    // Periodic learning cycle
-    const now = Date.now();
-    if (now - lastLearningRound >= learningInterval) {
-      lastLearningRound = now;
-
-      const closedTrades = getClosedTrades();
-      if (closedTrades.length >= 3) {
-        performanceReport = analyzePerformance(initialCash);
-
-        // Calculate metrics for optimizer
-        const recentPnls = closedTrades.slice(-10).map(t => t.pnl ?? 0);
-
-        strategyParams = optimize(
-          strategyParams,
-          performanceReport.winRate,
-          closedTrades.length,
-          performanceReport.avgWin,
-          Math.abs(performanceReport.avgLoss),
-          performanceReport.maxDrawdown,
-          recentPnls,
-        );
-
-        // Collect new insights
-        const newInsights = getInsights().filter(
-          i => !learningInsights.find(e => e.round === i.round)
-        );
-        learningInsights.push(...newInsights);
-
-        console.log(`[learning] Win rate: ${(performanceReport.winRate * 100).toFixed(1)}% | Trades: ${closedTrades.length}`);
-        if (newInsights.length > 0) {
-          console.log(`[learning] Adjustments: ${newInsights.map(i => i.reason).join("; ")}`);
-        }
-
-        // Broadcast learning event
-        broadcast("learning", {
-          insights: newInsights,
-          params: strategyParams,
-          report: performanceReport,
-        });
-      }
-    }
-
-    // Update dashboard state
-    portfolio = portfolio; // already updated above
+  // ── Dashboard + UI update ──────────────────────────────────────────
+  function updateDashboardAndUI(): void {
+    dashboardState.marketData = latestMarketData;
     dashboardState.portfolio = portfolio;
     dashboardState.lastSignal = lastSignal;
     dashboardState.statusMessage = statusMessage;
@@ -200,22 +162,146 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     dashboardState.deploymentRatio = deploymentRatio(portfolio);
     dashboardState.operatingCapitalUsd = portfolio.maxCapitalUsd;
 
-    // Update terminal render
+    appState.marketData = latestMarketData;
     appState.portfolio = portfolio;
     appState.lastSignal = lastSignal;
     appState.statusMessage = statusMessage;
     render(appState);
 
-    // Broadcast market update
     broadcast("market", {
-      marketData: Object.fromEntries(snapshots),
+      marketData: Object.fromEntries(latestMarketData),
       portfolio,
       statusMessage,
       mode,
     });
   }
 
+  // ── Periodic learning cycle ────────────────────────────────────────
+  async function runLearningCycle(): Promise<void> {
+    const closedTrades = getClosedTrades();
+    if (closedTrades.length < 3) return;
+
+    performanceReport = analyzePerformance(initialCash);
+
+    strategyParams = optimize(
+      strategyParams,
+      performanceReport.winRate,
+      closedTrades.length,
+      performanceReport.avgWin,
+      Math.abs(performanceReport.avgLoss),
+      performanceReport.maxDrawdown,
+      closedTrades.slice(-10).map(t => t.pnl ?? 0),
+    );
+
+    const newInsights = getInsights().filter(
+      i => !learningInsights.find(e => e.round === i.round)
+    );
+    learningInsights.push(...newInsights);
+
+    console.log(`[learning] Win rate: ${(performanceReport.winRate * 100).toFixed(1)}% | Trades: ${closedTrades.length}`);
+    if (newInsights.length > 0) {
+      console.log(`[learning] Adjustments: ${newInsights.map(i => i.reason).join("; ")}`);
+    }
+
+    broadcast("learning", {
+      insights: newInsights,
+      params: strategyParams,
+      report: performanceReport,
+    });
+  }
+
+  // ── Main timer loop ────────────────────────────────────────────────
+  // Runs trading cycle + learning + UI update at refreshIntervalMs
+  let bybit: BybitConnector | undefined;
+
+  const timer = setInterval(async () => {
+    try {
+      await runTradingCycle();
+      const now = Date.now();
+      if (now - lastLearningRound >= learningInterval) {
+        lastLearningRound = now;
+        await runLearningCycle();
+      }
+      updateDashboardAndUI();
+    } catch (err) {
+      console.error("[cycle] Error in trading cycle:", err);
+    }
+  }, config.refreshIntervalMs);
+
+  // ── BYBIT BRANCH ───────────────────────────────────────────────────
+  if (useBybit) {
+    const bybitConfig: BybitConfig = {
+      apiKey: config.apiKey,
+      apiSecret: config.apiSecret,
+      testnet: mode !== "live",
+      symbols: config.symbols.map(appSymbolToBybit),
+      wsPingIntervalMs: 20000,
+      maxRetries: 5,
+    };
+
+    bybit = new BybitConnector(bybitConfig);
+
+    // Connection state → dashboard
+    bybit.onConnection((state: BybitConnectorState) => {
+      dashboardState.bybitConnected = state.connected;
+      dashboardState.bybitLatencyMs = state.latencyMs;
+      dashboardState.bybitMode = state.mode;
+      dashboardState.bybitError = state.error;
+    });
+
+    // Real-time tickers → latestMarketData (used by the timer loop)
+    bybit.onTicker((snapshots: Map<string, MarketSnapshot>) => {
+      latestMarketData = snapshots;
+
+      // Push to dashboard immediately (tickers stream at 100ms)
+      dashboardState.marketData = snapshots;
+      broadcast("market", {
+        marketData: Object.fromEntries(snapshots),
+        portfolio,
+        statusMessage,
+        mode,
+      });
+    });
+
+    // Connect Bybit
+    try {
+      statusMessage = "connecting to Bybit...";
+      render(appState);
+      await bybit.connect();
+      statusMessage = `Bybit ${bybit.state.mode.toUpperCase()} — ${config.symbols.length} symbols`;
+      console.log(`[bybit] Connected. Mode: ${bybit.state.mode}`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      statusMessage = `Bybit connection failed: ${errorMsg}. Paper mode.`;
+      console.error(`[bybit] ${statusMessage}`);
+      dashboardState.bybitError = errorMsg;
+      dashboardState.bybitConnected = false;
+    }
+  } else {
+    // ── PAPER/SIMULATED BRANCH ───────────────────────────────────────
+    const simSignal = new AbortController();
+    (async () => {
+      for await (const snapshots of watch(config.symbols, config.refreshIntervalMs, simSignal.signal)) {
+        latestMarketData = snapshots;
+      }
+    })();
+
+    // Stop simulator on main abort
+    if (signal) {
+      signal.addEventListener("abort", () => simSignal.abort(), { once: true });
+    }
+  }
+
+  // ── Wait for abort ─────────────────────────────────────────────────
+  await new Promise<void>((resolve) => {
+    if (signal) {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }
+  });
+
   // Cleanup
+  clearInterval(timer);
+  bybit?.disconnect();
   await server.close();
 }
 
