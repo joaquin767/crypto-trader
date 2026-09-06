@@ -174,9 +174,12 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           if (closed) statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
         }
 
+        // Update performance report on every trade so the equity curve updates
+        performanceReport = analyzePerformance(initialCash);
+
         broadcast("trade", {
           tradeHistory: getHistory(),
-          performanceReport: null,
+          performanceReport,
           learningInsights: [],
           strategyParams,
         });
@@ -210,6 +213,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       portfolio,
       statusMessage,
       mode,
+      performanceReport,
     });
   }
 
@@ -300,6 +304,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         portfolio,
         statusMessage,
         mode,
+        performanceReport,
       });
     });
 
