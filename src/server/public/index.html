@@ -45,9 +45,11 @@ pre { font-size: 12px; color: #8b949e; }
 </head>
 <body>
 
-<div style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
+<div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
   <h1 style="margin-bottom:0;">📊 Crypto Trader</h1>
   <span class="mode-tag" id="mode-tag">PAPER</span>
+  <span class="mode-tag" id="bybit-status" style="background:rgba(248,81,73,0.15);color:#f85149;">⚪ Bybit Offline</span>
+  <span class="mode-tag" id="bybit-latency" style="font-size:11px;display:none;">0ms</span>
 </div>
 
 <!-- Portfolio Overview -->
@@ -56,6 +58,11 @@ pre { font-size: 12px; color: #8b949e; }
     <h3>Portfolio Value</h3>
     <div class="value-lg" id="portfolio-value">$10,000.00</div>
     <div class="label" id="portfolio-pnl-label">Waiting for trades...</div>
+  </div>
+  <div class="card" style="border-color:#3fb950;">
+    <h3>🔒 Operating Capital</h3>
+    <div class="value-lg green" id="operating-capital">$1,000.00</div>
+    <div class="label" id="deployment-ratio">0% deployed</div>
   </div>
   <div class="card">
     <h3>Cash</h3>
@@ -173,6 +180,42 @@ es.onerror = () => {
 
 function updateDashboard(data) {
   if (data.mode) document.getElementById('mode-tag').textContent = data.mode.toUpperCase();
+
+  // 🔌 Bybit connection status
+  const statusEl = document.getElementById('bybit-status');
+  const latencyEl = document.getElementById('bybit-latency');
+  if (data.bybitConnected !== undefined) {
+    if (data.bybitConnected) {
+      const modeLabel = data.bybitMode === 'testnet' ? 'TESTNET' : 'LIVE';
+      statusEl.textContent = '🟢 Bybit ' + modeLabel;
+      statusEl.style.color = '#3fb950';
+      statusEl.style.background = 'rgba(63,185,80,0.15)';
+      if (data.bybitLatencyMs) {
+        latencyEl.textContent = data.bybitLatencyMs + 'ms';
+        latencyEl.style.display = 'inline-block';
+      }
+    } else {
+      statusEl.textContent = data.bybitError ? '🔴 Bybit Error' : '⚪ Bybit Offline';
+      statusEl.style.color = '#f85149';
+      statusEl.style.background = 'rgba(248,81,73,0.15)';
+      latencyEl.style.display = 'none';
+    }
+  }
+
+  // 🔒 Operating capital
+  if (data.operatingCapitalUsd !== undefined) {
+    document.getElementById('operating-capital').textContent = '$' + Number(data.operatingCapitalUsd).toLocaleString(undefined, {minimumFractionDigits:2});
+  }
+  if (data.deploymentRatio !== undefined) {
+    document.getElementById('deployment-ratio').textContent = (data.deploymentRatio * 100).toFixed(0) + '% deployed';
+  }
+  // 💰 Wallet total (display only)
+  if (data.walletTotalUsd !== undefined) {
+    const cashEl = document.getElementById('cash-value');
+    cashEl.textContent = '$' + Number(data.walletTotalUsd).toLocaleString(undefined, {minimumFractionDigits:2});
+    cashEl.style.color = '#8b949e'; // dimmer — display only, not operating
+  }
+
   if (data.marketData) updateMarket(data.marketData);
   if (data.portfolio) updatePortfolio(data.portfolio);
   if (data.performanceReport) updatePerformance(data.performanceReport);

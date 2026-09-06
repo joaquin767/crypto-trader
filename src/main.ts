@@ -2,7 +2,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
 import { analyze, type TradeSignal, clearHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
-import { create, update, canAfford, type Portfolio } from "./portfolio.ts";
+import { create, update, canAfford, deploymentRatio, type Portfolio } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
 import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, type TradeRecord } from "./learning/journal.ts";
@@ -64,6 +64,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     performanceReport: null,
     learningInsights: [],
     strategyParams,
+    bybitConnected: false,
+    bybitLatencyMs: 0,
+    bybitMode: "paper",
+    bybitError: null,
+    operatingCapitalUsd: config.maxCapitalUsd,
+    walletTotalUsd: config.maxCapitalUsd,
+    deploymentRatio: 0,
   };
 
   // Start the web server
@@ -190,6 +197,8 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     dashboardState.performanceReport = performanceReport;
     dashboardState.learningInsights = learningInsights;
     dashboardState.strategyParams = strategyParams;
+    dashboardState.deploymentRatio = deploymentRatio(portfolio);
+    dashboardState.operatingCapitalUsd = portfolio.maxCapitalUsd;
 
     // Update terminal render
     appState.portfolio = portfolio;

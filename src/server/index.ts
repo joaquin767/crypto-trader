@@ -30,11 +30,18 @@ export interface DashboardState {
   portfolio: Portfolio;
   lastSignal: TradeSignal | null;
   statusMessage: string;
-  mode: "paper" | "live";
+  mode: "paper" | "live" | "testnet";
   tradeHistory: TradeRecord[];
   performanceReport: PerformanceReport | null;
   learningInsights: LearningInsight[];
   strategyParams: StrategyParams;
+  bybitConnected?: boolean;         // 🔌 Bybit WebSocket connection status
+  bybitLatencyMs?: number;          // ⏱ Bybit WebSocket latency
+  bybitMode?: "paper" | "testnet" | "live";  // 🏷 Current bybit mode
+  bybitError?: string | null;       // ❌ Last bybit error
+  operatingCapitalUsd: number;      // 🔒 User-defined operating capital
+  walletTotalUsd?: number;          // 💰 Total wallet balance (display only)
+  deploymentRatio: number;          // 📊 How much of operating capital is deployed (0-1)
 }
 
 /**
@@ -133,5 +140,12 @@ function serializeState(state: DashboardState) {
     performanceReport: state.performanceReport,
     learningInsights: state.learningInsights,
     strategyParams: state.strategyParams,
+    bybitConnected: state.bybitConnected,
+    bybitLatencyMs: state.bybitLatencyMs,
+    bybitMode: state.bybitMode,
+    bybitError: state.bybitError,
+    operatingCapitalUsd: state.operatingCapitalUsd,
+    walletTotalUsd: state.walletTotalUsd,
+    deploymentRatio: state.deploymentRatio,
   };
 }
