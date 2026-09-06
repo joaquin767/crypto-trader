@@ -141,6 +141,7 @@ pre { font-size: 12px; color: #8b949e; }
 
 <script>
 let equityChart = null;
+let lastEquityValues = '';
 const es = new EventSource('/events');
 
 es.addEventListener('message', (e) => {
@@ -265,11 +266,27 @@ function updatePerformance(r) {
     (r.sharpeRatio>=1?'green':r.sharpeRatio>=0?'yellow':'red');
   document.getElementById('max-drawdown').textContent = r.maxDrawdown.toFixed(1)+'%';
   document.getElementById('max-drawdown').className = 'value '+(r.maxDrawdown<10?'green':r.maxDrawdown<20?'yellow':'red');
-  if (r.portfolioValues && r.portfolioValues.length > 1) drawEquityChart(r.portfolioValues);
+  if (r.portfolioValues && r.portfolioValues.length > 1) {
+    const valuesKey = r.portfolioValues.join(',');
+    if (valuesKey !== lastEquityValues) {
+      lastEquityValues = valuesKey;
+      drawEquityChart(r.portfolioValues);
+    }
+  }
 }
 
 function drawEquityChart(values) {
-  if (equityChart) equityChart.destroy();
+  if (equityChart) {
+    // Update existing chart smoothly instead of destroying/recreating
+    equityChart.data.labels = values.map((_,i)=>i);
+    equityChart.data.datasets[0].data = values;
+    const startVal = values[0];
+    const endVal = values[values.length-1];
+    equityChart.data.datasets[0].borderColor = (endVal >= startVal) ? '#3fb950' : '#f85149';
+    equityChart.data.datasets[0].backgroundColor = (endVal >= startVal) ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)';
+    equityChart.update('none'); // 'none' skips animation for smooth updates
+    return;
+  }
   const startVal = values[0];
   const endVal = values[values.length-1];
   const up = endVal >= startVal;
