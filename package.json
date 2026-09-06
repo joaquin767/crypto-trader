@@ -12,11 +12,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "c8": "^12.0.0",
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "hono": "^4.0.0",
-    "@hono/node-server": "^1.0.0"
+    "@hono/node-server": "^1.0.0",
+    "hono": "^4.0.0"
   },
   "license": "MIT"
 }

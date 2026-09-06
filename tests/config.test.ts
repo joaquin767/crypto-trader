@@ -91,3 +91,92 @@ test("loadConfig throws ConfigError on empty symbols", () => {
     if (existsSync(path)) unlinkSync(path);
   }
 });
+test("loadConfig throws ConfigError when maxPositionSizeUsd exceeds maxCapitalUsd", () => {
+  const path = tmp("possize");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 200,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on negative maxDailyTrades", () => {
+  const path = tmp("negdaily");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: -1, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on non-positive maxCapitalUsd", () => {
+  const path = tmp("negcap");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 0,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on negative takeProfitPercent", () => {
+  const path = tmp("negtakeprofit");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: -1, refreshIntervalMs: 5000,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on missing exchange", () => {
+  const path = tmp("noexchange");
+  writeFileSync(path, JSON.stringify({
+    apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on missing apiKey", () => {
+  const path = tmp("noapikey");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
