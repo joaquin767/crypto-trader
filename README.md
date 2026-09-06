@@ -41,6 +41,7 @@ npm run start
 | **[STRATEGY.md](docs/STRATEGY.md)** | Full indicator reference, scoring rules, learning optimizer |
 | **[RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md)** | Cash guardrail, Kelly Criterion, risk params, emergency procedures |
 | **[BYBIT_INTEGRATION.md](docs/BYBIT_INTEGRATION.md)** | Bybit API setup, WebSocket+REST hybrid, rate limits, security |
+| **[SECURITY_PLAYBOOK.md](docs/SECURITY_PLAYBOOK.md)** | **Reusable security & best-practices** — agent guardrails, secrets management, git hygiene, incident response |
 
 ## Project Structure
 
