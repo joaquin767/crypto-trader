@@ -8,15 +8,29 @@ import type { BybitTicker, BybitOrderResponse, BybitPosition, BybitWalletBalance
 /**
  * Convert a Bybit ticker to the app's MarketSnapshot.
  *
- * The Bybit ticker fields are all strings (to preserve precision).
- * We parse them to numbers for the app's internal types.
+ * Handles Bybit Delta WebSocket updates by merging with a previous snapshot
+ * if fields are missing or NaN.
  */
-export function tickerToMarketSnapshot(ticker: BybitTicker): MarketSnapshot {
+export function tickerToMarketSnapshot(
+  ticker: Partial<BybitTicker> & { symbol: string },
+  previous?: MarketSnapshot,
+): MarketSnapshot {
+  const symbol = bybitSymbolToApp(ticker.symbol);
+
+  const parsedPrice = ticker.lastPrice ? Number.parseFloat(ticker.lastPrice) : NaN;
+  const price = !Number.isNaN(parsedPrice) ? parsedPrice : previous?.price ?? 0;
+
+  const parsedChange = ticker.price24hPcnt ? Number.parseFloat(ticker.price24hPcnt) * 100 : NaN;
+  const change24h = !Number.isNaN(parsedChange) ? parsedChange : previous?.change24h ?? 0;
+
+  const parsedVolume = ticker.volume24h ? Number.parseFloat(ticker.volume24h) : NaN;
+  const volume24h = !Number.isNaN(parsedVolume) ? parsedVolume : previous?.volume24h ?? 0;
+
   return {
-    symbol: bybitSymbolToApp(ticker.symbol),
-    price: Number.parseFloat(ticker.lastPrice),
-    change24h: Number.parseFloat(ticker.price24hPcnt) * 100, // Bybit returns 0.0158 for 1.58%
-    volume24h: Number.parseFloat(ticker.volume24h),
+    symbol,
+    price,
+    change24h,
+    volume24h,
     timestamp: Date.now(),
   };
 }

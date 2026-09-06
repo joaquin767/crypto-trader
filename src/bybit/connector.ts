@@ -8,7 +8,7 @@ import type { MarketSnapshot } from "../market.ts";
 import type { TradeResult } from "../executor.ts";
 import type { TradeSignal } from "../strategy/signals.ts";
 import type { Position } from "../portfolio.ts";
-import { tickerToMarketSnapshot, orderResponseToTradeResult, bybitPositionToPosition } from "./adapters.ts";
+import { tickerToMarketSnapshot, orderResponseToTradeResult, bybitPositionToPosition, bybitSymbolToApp } from "./adapters.ts";
 
 export interface BybitConnectorState {
   connected: boolean;
@@ -33,6 +33,7 @@ export class BybitConnector {
   private tradeHandlers = new Set<TradeHandler>();
   private positionHandlers = new Set<PositionHandler>();
   private connectionHandlers = new Set<ConnectionHandler>();
+  private lastSnapshots = new Map<string, MarketSnapshot>();
   private _state: BybitConnectorState;
   private _connected = false;
 
@@ -164,15 +165,25 @@ export class BybitConnector {
   // ── Internal Handlers ─────────────────────────────────────────────
 
   private handleTicker(topic: string, data: unknown): void {
-    const tickerData = (data as { symbol: string; lastPrice: string; price24hPcnt: string; volume24h: string; turnover24h: string });
-    if (!tickerData || !tickerData.symbol) return;
+    const tickerData = (data as { symbol?: string; lastPrice?: string; price24hPcnt?: string; volume24h?: string; turnover24h?: string });
+    if (!tickerData) return;
 
-    // Update latency
+    // Robust symbol fallback from topic name if missing in delta
+    const bybitSymbol = tickerData.symbol || topic.split(".")[1] || "";
+    if (!bybitSymbol) return;
+
+    // Convert to app format (e.g., BTC/USDT)
+    const appSymbol = bybitSymbolToApp(bybitSymbol);
+    const previous = this.lastSnapshots.get(appSymbol);
+
+    // Update latency & ticker timestamp
     this._state.latencyMs = this.wsPublic.getLatencyMs();
     this._state.lastTickerTime = Date.now();
 
-    // Convert to MarketSnapshot and broadcast
-    const snapshot = tickerToMarketSnapshot(tickerData as any);
+    // Convert to MarketSnapshot using delta-merging with previous cached state
+    const snapshot = tickerToMarketSnapshot({ ...tickerData, symbol: bybitSymbol }, previous);
+    this.lastSnapshots.set(appSymbol, snapshot);
+
     const snapshots = new Map<string, MarketSnapshot>();
     snapshots.set(snapshot.symbol, snapshot);
 
