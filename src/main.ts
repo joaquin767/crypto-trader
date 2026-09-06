@@ -147,7 +147,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
               bybit.disconnect();
               dashboardState.bybitConnected = false;
               dashboardState.bybitError = "Insufficient balance — fund your testnet wallet";
-              result = await execute(tradeSignal, config);
+              result = await execute(tradeSignal, config, portfolio.cashUsd);
             } else if (bybitErr instanceof BybitInvalidQtyError) {
               statusMessage = `Bybit rejected order (qty too small) — falling back to paper mode.`;
               console.warn(`[bybit] ${statusMessage}`);
@@ -155,14 +155,14 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
               bybit.disconnect();
               dashboardState.bybitConnected = false;
               dashboardState.bybitError = "Order qty below minimum — falling back to paper";
-              result = await execute(tradeSignal, config);
+              result = await execute(tradeSignal, config, portfolio.cashUsd);
             } else {
               throw bybitErr;
             }
           }
         } else {
           // Execute via simulated paper trading
-          result = await execute(tradeSignal, config);
+          result = await execute(tradeSignal, config, portfolio.cashUsd);
         }
 
         portfolio = update(portfolio, result);

@@ -9,3 +9,6 @@ config.*.json
 !config.template.json
 coverage/
 lcov.info
+
+# Runtime data (learning insights persist across restarts)
+learning-insights.json
