@@ -10,7 +10,7 @@ import { analyze as analyzePerformance, type PerformanceReport } from "./learnin
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
-import { BybitInsufficientBalanceError } from "./bybit/types.ts";
+import { BybitInsufficientBalanceError, BybitInvalidQtyError } from "./bybit/types.ts";
 import { appSymbolToBybit } from "./bybit/adapters.ts";
 import type { BybitConfig } from "./bybit/types.ts";
 
@@ -143,14 +143,21 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
             if (bybitErr instanceof BybitInsufficientBalanceError) {
               statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
               console.warn(`[bybit] ${statusMessage}`);
-              useBybit = false; // fall back to paper for subsequent trades
+              useBybit = false;
               bybit.disconnect();
               dashboardState.bybitConnected = false;
               dashboardState.bybitError = "Insufficient balance — fund your testnet wallet";
-              // Execute via paper instead
+              result = await execute(tradeSignal, config);
+            } else if (bybitErr instanceof BybitInvalidQtyError) {
+              statusMessage = `Bybit rejected order (qty too small) — falling back to paper mode.`;
+              console.warn(`[bybit] ${statusMessage}`);
+              useBybit = false;
+              bybit.disconnect();
+              dashboardState.bybitConnected = false;
+              dashboardState.bybitError = "Order qty below minimum — falling back to paper";
               result = await execute(tradeSignal, config);
             } else {
-              throw bybitErr; // re-throw other errors for the outer catch
+              throw bybitErr;
             }
           }
         } else {

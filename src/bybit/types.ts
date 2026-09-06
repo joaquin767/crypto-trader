@@ -209,6 +209,13 @@ export class BybitInsufficientBalanceError extends BybitApiError {
   }
 }
 
+export class BybitInvalidQtyError extends BybitApiError {
+  constructor(retCode: number, retMsg: string) {
+    super(retCode, retMsg);
+    this.name = "BybitInvalidQtyError";
+  }
+}
+
 export class BybitConnectionError extends Error {
   constructor(msg: string) {
     super(`Bybit connection error: ${msg}`);
@@ -239,6 +246,10 @@ export function classifyError(retCode: number, retMsg: string): BybitApiError {
     case 110007:
       return new BybitInsufficientBalanceError(retCode, retMsg);
     default:
+      // Check for known error patterns in retMsg
+      if (retMsg.includes("exceeds minimum limit")) {
+        return new BybitInvalidQtyError(retCode, retMsg);
+      }
       return new BybitApiError(retCode, retMsg);
   }
 }

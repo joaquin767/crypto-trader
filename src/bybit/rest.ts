@@ -326,6 +326,13 @@ export class RestClient {
     return this.get<{ category: string; list: unknown[] }>(path);
   }
 
+  /** Get instruments info (including lot size filters). */
+  async getInstruments(category: string, symbol?: string): Promise<{ category: string; list: unknown[] }> {
+    let path = `/v5/market/instruments?category=${category}`;
+    if (symbol) path += `&symbol=${symbol}`;
+    return this.get<{ category: string; list: unknown[] }>(path);
+  }
+
   // ── Authenticated Trading Endpoints ────────────────────────────────
 
   /** Place an order. */

@@ -97,6 +97,7 @@ export function appSymbolToBybit(symbol: string): string {
  * Convert Bybit symbol format (BTCUSDT) to app format (BTC/USDT).
  */
 export function bybitSymbolToApp(symbol: string): string {
+  if (!symbol || typeof symbol !== "string") return symbol || "";
   // Handle common quote currencies
   const match = symbol.match(/^(.*?)(USDT|USDC|USD|BUSD|DAI)$/);
   if (match && match[1] && match[2]) {

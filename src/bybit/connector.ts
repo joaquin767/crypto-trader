@@ -34,6 +34,7 @@ export class BybitConnector {
   private positionHandlers = new Set<PositionHandler>();
   private connectionHandlers = new Set<ConnectionHandler>();
   private lastSnapshots = new Map<string, MarketSnapshot>();
+  private lotSizeCache = new Map<string, { minQty: string; qtyStep: string }>();
   private _state: BybitConnectorState;
   private _connected = false;
 
@@ -122,21 +123,80 @@ export class BybitConnector {
     this.notifyConnection();
   }
 
+  /** Fetch and cache lot size info for a symbol. */
+  private async ensureLotSize(symbol: string): Promise<{ minQty: string; qtyStep: string } | null> {
+    const bybitSymbol = symbol.replace("/", "");
+    const cached = this.lotSizeCache.get(bybitSymbol);
+    if (cached) return cached;
+
+    try {
+      const result = await this.rest.getInstruments("linear", bybitSymbol);
+      // The response has a list of instruments
+      const list = (result as any).list;
+      if (list && list.length > 0) {
+        const lotSizeFilter = list[0].lotSizeFilter;
+        if (lotSizeFilter) {
+          const info = {
+            minQty: lotSizeFilter.minOrderQty || "0",
+            qtyStep: lotSizeFilter.qtyStep || "0.001",
+          };
+          this.lotSizeCache.set(bybitSymbol, info);
+          return info;
+        }
+      }
+    } catch (err) {
+      console.warn(`[bybit] Failed to fetch lot size for ${bybitSymbol}:`, (err as Error).message);
+    }
+    return null;
+  }
+
+  /** Get the minimum order quantity for a symbol. */
+  async getMinQty(symbol: string): Promise<number> {
+    const info = await this.ensureLotSize(symbol);
+    return info ? Number.parseFloat(info.minQty) : 0.001;
+  }
+
+  /** Get the qty step for a symbol. */
+  async getQtyStep(symbol: string): Promise<number> {
+    const info = await this.ensureLotSize(symbol);
+    return info ? Number.parseFloat(info.qtyStep) : 0.001;
+  }
+
+  /** Validate and round quantity to meet lot size rules. */
+  async validateQty(symbol: string, qty: number): Promise<number | null> {
+    const minQty = await this.getMinQty(symbol);
+    const qtyStep = await this.getQtyStep(symbol);
+
+    // Round to the nearest valid qty step
+    const steps = Math.round(qty / qtyStep);
+    const roundedQty = steps * qtyStep;
+
+    // Check minimum
+    if (roundedQty < minQty) {
+      return null; // qty too small
+    }
+
+    return roundedQty;
+  }
+
   /** Place an order via REST API with exact quantity. */
   async placeOrder(signal: TradeSignal, qty: number): Promise<TradeResult> {
     // Convert app signal to Bybit order
     const symbol = signal.symbol.replace("/", "");
     const side = signal.type === "buy" ? "Buy" : "Sell";
 
-    // Format quantity based on size (Bybit has strict precision per symbol)
-    // E.g., BTC minQty is 0.001, ETH is 0.01, SOL is 0.1
+    // Validate qty against lot size rules
+    const validQty = await this.validateQty(signal.symbol, qty);
     let formattedQty = "";
-    if (qty < 0.1) {
-      formattedQty = qty.toFixed(4);
-    } else if (qty < 1) {
-      formattedQty = qty.toFixed(3);
+    if (validQty === null) {
+      // qty too small — use minimum possible
+      const minQty = await this.getMinQty(signal.symbol);
+      formattedQty = minQty.toFixed(4);
     } else {
-      formattedQty = qty.toFixed(2);
+      // Format using the qty step for precision
+      const qtyStep = await this.getQtyStep(signal.symbol);
+      const decimals = Math.max(0, Math.ceil(-Math.log10(qtyStep)));
+      formattedQty = validQty.toFixed(decimals);
     }
 
     const order = await this.rest.placeOrder({
