@@ -1,4 +1,9 @@
 node_modules/
 .npm-cache/
 *.log
-config*.json
+# 🔒 CONFIG FILES WITH API KEYS — NEVER COMMIT THESE
+config.json
+config.bybit.json
+config.*.json
+# ✅ Template files are safe — they use placeholder values
+!config.template.json

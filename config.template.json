@@ -1,0 +1,12 @@
+{
+  "exchange": "bybit",
+  "apiKey": "YOUR_API_KEY_HERE",
+  "apiSecret": "YOUR_API_SECRET_HERE",
+  "symbols": ["BTC/USDT", "ETH/USDT"],
+  "maxCapitalUsd": 50,
+  "maxPositionSizeUsd": 25,
+  "maxDailyTrades": 3,
+  "stopLossPercent": 5,
+  "takeProfitPercent": 10,
+  "refreshIntervalMs": 3000
+}
