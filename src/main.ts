@@ -13,6 +13,7 @@ import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
 import { BybitInsufficientBalanceError, BybitInvalidQtyError } from "./bybit/types.ts";
 import { appSymbolToBybit } from "./bybit/adapters.ts";
 import type { BybitConfig } from "./bybit/types.ts";
+import { logger } from "./logger.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
@@ -43,6 +44,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live" | "testnet";
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
   let useBybit = config.exchange.toLowerCase() === "bybit";
+  let bybitFallenBack = false; // flag to prevent onConnection from overwriting error state after fallback
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
   // Recover open positions from previous session
@@ -82,9 +84,9 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
   // Start the web server
   const server = await createServer(dashboardState, port);
-  console.log(`[crypto-trader] Dashboard: http://localhost:${port}`);
-  console.log(`[crypto-trader] Mode: ${mode.toUpperCase()}`);
-  if (useBybit) console.log("[crypto-trader] Exchange: BYBIT (WebSocket tickers + REST orders)");
+  logger.info(`Dashboard: http://localhost:${port}`);
+  logger.info(`Mode: ${mode.toUpperCase()}`);
+  if (useBybit) logger.info("Exchange: BYBIT (WebSocket tickers + REST orders)");
 
   // Initial render
   const appState: AppState = {
@@ -144,7 +146,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           } catch (bybitErr) {
             if (bybitErr instanceof BybitInsufficientBalanceError) {
               statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
-              console.warn(`[bybit] ${statusMessage}`);
+              logger.warn("Bybit insufficient balance — falling back to paper mode");
               useBybit = false;
               bybit.disconnect();
               dashboardState.bybitConnected = false;
@@ -152,7 +154,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
               result = await execute(tradeSignal, config, portfolio.cashUsd);
             } else if (bybitErr instanceof BybitInvalidQtyError) {
               statusMessage = `Bybit rejected order (qty too small) — falling back to paper mode.`;
-              console.warn(`[bybit] ${statusMessage}`);
+              logger.warn("Bybit rejected order (qty too small) — falling back to paper mode");
               useBybit = false;
               bybit.disconnect();
               dashboardState.bybitConnected = false;
@@ -169,6 +171,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
         portfolio = update(portfolio, result);
         statusMessage = `${mode.toUpperCase()} | ${result.side} ${result.symbol} @ $${result.price.toFixed(2)}`;
+        logger.trade(`${result.side} ${result.symbol}`, `qty=${result.quantity.toFixed(4)}`, `price=$${result.price.toFixed(2)}`, `fee=$${result.fee.toFixed(4)}`);
 
         if (result.side === "buy") recordEntry(tradeSignal, result);
         if (result.side === "sell") {
@@ -241,9 +244,9 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     );
     learningInsights.push(...newInsights);
 
-    console.log(`[learning] Win rate: ${(performanceReport.winRate * 100).toFixed(1)}% | Trades: ${closedTrades.length}`);
+    logger.info(`Learning: win rate ${(performanceReport.winRate * 100).toFixed(1)}% | Trades: ${closedTrades.length}`);
     if (newInsights.length > 0) {
-      console.log(`[learning] Adjustments: ${newInsights.map(i => i.reason).join("; ")}`);
+      logger.info(`Learning: adjustments: ${newInsights.map(i => i.reason).join("; ")}`);
     }
 
     broadcast("learning", {
@@ -267,7 +270,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       }
       updateDashboardAndUI();
     } catch (err) {
-      console.error("[cycle] Error in trading cycle:", err);
+      logger.error("Error in trading cycle:", err);
     }
   }, config.refreshIntervalMs);
 
@@ -286,10 +289,11 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
     // Connection state → dashboard
     bybit.onConnection((state: BybitConnectorState) => {
+      // If we've already fallen back to paper mode, ignore Bybit connection events
+      if (bybitFallenBack) return;
       dashboardState.bybitConnected = state.connected;
       dashboardState.bybitLatencyMs = state.latencyMs;
       dashboardState.bybitMode = state.mode;
-      // Only set error on real connection failures; clear it on reconnect
       dashboardState.bybitError = state.connected ? null : state.error;
       if (state.connected) {
         statusMessage = `Bybit ${state.mode.toUpperCase()} live`;
@@ -320,16 +324,15 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       render(appState);
       await bybit.connect();
       statusMessage = `Bybit ${bybit.state.mode.toUpperCase()} — ${config.symbols.length} symbols`;
-      console.log(`[bybit] Connected. Mode: ${bybit.state.mode}`);
+      logger.info(`Bybit connected. Mode: ${bybit.state.mode}`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       statusMessage = `Bybit connection failed: ${errorMsg}. Paper mode.`;
-      console.error(`[bybit] ${statusMessage}`);
-      // Clear the error state since we're falling back to paper mode
+      logger.error(`Bybit connection failed: ${errorMsg}`);
+      bybitFallenBack = true; // prevent onConnection from re-setting error state
       dashboardState.bybitError = null;
       dashboardState.bybitConnected = false;
       dashboardState.bybitMode = "paper";
-      // Immediately broadcast the updated status so the dashboard knows we're in paper mode
       updateDashboardAndUI();
     }
   } else {
@@ -365,15 +368,16 @@ const cliArgs = parseArgs(process.argv.slice(2));
 if (cliArgs.configPath) {
   try {
     const config = loadConfig(cliArgs.configPath);
+    logger.info("Starting crypto-trader");
     start(config).catch((err) => {
-      console.error("Fatal error:", err);
+      logger.error("Fatal error:", err);
       process.exit(1);
     });
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
+    logger.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 } else if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  console.error("Usage: node src/main.ts --config ./config.json [--live] [--port 3081]");
+  logger.error("Usage: node src/main.ts --config ./config.json [--live] [--port 3081]");
   process.exit(1);
 }
