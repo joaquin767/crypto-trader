@@ -5,7 +5,7 @@ import { calcPositionSize } from "./strategy/risk.ts";
 import { create, update, canAfford, deploymentRatio, type Portfolio } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
-import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, type TradeRecord } from "./learning/journal.ts";
+import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, reconstructPortfolio, type TradeRecord } from "./learning/journal.ts";
 import { analyze as analyzePerformance, type PerformanceReport } from "./learning/analyzer.ts";
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
@@ -45,6 +45,8 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   let useBybit = config.exchange.toLowerCase() === "bybit";
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
+  // Recover open positions from previous session
+  portfolio = reconstructPortfolio(portfolio, new Map());
   let lastSignal: TradeSignal | null = null;
   let statusMessage = "starting...";
   let strategyParams: StrategyParams = defaultParams();

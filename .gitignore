@@ -12,3 +12,7 @@ lcov.info
 
 # Runtime data (learning insights persist across restarts)
 learning-insights.json
+
+# Runtime data (persists between sessions)
+trade-journal.json
+learning-insights.json
