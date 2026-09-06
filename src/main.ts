@@ -287,7 +287,11 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       dashboardState.bybitConnected = state.connected;
       dashboardState.bybitLatencyMs = state.latencyMs;
       dashboardState.bybitMode = state.mode;
-      dashboardState.bybitError = state.error;
+      // Only set error on real connection failures; clear it on reconnect
+      dashboardState.bybitError = state.connected ? null : state.error;
+      if (state.connected) {
+        statusMessage = `Bybit ${state.mode.toUpperCase()} live`;
+      }
     });
 
     // Real-time tickers → latestMarketData (used by the timer loop)
@@ -319,8 +323,12 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       const errorMsg = err instanceof Error ? err.message : String(err);
       statusMessage = `Bybit connection failed: ${errorMsg}. Paper mode.`;
       console.error(`[bybit] ${statusMessage}`);
-      dashboardState.bybitError = errorMsg;
+      // Clear the error state since we're falling back to paper mode
+      dashboardState.bybitError = null;
       dashboardState.bybitConnected = false;
+      dashboardState.bybitMode = "paper";
+      // Immediately broadcast the updated status so the dashboard knows we're in paper mode
+      updateDashboardAndUI();
     }
   } else {
     // ── PAPER/SIMULATED BRANCH ───────────────────────────────────────
