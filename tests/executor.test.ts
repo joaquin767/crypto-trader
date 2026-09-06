@@ -9,6 +9,7 @@ const config: Config = {
   apiKey: "a",
   apiSecret: "b",
   symbols: ["BTC/USDT"],
+  maxCapitalUsd: 1000,
   maxPositionSizeUsd: 1000,
   maxDailyTrades: 5,
   stopLossPercent: 5,

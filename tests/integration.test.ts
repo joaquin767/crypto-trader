@@ -18,7 +18,8 @@ const configPath = join(tmpdir(), `crypto-trader-v2-int-test-${Date.now()}.json`
 test("loadConfig loads and validates a config", () => {
   const config: Config = {
     exchange: "binance", apiKey: "test", apiSecret: "test",
-    symbols: ["BTC/USDT"], maxPositionSizeUsd: 1000,
+    symbols: ["BTC/USDT"], maxCapitalUsd: 1000,
+  maxPositionSizeUsd: 1000,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 3000,
   };
   writeFileSync(configPath, JSON.stringify(config));
@@ -48,7 +49,8 @@ test("technical indicators produce reasonable values", () => {
 test("risk management respects position size limits", () => {
   const config: Config = {
     exchange: "binance", apiKey: "a", apiSecret: "b",
-    symbols: ["BTC/USDT"], maxPositionSizeUsd: 500,
+    symbols: ["BTC/USDT"], maxCapitalUsd: 500,
+  maxPositionSizeUsd: 500,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 3000,
   };
   const size = calcPositionSize(0.8, empty(), config);
@@ -59,7 +61,8 @@ test("expert signal generation with indicators", () => {
   clearHistory();
   const config: Config = {
     exchange: "binance", apiKey: "a", apiSecret: "b",
-    symbols: ["BTC/USDT"], maxPositionSizeUsd: 1000,
+    symbols: ["BTC/USDT"], maxCapitalUsd: 1000,
+  maxPositionSizeUsd: 1000,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 3000,
   };
   const signal = analyze(
@@ -113,7 +116,8 @@ test("performance analyzer works with trade journal", () => {
 test("executor handles hold signals", async () => {
   const config: Config = {
     exchange: "binance", apiKey: "a", apiSecret: "b",
-    symbols: ["BTC/USDT"], maxPositionSizeUsd: 1000,
+    symbols: ["BTC/USDT"], maxCapitalUsd: 1000,
+  maxPositionSizeUsd: 1000,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 3000,
   };
   const result = await execute(
@@ -133,7 +137,8 @@ test("end-to-end: config -> indicators -> signal -> journal", () => {
 
   const config: Config = {
     exchange: "binance", apiKey: "a", apiSecret: "b",
-    symbols: ["BTC/USDT"], maxPositionSizeUsd: 1000,
+    symbols: ["BTC/USDT"], maxCapitalUsd: 1000,
+  maxPositionSizeUsd: 1000,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 3000,
   };
 

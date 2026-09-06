@@ -5,7 +5,10 @@ export interface Config {
   apiKey: string;
   apiSecret: string;
   symbols: string[];           // e.g. ["BTC/USDT", "ETH/USDT"]
-  maxPositionSizeUsd: number;  // max USD per trade
+  maxCapitalUsd: number;       // 🔒 USER-DEFINED operating capital. The system NEVER exceeds this.
+                               //    "I want to operate with X dollars." The rest stays in reserve.
+                               //    This is the FUNDAMENTAL CASHDRAIL.
+  maxPositionSizeUsd: number;  // max USD per trade (must be <= maxCapitalUsd)
   maxDailyTrades: number;      // max trades per day (0 = unlimited)
   stopLossPercent: number;     // e.g. 5 = sell if price drops 5% below entry
   takeProfitPercent: number;   // e.g. 10 = sell if price rises 10% above entry
@@ -37,6 +40,7 @@ export function loadConfig(path: string): Config {
     apiKey: raw["apiKey"] as string | undefined,
     apiSecret: raw["apiSecret"] as string | undefined,
     symbols: raw["symbols"] as string[] | undefined,
+    maxCapitalUsd: raw["maxCapitalUsd"] as number | undefined,
     maxPositionSizeUsd: raw["maxPositionSizeUsd"] as number | undefined,
     maxDailyTrades: raw["maxDailyTrades"] as number | undefined,
     stopLossPercent: raw["stopLossPercent"] as number | undefined,
@@ -57,8 +61,14 @@ export function loadConfig(path: string): Config {
   if (!Array.isArray(config.symbols) || config.symbols.length === 0) {
     throw new ConfigError("config.symbols must be a non-empty array of strings");
   }
+  if (typeof config.maxCapitalUsd !== "number" || config.maxCapitalUsd <= 0) {
+    throw new ConfigError("config.maxCapitalUsd must be a positive number — define how much capital you want to operate with");
+  }
   if (typeof config.maxPositionSizeUsd !== "number" || config.maxPositionSizeUsd <= 0) {
     throw new ConfigError("config.maxPositionSizeUsd must be a positive number");
+  }
+  if (config.maxPositionSizeUsd > config.maxCapitalUsd) {
+    throw new ConfigError("config.maxPositionSizeUsd cannot exceed config.maxCapitalUsd — you can't risk more than your operating capital per trade");
   }
   if (typeof config.maxDailyTrades !== "number" || config.maxDailyTrades < 0) {
     throw new ConfigError("config.maxDailyTrades must be a non-negative number");

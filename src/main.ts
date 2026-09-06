@@ -2,7 +2,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
 import { analyze, type TradeSignal, clearHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
-import { empty, update, type Portfolio } from "./portfolio.ts";
+import { create, update, canAfford, type Portfolio } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
 import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, type TradeRecord } from "./learning/journal.ts";
@@ -39,7 +39,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live";
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
 
-  let portfolio: Portfolio = empty();
+  let portfolio: Portfolio = create(config.maxCapitalUsd);
   let lastSignal: TradeSignal | null = null;
   let statusMessage = "starting...";
   let strategyParams: StrategyParams = defaultParams();

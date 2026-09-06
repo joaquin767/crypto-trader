@@ -8,6 +8,7 @@ import type { Config } from "../src/config.ts";
 const config: Config = {
   exchange: "binance", apiKey: "a", apiSecret: "b",
   symbols: ["BTC/USDT"],
+  maxCapitalUsd: 1000,
   maxPositionSizeUsd: 1000,
   maxDailyTrades: 5,
   stopLossPercent: 5,
