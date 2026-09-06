@@ -7,3 +7,5 @@ config.bybit.json
 config.*.json
 # ✅ Template files are safe — they use placeholder values
 !config.template.json
+coverage/
+lcov.info
