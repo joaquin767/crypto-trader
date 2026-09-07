@@ -11,6 +11,7 @@ import type { TradeSignal } from "../strategy/signals.ts";
 import type { Position } from "../portfolio.ts";
 import { tickerToMarketSnapshot, orderResponseToTradeResult, bybitPositionToPosition, bybitSymbolToApp } from "./adapters.ts";
 import { logger } from "../logger.ts";
+import { recordPendingOrder, clearPendingOrder, getPendingOrders } from "./pending-orders.ts";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -296,6 +297,56 @@ export class BybitConnector {
   }
 
   /**
+   * Cross-reference any pending-order records left over from a crash (see
+   * pending-orders.ts / spec §8.2) against Bybit's own order history. Call
+   * once at connect() time, alongside reconcilePositions().
+   *
+   * Deliberately returns diagnostic messages only — it does NOT touch the
+   * journal or portfolio. Reconstructing a full journal TradeRecord needs
+   * signal context (confidence, indicators, reason) that was never part of
+   * the minimal pending-order record; auto-fabricating that context would be
+   * exactly the anti-pattern the rest of this system has been removing. What
+   * this adds over the generic "unaccounted-for position" reconcile warning
+   * is specificity: it can say "this was OUR order" instead of leaving the
+   * user to guess whether an unexplained position came from this bot or
+   * something else entirely.
+   *
+   * Every pending record is cleared after this runs, resolved or not — a
+   * startup check is the one meaningful chance to act on it; leaving it
+   * around would just repeat the same stale check on every future restart.
+   */
+  async checkPendingOrders(): Promise<string[]> {
+    const pending = getPendingOrders();
+    if (pending.length === 0) return [];
+
+    const warnings: string[] = [];
+    for (const p of pending) {
+      try {
+        const history = await this.rest.getOrderHistory("linear", p.symbol, 20);
+        const match = (history.list as any[]).find(o => o.orderLinkId === p.orderLinkId);
+        const placedAt = new Date(p.timestamp).toISOString();
+        if (match && (match.orderStatus === "Filled" || match.orderStatus === "PartiallyFilled")) {
+          warnings.push(
+            `Pending order for ${p.symbol} (${p.intent}, expected qty ${p.expectedQty}, placed ${placedAt}) was ` +
+            `actually ${match.orderStatus} on Bybit (qty ${match.cumExecQty} @ ${match.avgPrice ?? match.price}) ` +
+            `after this app lost track of it. This fill is likely NOT in your local journal — cross-check ` +
+            `reconcilePositions() above and Bybit's order history for orderLinkId ${p.orderLinkId}.`,
+          );
+        } else if (match && (match.orderStatus === "Cancelled" || match.orderStatus === "Rejected")) {
+          warnings.push(`Pending order for ${p.symbol} (placed ${placedAt}) was ${match.orderStatus} on Bybit — no fill occurred, safe to disregard.`);
+        } else {
+          warnings.push(`Pending order for ${p.symbol} (placed ${placedAt}, orderLinkId ${p.orderLinkId}) has an unknown status on Bybit — check manually.`);
+        }
+      } catch (err) {
+        warnings.push(`Could not verify pending order for ${p.symbol} (orderLinkId ${p.orderLinkId}): ${(err as Error).message}`);
+      } finally {
+        clearPendingOrder(p.orderLinkId);
+      }
+    }
+    return warnings;
+  }
+
+  /**
    * Pin leverage to 1x for every configured symbol and margin mode to isolated
    * for the account, then verify. See specs/live-trading-readiness.md §3.1 —
    * this is what makes the cash guardrail's "notional = capital at risk"
@@ -504,50 +555,93 @@ export class BybitConnector {
       }
     }
 
+    // Persist a minimal pending-order record BEFORE sending, so a crash
+    // between this call returning and the trade being journaled leaves
+    // enough information for a specific diagnostic at next startup instead
+    // of a generic "unaccounted-for position" (see spec §8.2). Cleared on
+    // every return path below — success, confirmed rejection, or exhausted
+    // polling — so it never accumulates stale entries during normal operation.
     const orderLinkId = randomUUID();
-    const order = await this.rest.placeOrder({
-      category: "linear",
-      symbol,
-      side,
-      orderType: "Market",
-      qty: formattedQty,
-      reduceOnly,
-      orderLinkId,
-    });
+    recordPendingOrder({ orderLinkId, symbol, intent: signal.type === "buy" ? "buy" : "sell", expectedQty: actualQty, timestamp: Date.now() });
 
     try {
-      return orderResponseToTradeResult(order as unknown as BybitOrderResponse);
-    } catch (err) {
-      if (!(err instanceof BybitFillUncertainError)) throw err;
-      // Bybit accepted the order (we have an orderId) but the immediate ack didn't
-      // carry a parseable fill yet — market fills can lag the REST response by a
-      // few hundred ms. Poll order history briefly instead of fabricating a trade
-      // result, which previously corrupted portfolio.cashUsd into NaN forever.
-      logger.warn(`[bybit] ${err.message} — polling order history for the confirmed fill...`);
-      const confirmed = await this.pollForFill(symbol, (order as any).orderId as string);
-      if (confirmed) return confirmed;
-      logger.error(`[bybit] Could not confirm fill for order ${(order as any).orderId} (orderLinkId=${orderLinkId}) after polling — check Bybit manually.`);
-      throw err;
+      const order = await this.rest.placeOrder({
+        category: "linear",
+        symbol,
+        side,
+        orderType: "Market",
+        qty: formattedQty,
+        reduceOnly,
+        orderLinkId,
+      });
+
+      try {
+        return orderResponseToTradeResult(order as unknown as BybitOrderResponse);
+      } catch (err) {
+        if (!(err instanceof BybitFillUncertainError)) throw err;
+        // Bybit accepted the order (we have an orderId) but the immediate ack didn't
+        // carry a parseable fill yet — market fills can lag the REST response by a
+        // few hundred ms. Poll order history briefly instead of fabricating a trade
+        // result, which previously corrupted portfolio.cashUsd into NaN forever.
+        logger.warn(`[bybit] ${err.message} — polling order history for the confirmed fill...`);
+        const confirmed = await this.pollForFill(symbol, (order as any).orderId as string);
+        if (confirmed) return confirmed;
+        logger.error(`[bybit] Could not confirm fill for order ${(order as any).orderId} (orderLinkId=${orderLinkId}) after polling — check Bybit manually.`);
+        throw err;
+      }
+    } finally {
+      clearPendingOrder(orderLinkId);
     }
   }
 
-  /** Poll order history briefly for a confirmed fill after an ambiguous ack. */
+  /**
+   * Poll order history briefly for a confirmed fill after an ambiguous ack.
+   * Accepts "PartiallyFilled" as a valid (if incomplete) result — Bybit's
+   * cumExecQty/avgPrice/cumExecFee are already running totals, not deltas, so
+   * the latest poll's numbers are the whole picture, not something to sum
+   * across attempts (see spec §4.3). Returns AT MOST one TradeResult — the
+   * caller journals it exactly once — never one per partial-fill observation,
+   * which would create duplicate Position rows (portfolio.ts has no
+   * same-symbol merge logic for repeated "buy" updates).
+   */
   private async pollForFill(symbol: string, orderId: string): Promise<TradeResult | null> {
+    let lastPartial: TradeResult | null = null;
+    let lastLeavesQty: string | null = null;
     for (let attempt = 0; attempt < 4; attempt++) {
       await sleep(400 * (attempt + 1));
       try {
         const history = await this.rest.getOrderHistory("linear", symbol, 10);
         const match = (history.list as any[]).find(o => o.orderId === orderId);
-        if (match && match.orderStatus === "Filled") {
+        if (!match) continue;
+        if (match.orderStatus === "Filled") {
           try {
             return orderResponseToTradeResult(match as BybitOrderResponse);
           } catch {
             continue; // still unparseable — keep polling
           }
         }
+        if (match.orderStatus === "PartiallyFilled") {
+          try {
+            const partial = orderResponseToTradeResult(match as BybitOrderResponse);
+            if (partial.quantity > 0) {
+              lastPartial = partial;
+              lastLeavesQty = match.leavesQty;
+            }
+          } catch {
+            // still unparseable even for the partial — keep polling
+          }
+        }
       } catch (err) {
         console.warn(`[bybit] Fill-status poll failed for order ${orderId}:`, (err as Error).message);
       }
+    }
+    if (lastPartial) {
+      logger.warn(
+        `[bybit] Order ${orderId} (${symbol}) only partially filled after polling: qty=${lastPartial.quantity} ` +
+        `filled, remaining leavesQty=${lastLeavesQty}. Journaling the partial fill — the remainder was NOT executed ` +
+        `and is not tracked as a separate trade.`,
+      );
+      return lastPartial;
     }
     return null;
   }

@@ -17,6 +17,8 @@ learning-insights.json
 trade-journal.json
 trade-journal.json.bak.*
 trade-journal.json.tmp
+pending-orders.json
+pending-orders.json.tmp
 learning-insights.json
 
 # Session logs

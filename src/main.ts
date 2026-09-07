@@ -747,6 +747,16 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       } catch (err) {
         logger.warn(`[reconcile] Position reconciliation skipped: ${(err as Error).message}`);
       }
+
+      // Cross-reference any pending-order records left over from a crash
+      // (spec §8.2) — more specific than the generic "unaccounted-for
+      // position" warning above, since it can say "this was our own order."
+      try {
+        const pendingWarnings = await bybit.checkPendingOrders();
+        for (const w of pendingWarnings) logger.warn(`[pending-order] ${w}`);
+      } catch (err) {
+        logger.warn(`[pending-order] Check skipped: ${(err as Error).message}`);
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       // A likely, specific cause for an auth failure that Bybit's own error

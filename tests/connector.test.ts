@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BybitConnector } from "../src/bybit/connector.ts";
+import { getPendingOrders, recordPendingOrder } from "../src/bybit/pending-orders.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const mockConfig = {
   apiKey: "test-key",
@@ -774,3 +778,163 @@ test("getFundingPnlSince ignores unparseable execFee values", async () => {
     connector.rest.getFundingHistory = originalGetFundingHistory;
   }
 });
+
+// ── Partial fills (spec §4.3) ──────────────────────────────────────────
+// Regression coverage: previously pollForFill only ever accepted
+// orderStatus === "Filled" — a PartiallyFilled match was silently ignored on
+// every attempt, exhausting the retry window and surfacing
+// BybitFillUncertainError even though real (partial) exchange exposure
+// existed with zero local record of it.
+
+test("placeOrder journals a partial fill discovered while polling, exactly once", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  let historyCallCount = 0;
+
+  connector.rest.placeOrder = async () => ({
+    // Ambiguous initial ack — unparseable fill fields, forces polling.
+    symbol: "BTCUSDT", side: "Buy", cumExecQty: "", cumExecFee: "", avgPrice: "", price: "",
+    createdTime: String(Date.now()), orderId: "order-1", orderLinkId: "link-1",
+    orderStatus: "New", qty: "0.01", leavesQty: "0.01",
+  });
+  connector.rest.getOrderHistory = async () => {
+    historyCallCount++;
+    return {
+      list: [{
+        orderId: "order-1", symbol: "BTCUSDT", side: "Buy",
+        orderStatus: "PartiallyFilled",
+        cumExecQty: "0.004", cumExecFee: "0.002", avgPrice: "40000", price: "40000",
+        leavesQty: "0.006", createdTime: String(Date.now()),
+      }],
+    };
+  };
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    const result = await connector.placeOrder(signal, 0.01);
+    assert.equal(result.side, "buy");
+    assert.equal(result.quantity, 0.004, "must journal exactly the partial quantity that actually filled, not the requested qty");
+    assert(historyCallCount > 0, "must have polled order history at least once");
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+});
+
+test("placeOrder still surfaces BybitFillUncertainError when polling never finds any match", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  connector.rest.placeOrder = async () => ({
+    symbol: "BTCUSDT", side: "Buy", cumExecQty: "", cumExecFee: "", avgPrice: "", price: "",
+    createdTime: String(Date.now()), orderId: "order-2", orderLinkId: "link-2",
+    orderStatus: "New", qty: "0.01", leavesQty: "0.01",
+  });
+  connector.rest.getOrderHistory = async () => ({ list: [] }); // order never shows up
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    await assert.rejects(() => connector.placeOrder(signal, 0.01));
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+});
+
+// ── Pending-order durability (spec §8.2) ────────────────────────────────
+
+test("placeOrder records a pending order before sending, and clears it once resolved", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  let pendingDuringSend = -1;
+  connector.rest.placeOrder = async () => {
+    pendingDuringSend = getPendingOrders().length;
+    return { symbol: "BTCUSDT", side: "Buy", cumExecQty: "0.01", cumExecFee: "0", avgPrice: "40000", price: "40000", createdTime: String(Date.now()), orderId: "order-3", orderLinkId: "link-3", orderStatus: "Filled", qty: "0.01", leavesQty: "0" };
+  };
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    await connector.placeOrder(signal, 0.01);
+    assert.equal(pendingDuringSend, 1, "a pending-order record must exist while the request is in flight");
+    assert.equal(getPendingOrders().length, 0, "the pending record must be cleared once the order resolves");
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+  }
+});
+
+test("placeOrder clears the pending-order record even when the exchange rejects the order", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  connector.rest.placeOrder = async () => { throw new Error("rejected"); };
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    await assert.rejects(() => connector.placeOrder(signal, 0.01));
+    assert.equal(getPendingOrders().length, 0, "a rejected order must not leave a stale pending record behind");
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+  }
+});
+
+// ── checkPendingOrders (spec §8.2) ──────────────────────────────────────
+
+function withTempCwd(fn: () => Promise<void> | void) {
+  const dir = mkdtempSync(join(tmpdir(), "connector-pending-"));
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  return Promise.resolve(fn()).finally(() => {
+    process.chdir(originalCwd);
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test("checkPendingOrders flags a pending order that actually filled, and clears the record", () => withTempCwd(async () => {
+  const connector = new BybitConnector(mockConfig);
+  recordPendingOrder({ orderLinkId: "link-x", symbol: "BTCUSDT", intent: "buy", expectedQty: 0.01, timestamp: Date.now() });
+
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  connector.rest.getOrderHistory = async () => ({
+    list: [{ orderId: "1", orderLinkId: "link-x", orderStatus: "Filled", cumExecQty: "0.01", avgPrice: "40000", price: "40000" }],
+  });
+
+  try {
+    const warnings = await connector.checkPendingOrders();
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /was actually Filled on Bybit/);
+    assert.equal(getPendingOrders().length, 0, "the pending record must be cleared after checking, resolved or not");
+  } finally {
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+}));
+
+test("checkPendingOrders reports a confirmed-cancelled order as safe to disregard", () => withTempCwd(async () => {
+  const connector = new BybitConnector(mockConfig);
+  recordPendingOrder({ orderLinkId: "link-y", symbol: "BTCUSDT", intent: "buy", expectedQty: 0.01, timestamp: Date.now() });
+
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  connector.rest.getOrderHistory = async () => ({
+    list: [{ orderId: "1", orderLinkId: "link-y", orderStatus: "Cancelled" }],
+  });
+
+  try {
+    const warnings = await connector.checkPendingOrders();
+    assert.match(warnings[0]!, /safe to disregard/);
+  } finally {
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+}));
+
+test("checkPendingOrders returns nothing when there are no pending orders", () => withTempCwd(async () => {
+  const connector = new BybitConnector(mockConfig);
+  const warnings = await connector.checkPendingOrders();
+  assert.deepEqual(warnings, []);
+}));
