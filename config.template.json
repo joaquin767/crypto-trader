@@ -8,5 +8,6 @@
   "maxDailyTrades": 3,
   "stopLossPercent": 5,
   "takeProfitPercent": 10,
-  "refreshIntervalMs": 3000
+  "refreshIntervalMs": 3000,
+  "autoSelectSymbols": true
 }

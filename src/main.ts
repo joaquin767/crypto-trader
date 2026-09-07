@@ -14,6 +14,7 @@ import { BybitInsufficientBalanceError, BybitInvalidQtyError } from "./bybit/typ
 import { appSymbolToBybit } from "./bybit/adapters.ts";
 import type { BybitConfig } from "./bybit/types.ts";
 import { logger } from "./logger.ts";
+import { recommendSymbols, checkConfiguredSymbols } from "./strategy/symbol-recommender.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
@@ -341,6 +342,42 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       await bybit.connect();
       statusMessage = `Bybit ${bybit.state.mode.toUpperCase()} — ${config.symbols.length} symbols`;
       logger.info(`Bybit connected. Mode: ${bybit.state.mode}`);
+
+      // Auto-select symbols for small capital if enabled
+      if (config.autoSelectSymbols) {
+        try {
+          logger.info("Analyzing best symbols for your capital...");
+          const recommendations = await recommendSymbols(bybit.rest, config.maxCapitalUsd, config.maxPositionSizeUsd, 3);
+          if (recommendations.length > 0) {
+            logger.info("=".repeat(50));
+            logger.info("RECOMMENDED SYMBOLS FOR YOUR CAPITAL:");
+            logger.info("-".repeat(50));
+            for (const rec of recommendations) {
+              const canBuy = Math.floor(config.maxCapitalUsd / rec.minTradeCost);
+              logger.info(`  ${rec.symbol.padEnd(10)} $${rec.price.toFixed(2).padEnd(8)} min: $${rec.minTradeCost.toFixed(2).padEnd(8)} ${rec.reason} (${canBuy}x in budget)`);
+            }
+            logger.info("-".repeat(50));
+            logger.info(`Current config symbols: ${config.symbols.join(", ")}`);
+            logger.info(`Recommended: ${recommendations.map(r => r.symbol).join(", ")}`);
+            logger.info("=".repeat(50));
+          }
+        } catch (err) {
+          logger.warn(`Symbol analysis skipped: ${(err as Error).message}`);
+        }
+      } else {
+        // Even without auto-select, check if current symbols are affordable
+        try {
+          const checks = await checkConfiguredSymbols(bybit.rest, config.symbols, config.maxCapitalUsd);
+          const unaffordable = checks.filter(c => !c.affordable);
+          if (unaffordable.length > 0) {
+            logger.warn("Some symbols may be too expensive for your capital:");
+            for (const c of unaffordable) {
+              logger.warn(`  ${c.symbol}: minimum ~$${c.minTradeCost.toFixed(2)} per trade (capital: $${config.maxCapitalUsd})`);
+            }
+            logger.info("Tip: set autoSelectSymbols: true in config.json to auto-pick the best symbols");
+          }
+        } catch { /* skip check */ }
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       statusMessage = `Bybit connection failed: ${errorMsg}. Paper mode.`;

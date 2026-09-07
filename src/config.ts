@@ -6,13 +6,12 @@ export interface Config {
   apiSecret: string;
   symbols: string[];           // e.g. ["BTC/USDT", "ETH/USDT"]
   maxCapitalUsd: number;       // 🔒 USER-DEFINED operating capital. The system NEVER exceeds this.
-                               //    "I want to operate with X dollars." The rest stays in reserve.
-                               //    This is the FUNDAMENTAL CASHDRAIL.
   maxPositionSizeUsd: number;  // max USD per trade (must be <= maxCapitalUsd)
   maxDailyTrades: number;      // max trades per day (0 = unlimited)
   stopLossPercent: number;     // e.g. 5 = sell if price drops 5% below entry
   takeProfitPercent: number;   // e.g. 10 = sell if price rises 10% above entry
   refreshIntervalMs: number;   // how often to poll market data (min 1000)
+  autoSelectSymbols?: boolean; // if true, automatically pick best symbols for your capital at startup
 }
 
 export class ConfigError extends Error {
