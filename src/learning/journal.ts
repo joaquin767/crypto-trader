@@ -1,6 +1,6 @@
 // Trade journal — records every trade with full context for learning.
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { TradeSignal } from "../strategy/signals.ts";
 import type { TradeResult } from "../executor.ts";
@@ -39,30 +39,88 @@ export interface TradeRecord {
 }
 
 const JOURNAL_FILE = "trade-journal.json";
+// See specs/live-trading-readiness.md §8.1 — a corrupted write or an accidental
+// delete (both have actually happened working on this codebase) previously had
+// no recovery path other than the exchange's own position list, which the
+// system deliberately refuses to auto-adopt for unrecognized positions. Keeping
+// rotated backups gives a same-session recovery path for a *known* position's
+// local record instead.
+const JOURNAL_BACKUP_COUNT = 5;
 const _trades: TradeRecord[] = [];
 let _nextId = 1;
 
-// Load persisted journal on module init
-try {
-  const journalPath = join(process.cwd(), JOURNAL_FILE);
-  if (existsSync(journalPath)) {
-    const raw = JSON.parse(readFileSync(journalPath, "utf-8"));
-    if (Array.isArray(raw.trades)) _trades.push(...raw.trades);
-    if (typeof raw.nextId === "number") _nextId = raw.nextId;
-    const openCount = _trades.filter(t => t.status === "open").length;
-    console.log(`[journal] Loaded ${_trades.length} trades (${openCount} open) from disk`);
-  }
-} catch {
-  // First run
+function journalPath(): string {
+  return join(process.cwd(), JOURNAL_FILE);
+}
+function journalBackupPath(n: number): string {
+  return join(process.cwd(), `${JOURNAL_FILE}.bak.${n}`);
 }
 
-/** Persist journal to disk. */
-function persistJournal(): void {
+function loadJournalFile(path: string): { trades: TradeRecord[]; nextId: number } | null {
   try {
-    writeFileSync(
-      join(process.cwd(), JOURNAL_FILE),
-      JSON.stringify({ trades: _trades, nextId: _nextId }, null, 2),
-    );
+    if (!existsSync(path)) return null;
+    const raw = JSON.parse(readFileSync(path, "utf-8"));
+    if (!Array.isArray(raw.trades)) return null;
+    return { trades: raw.trades, nextId: typeof raw.nextId === "number" ? raw.nextId : 1 };
+  } catch {
+    return null;
+  }
+}
+
+// Load persisted journal on module init. Falls back through rotated backups,
+// newest first, if the live file is missing or fails to parse — this is the
+// actual recovery path §8.1 exists for.
+{
+  let loaded = loadJournalFile(journalPath());
+  let recoveredFrom: string | null = null;
+  if (!loaded) {
+    for (let n = 1; n <= JOURNAL_BACKUP_COUNT; n++) {
+      const candidate = loadJournalFile(journalBackupPath(n));
+      if (candidate) {
+        loaded = candidate;
+        recoveredFrom = journalBackupPath(n);
+        break;
+      }
+    }
+  }
+  if (loaded) {
+    _trades.push(...loaded.trades);
+    _nextId = loaded.nextId;
+    const openCount = _trades.filter(t => t.status === "open").length;
+    if (recoveredFrom) {
+      console.warn(`[journal] Main journal file missing or unreadable — recovered ${_trades.length} trades (${openCount} open) from backup: ${recoveredFrom}`);
+    } else {
+      console.log(`[journal] Loaded ${_trades.length} trades (${openCount} open) from disk`);
+    }
+  }
+}
+
+/**
+ * Persist journal to disk atomically (write to a temp file, then rename over
+ * the live path — a rename is atomic on POSIX filesystems, so a crash
+ * mid-write can never leave a half-written live file), rotating up to
+ * JOURNAL_BACKUP_COUNT backups first.
+ */
+function persistJournal(): void {
+  const live = journalPath();
+  const tmp = `${live}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify({ trades: _trades, nextId: _nextId }, null, 2));
+
+    // Rotate backups BEFORE overwriting the live file — if this process is
+    // killed partway through rotation, at least one backup generation
+    // survives rather than the whole chain being lost for this write.
+    if (existsSync(live)) {
+      const oldest = journalBackupPath(JOURNAL_BACKUP_COUNT);
+      if (existsSync(oldest)) unlinkSync(oldest);
+      for (let n = JOURNAL_BACKUP_COUNT - 1; n >= 1; n--) {
+        const from = journalBackupPath(n);
+        if (existsSync(from)) renameSync(from, journalBackupPath(n + 1));
+      }
+      renameSync(live, journalBackupPath(1));
+    }
+
+    renameSync(tmp, live);
   } catch (err) {
     console.warn(`[journal] Failed to persist: ${(err as Error).message}`);
   }

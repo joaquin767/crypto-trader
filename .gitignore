@@ -15,6 +15,8 @@ learning-insights.json
 
 # Runtime data (persists between sessions)
 trade-journal.json
+trade-journal.json.bak.*
+trade-journal.json.tmp
 learning-insights.json
 
 # Session logs
