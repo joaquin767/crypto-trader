@@ -1,8 +1,9 @@
 # Live Trading Readiness — Financial Logic Spec v1
 
-Status: **Phase 1 implemented and self-reviewed (§3, §4.1-§4.2, §6, §7.1, §7.3) — 236/236 tests
-passing. Needs a live testnet soak (§12.3) to verify the guessed-but-flagged Bybit response
-details before Phase 2. Phase 2 (§5 circuit breakers, §7.2) not yet started.**
+Status: **Phase 1 and Phase 2 implemented and self-reviewed — 261/261 tests passing. Phase 1's
+leverage-pin behavior was partially verified against a live Bybit testnet call (§11's Phase 1
+notes); a full 24h §12.3 soak is still outstanding before real capital. Phase 3 (journal
+durability, risk-aware sizing, concentration limits) not yet started.**
 Owner: crypto-trader financial core (portfolio, risk, execution, Bybit integration)
 Purpose: define what must change before this system operates **real capital**, in priority
 order, with concrete acceptance criteria. This spec is the audit + the plan; it supersedes
@@ -646,9 +647,16 @@ sessions, correctly picked up as "restricted — closes only" by this session's 
 pin. Not closed automatically — that's an exchange-account action outside what this
 verification pass was asked to do.
 
-### Phase 2 (P0) — required before real-capital run
-- §5 circuit breakers
-- §7.2 environment/capital sanity checks at startup
+### Phase 2 (P0) — required before real-capital run — ✅ DONE
+- [x] §5 circuit breakers (`src/risk/circuit-breaker.ts`: daily loss, drawdown, consecutive
+  losses, per-symbol slippage — all independently disable-able via explicit `false`)
+- [x] §7.2 capital-threshold confirmation gate for `--live` runs (`src/startup-safety.ts`) and
+  a specific testnet/mainnet key-mismatch hint on a `BybitAuthError` at connect
+
+Smoke-tested against live testnet after implementation (dashboard boots clean, no crash, no
+false-trip circuit breaker at $100 capital / 0 trades — expected). Not separately soaked, since
+Phase 2 is pure local logic (no new Bybit API surface to verify) apart from the auth-hint
+string, which needs no live verification beyond the type check already covering it.
 
 ### Phase 3 (P1) — safe to scale capital
 - §8.1 atomic/backed-up journal
