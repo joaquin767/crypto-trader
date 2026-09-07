@@ -194,6 +194,11 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     maxConsecutiveLosses: 7,
     maxSlippagePercent: false as const,
     maxCapitalUsdWarnThreshold: 750,
+    riskPerTradePercent: 1.5,
+    atrStopMultiplier: 2.5,
+    cashReservePercent: 8,
+    maxConcurrentPositions: 3,
+    maxCorrelation: 0.75,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {
@@ -261,6 +266,54 @@ test("loadConfig throws ConfigError on non-integer maxConsecutiveLosses", () => 
     maxPositionSizeUsd: 100,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
     maxConsecutiveLosses: 2.5,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on out-of-range riskPerTradePercent", () => {
+  const path = tmp("badriskpertrade");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    riskPerTradePercent: 0,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on non-integer maxConcurrentPositions", () => {
+  const path = tmp("badconcurrent");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    maxConcurrentPositions: 1.5,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on out-of-range maxCorrelation", () => {
+  const path = tmp("badcorrelation");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    maxCorrelation: 1.5,
   }));
   try {
     assert.throws(() => loadConfig(path), ConfigError);

@@ -15,21 +15,50 @@ const config: Config = {
   refreshIntervalMs: 5000,
 };
 
-test("calcPositionSize returns 0 for confidence below 0.5", () => {
-  const size = calcPositionSize(0.4, empty(), config);
-  assert.equal(size, 0);
+// Regression coverage for spec §9: sizing is now risk-based (a fixed % of
+// maxCapitalUsd at stake if the stop is hit), not confidence-scaled. A
+// stable major pair and a volatile micro-cap must converge on comparable
+// *risk*, not comparable *notional*.
+
+test("calcPositionSize sizes to riskPerTradePercent of maxCapitalUsd over the stop distance", () => {
+  // Defaults: riskPerTradePercent=1%, atrStopMultiplier=2, cashReservePercent=10%.
+  // atr=0 → atrPercent=0 → stop distance falls back to config.stopLossPercent (5%).
+  // riskUsd = 1000 * 0.01 = 10; positionUsd = 10 / (5/100) = 200.
+  const size = calcPositionSize(empty(), config, 0, 40000);
+  assert.equal(size, 200);
 });
 
-test("calcPositionSize returns positive size for high confidence", () => {
-  const size = calcPositionSize(0.9, empty(), config);
-  assert(size > 0);
-  assert(size <= config.maxPositionSizeUsd);
+test("calcPositionSize shrinks for a symbol whose ATR implies a wider stop than stopLossPercent", () => {
+  // price=100, atr=10 → atrPercent=10%; ×atrStopMultiplier(2) = 20% > stopLossPercent(5%)
+  // → stop distance is 20%, not 5%. riskUsd=10 → positionUsd = 10 / (20/100) = 50.
+  const size = calcPositionSize(empty(), config, 10, 100);
+  assert.equal(size, 50);
+});
+
+test("calcPositionSize converges volatile and stable symbols on comparable risk, not comparable notional", () => {
+  const stableSize = calcPositionSize(empty(), config, 0, 40000); // stop = 5% (configured)
+  const volatileSize = calcPositionSize(empty(), config, 20, 100); // atrPercent 20% × 2 = 40% stop
+  // Same $ risk (1% of maxCapitalUsd = $10) in both cases, at different stop
+  // distances — the volatile symbol's smaller position × its wider stop
+  // distance should risk the same dollar amount as the stable symbol's
+  // larger position × its tighter stop.
+  const stableRiskUsd = stableSize * 0.05;
+  const volatileRiskUsd = volatileSize * 0.40;
+  assert(Math.abs(stableRiskUsd - volatileRiskUsd) < 0.01);
+  assert(volatileSize < stableSize, "the more volatile symbol must get a smaller position");
 });
 
 test("calcPositionSize respects maxPositionSizeUsd cap", () => {
   const richPortfolio = { ...empty(), cashUsd: 100000 };
-  const size = calcPositionSize(1.0, richPortfolio, config);
-  assert(size <= config.maxPositionSizeUsd);
+  const richConfig: Config = { ...config, maxCapitalUsd: 100000, stopLossPercent: 0.1 }; // tiny stop → huge implied size
+  const size = calcPositionSize(richPortfolio, richConfig, 0, 40000);
+  assert.equal(size, richConfig.maxPositionSizeUsd);
+});
+
+test("calcPositionSize respects available cash (minus reserve) as a hard cap", () => {
+  const poorPortfolio = { ...empty(), cashUsd: 50 };
+  const size = calcPositionSize(poorPortfolio, config, 0, 40000);
+  assert.equal(size, 45); // 50 * (1 - 10%)
 });
 
 test("calcMaxDrawdown returns 0 for rising values", () => {

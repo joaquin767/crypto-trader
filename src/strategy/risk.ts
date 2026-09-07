@@ -2,32 +2,40 @@ import type { Config } from "../config.ts";
 import type { Portfolio } from "../portfolio.ts";
 
 /**
- * Calculate optimal position size using the Kelly Criterion.
+ * Calculate position size from risk, not from confidence — see
+ * specs/live-trading-readiness.md §9. Previously this scaled position size
+ * linearly with the signal's confidence, which meant a stable major pair and
+ * a thin, volatile micro-cap got the exact same dollar exposure for the same
+ * confidence score, even though their real risk-of-ruin per trade was very
+ * different (this is exactly the kind of symbol autoSelectSymbols now
+ * actively picks).
  *
- * Kelly % = edge / odds = (winRate * avgWin - lossRate * avgLoss) / (avgWin)
- *
- * We use a simplified version: fraction = confidence * (winRate / lossRate) adjusted for volatility.
- * The result is always capped by config.maxPositionSizeUsd and available cash.
+ * The position is sized so that a fixed % of maxCapitalUsd
+ * (`riskPerTradePercent`) is what's actually at stake if the stop is hit —
+ * where "the stop" is the wider of the configured stopLossPercent and
+ * ATR-implied volatility (atrStopMultiplier × ATR-as-%-of-price). A volatile
+ * symbol with a wide ATR-implied stop gets a smaller position for the same
+ * risk budget; a stable one with a tight stop gets a larger one — converging
+ * on comparable *risk*, not comparable *notional*.
  */
 export function calcPositionSize(
-  confidence: number,          // 0-1, from the signal generator
   portfolio: Portfolio,
   config: Config,
+  atr: number,
+  price: number,
 ): number {
-  // Kelly fraction: use confidence as a proxy for edge
-  const kellyFraction = Math.max(0, (confidence - 0.5) * 2); // 0 at 50% conf, 1 at 100% conf
+  const riskPerTradePercent = config.riskPerTradePercent ?? 1;
+  const atrStopMultiplier = config.atrStopMultiplier ?? 2;
+  const cashReservePercent = config.cashReservePercent ?? 10;
 
-  // Available cash (keep 10% reserve for fees)
-  const availableCash = portfolio.cashUsd * 0.9;
+  const riskUsd = config.maxCapitalUsd * (riskPerTradePercent / 100);
+  const atrPercent = price > 0 ? (atr / price) * 100 : 0;
+  const stopDistancePercent = Math.max(config.stopLossPercent, atrPercent * atrStopMultiplier);
 
-  // Kelly-optimal bet size
-  const kellyAmount = availableCash * kellyFraction;
+  const positionUsd = riskUsd / (stopDistancePercent / 100);
+  const availableCash = portfolio.cashUsd * (1 - cashReservePercent / 100);
 
-  // Apply max position size cap
-  const cappedAmount = Math.min(kellyAmount, config.maxPositionSizeUsd);
-
-  // Final: min of capped Kelly amount and available cash
-  return Math.min(cappedAmount, availableCash);
+  return Math.max(0, Math.min(positionUsd, config.maxPositionSizeUsd, availableCash));
 }
 
 /**

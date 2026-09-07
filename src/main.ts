@@ -231,7 +231,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         // closed) — gating on it here would have silently skipped real closes.
         let positionUsd = 0;
         if (tradeSignal.type === "buy") {
-          positionUsd = calcPositionSize(tradeSignal.confidence, portfolio, config);
+          positionUsd = calcPositionSize(portfolio, config, tradeSignal.indicators.atr, snapshot.price);
           if (positionUsd <= 0) {
             statusMessage = `${mode.toUpperCase()} | insufficient cash for ${tradeSignal.symbol}`;
             continue;

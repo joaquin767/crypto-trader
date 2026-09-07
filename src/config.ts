@@ -33,6 +33,31 @@ export interface Config {
    *  see spec §7.2. Not a hard limit; a nudge encoding "start small" into the
    *  code. Default 500 if unset; `false` disables the check entirely. */
   maxCapitalUsdWarnThreshold?: number | false;
+
+  // ── Risk-aware position sizing (spec §9) ──────────────────────────────
+  /** % of maxCapitalUsd risked per trade (not the position's notional — the
+   *  amount actually at stake if the stop-loss/ATR-derived stop is hit).
+   *  Default 1, matching docs/RISK_MANAGEMENT.md's "never risk more than
+   *  1-2% per trade" guidance. */
+  riskPerTradePercent?: number;
+  /** Multiplier on ATR-as-%-of-price when it implies a wider stop than
+   *  config.stopLossPercent — the wider of the two is used as the sizing
+   *  basis, so a volatile symbol gets a smaller position for the same risk
+   *  budget instead of the same notional as a stable one. Default 2. */
+  atrStopMultiplier?: number;
+  /** % of cash held back as an unallocated buffer when sizing a new position
+   *  (fees, slippage headroom). Default 10. */
+  cashReservePercent?: number;
+
+  // ── Concentration limits (spec §10) ───────────────────────────────────
+  /** Max number of concurrently open positions. `false` disables the cap
+   *  (only maxPositionSizeUsd × count vs. maxCapitalUsd still applies
+   *  implicitly). Default undefined (uncapped) if unset. */
+  maxConcurrentPositions?: number | false;
+  /** Trailing price-return correlation above which a new position is skipped
+   *  if it would sit alongside an existing one this correlated. Default 0.8;
+   *  `false` disables the check. */
+  maxCorrelation?: number | false;
 }
 
 export class ConfigError extends Error {
@@ -73,6 +98,11 @@ export function loadConfig(path: string): Config {
     maxConsecutiveLosses: raw["maxConsecutiveLosses"] as number | false | undefined,
     maxSlippagePercent: raw["maxSlippagePercent"] as number | false | undefined,
     maxCapitalUsdWarnThreshold: raw["maxCapitalUsdWarnThreshold"] as number | false | undefined,
+    riskPerTradePercent: raw["riskPerTradePercent"] as number | undefined,
+    atrStopMultiplier: raw["atrStopMultiplier"] as number | undefined,
+    cashReservePercent: raw["cashReservePercent"] as number | undefined,
+    maxConcurrentPositions: raw["maxConcurrentPositions"] as number | false | undefined,
+    maxCorrelation: raw["maxCorrelation"] as number | false | undefined,
   };
 
   // Validation
@@ -132,6 +162,33 @@ export function loadConfig(path: string): Config {
     (typeof config.maxCapitalUsdWarnThreshold !== "number" || config.maxCapitalUsdWarnThreshold <= 0)
   ) {
     throw new ConfigError("config.maxCapitalUsdWarnThreshold must be a positive number, or false to disable, if set");
+  }
+  if (
+    config.riskPerTradePercent !== undefined &&
+    (typeof config.riskPerTradePercent !== "number" || config.riskPerTradePercent <= 0 || config.riskPerTradePercent > 100)
+  ) {
+    throw new ConfigError("config.riskPerTradePercent must be a number between 0 (exclusive) and 100 (inclusive) if set");
+  }
+  if (config.atrStopMultiplier !== undefined && (typeof config.atrStopMultiplier !== "number" || config.atrStopMultiplier <= 0)) {
+    throw new ConfigError("config.atrStopMultiplier must be a positive number if set");
+  }
+  if (
+    config.cashReservePercent !== undefined &&
+    (typeof config.cashReservePercent !== "number" || config.cashReservePercent < 0 || config.cashReservePercent >= 100)
+  ) {
+    throw new ConfigError("config.cashReservePercent must be a number between 0 (inclusive) and 100 (exclusive) if set");
+  }
+  if (
+    config.maxConcurrentPositions !== undefined && config.maxConcurrentPositions !== false &&
+    (typeof config.maxConcurrentPositions !== "number" || config.maxConcurrentPositions <= 0 || !Number.isInteger(config.maxConcurrentPositions))
+  ) {
+    throw new ConfigError("config.maxConcurrentPositions must be a positive integer, or false to disable, if set");
+  }
+  if (
+    config.maxCorrelation !== undefined && config.maxCorrelation !== false &&
+    (typeof config.maxCorrelation !== "number" || config.maxCorrelation <= 0 || config.maxCorrelation > 1)
+  ) {
+    throw new ConfigError("config.maxCorrelation must be a number between 0 (exclusive) and 1 (inclusive), or false to disable, if set");
   }
 
   return config as Config;

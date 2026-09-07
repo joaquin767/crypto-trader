@@ -53,7 +53,7 @@ test("risk management respects position size limits", () => {
   maxPositionSizeUsd: 500,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 3000,
   };
-  const size = calcPositionSize(0.8, empty(), config);
+  const size = calcPositionSize(empty(), config, 0, 40000);
   assert(size <= 500);
 });
 
