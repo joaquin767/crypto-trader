@@ -330,13 +330,23 @@ export class BybitConnector {
     return info ? Number.parseFloat(info.qtyStep) : 0.001;
   }
 
-  /** Validate and round quantity to meet lot size rules. */
-  async validateQty(symbol: string, qty: number): Promise<number | null> {
+  /**
+   * Validate and round quantity to meet lot size rules.
+   *
+   * `side` controls rounding direction — this matters for safety, not just
+   * precision (see specs/live-trading-readiness.md §4.2). A BUY rounds to the
+   * nearest step (rounding up costs a few extra cents of notional, harmless).
+   * A SELL always rounds DOWN: rounding a close UP past the quantity actually
+   * held, combined with reduceOnly, would either get rejected or — without
+   * reduceOnly — open a naked short for the difference. Flooring means a sell
+   * request can undershoot what's held (leaving a dust remainder) but can
+   * never overshoot it.
+   */
+  async validateQty(symbol: string, qty: number, side: "buy" | "sell"): Promise<number | null> {
     const minQty = await this.getMinQty(symbol);
     const qtyStep = await this.getQtyStep(symbol);
 
-    // Round to the nearest valid qty step
-    const steps = Math.round(qty / qtyStep);
+    const steps = side === "sell" ? Math.floor(qty / qtyStep) : Math.round(qty / qtyStep);
     const roundedQty = steps * qtyStep;
 
     // Check minimum
@@ -352,13 +362,28 @@ export class BybitConnector {
     // Convert app signal to Bybit order
     const symbol = signal.symbol.replace("/", "");
     const side = signal.type === "buy" ? "Buy" : "Sell";
+    // In this app a "sell" is always closing an existing position (main.ts only
+    // ever emits one after confirming a local position exists) — never opening
+    // a short. reduceOnly makes that invariant authoritative at the exchange:
+    // if local state is ever wrong about what's actually held, Bybit rejects
+    // the excess instead of silently opening a short (see spec §4.1).
+    const reduceOnly = signal.type === "sell";
 
     // Validate qty against lot size rules
-    const validQty = await this.validateQty(signal.symbol, qty);
+    const validQty = await this.validateQty(signal.symbol, qty, signal.type === "buy" ? "buy" : "sell");
     let formattedQty = "";
     let actualQty = 0;
     if (validQty === null) {
-      // qty too small — use minimum possible
+      if (reduceOnly) {
+        // The position (or what's left of it) is below the exchange's minimum
+        // tradeable size. Forcing a sell up to minQty here would either get
+        // rejected for exceeding the real holding, or — without reduceOnly —
+        // open a short for the excess. Neither is acceptable; surface it
+        // instead of guessing.
+        logger.warn(`[bybit] ${signal.symbol} close quantity (${qty}) rounds below the exchange minimum — cannot safely close via market order. Skipping; check the position on Bybit manually.`);
+        return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() };
+      }
+      // Buy, qty too small — use minimum possible.
       const minQty = await this.getMinQty(signal.symbol);
       formattedQty = minQty.toFixed(4);
       actualQty = minQty;
@@ -398,7 +423,7 @@ export class BybitConnector {
       side,
       orderType: "Market",
       qty: formattedQty,
-      reduceOnly: false,
+      reduceOnly,
       orderLinkId,
     });
 

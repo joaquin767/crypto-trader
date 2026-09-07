@@ -109,16 +109,16 @@ test("validateQty returns null for too-small qty", async () => {
   // Mock the lot size cache
   (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
 
-  const result = await connector.validateQty("BTC/USDT", 0.0001);
+  const result = await connector.validateQty("BTC/USDT", 0.0001, "buy");
   assert.equal(result, null, "0.0001 BTC should be below min 0.001");
 });
 
-test("validateQty rounds qty to nearest step", async () => {
+test("validateQty rounds a buy to the nearest step", async () => {
   const connector = new BybitConnector(mockConfig);
   (connector as any).lotSizeCache.set("SOLUSDT", { minQty: "0.1", qtyStep: "0.1" });
 
   // 0.25 rounds to nearest 0.1 step → 0.3 (due to floating point, verify it's close)
-  const result = await connector.validateQty("SOL/USDT", 0.25);
+  const result = await connector.validateQty("SOL/USDT", 0.25, "buy");
   assert(result !== null, "should return a valid qty");
   assert(Math.abs(result - 0.3) < 0.0001, `expected ~0.3 but got ${result}`);
 });
@@ -127,8 +127,38 @@ test("validateQty returns qty for valid quantity", async () => {
   const connector = new BybitConnector(mockConfig);
   (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
 
-  const result = await connector.validateQty("BTC/USDT", 0.5);
+  const result = await connector.validateQty("BTC/USDT", 0.5, "buy");
   assert.equal(result, 0.5, "0.5 BTC should be valid");
+});
+
+// Regression coverage for the bug where a sell could round UP past the
+// quantity actually held — combined with reduceOnly:false (fixed separately),
+// that could flip a "close my position" sell into opening a naked short.
+// A sell must always round DOWN, never up, even though a buy rounding up is
+// fine (it just costs a few extra cents of notional).
+test("validateQty rounds a sell DOWN, never up past the held quantity", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("SOLUSDT", { minQty: "0.1", qtyStep: "0.1" });
+
+  // 0.25 would round UP to 0.3 for a buy (see test above) — for a sell it must
+  // floor to 0.2, never exceeding what might actually be held.
+  const result = await connector.validateQty("SOL/USDT", 0.25, "sell");
+  assert(result !== null, "should return a valid qty");
+  assert(Math.abs(result - 0.2) < 0.0001, `expected ~0.2 (floored) but got ${result}`);
+});
+
+test("validateQty returns null for a sell that floors below the exchange minimum", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.01", qtyStep: "0.001" });
+
+  // 0.0105 floors to 0.010, which is >= minQty 0.01 — should be valid.
+  const ok = await connector.validateQty("BTC/USDT", 0.0105, "sell");
+  assert(ok !== null && Math.abs(ok - 0.010) < 0.0001);
+
+  // 0.0104 floors to 0.010 too (still valid) — but 0.0049 floors to 0.004,
+  // below minQty 0.01, and must be rejected rather than bumped up.
+  const tooSmall = await connector.validateQty("BTC/USDT", 0.0049, "sell");
+  assert.equal(tooSmall, null);
 });
 
 // ── Lot Size Fetching ────────────────────────────────────────────────
@@ -517,6 +547,55 @@ test("placeOrder formats qty with correct precision", async () => {
     await connector.placeOrder(signal, 0.5);
     assert(capturedOrder !== null);
     assert.equal(capturedOrder.qty, "0.500"); // 3 decimal places for qtyStep 0.001
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+  }
+});
+
+// Regression coverage for F2 (specs/live-trading-readiness.md): closing orders
+// must carry reduceOnly:true so a local/exchange desync fails safely at the
+// exchange instead of opening a naked short.
+test("placeOrder sends reduceOnly:true for a sell, false for a buy", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+  let capturedOrder: any = null;
+  const originalPlaceOrder = connector.rest.placeOrder;
+  connector.rest.placeOrder = async (order: any) => {
+    capturedOrder = order;
+    return { symbol: "BTCUSDT", side: order.side, cumExecQty: order.qty, cumExecFee: "0", avgPrice: "40000", price: "40000", createdTime: String(Date.now()), orderId: "1", orderLinkId: "1", orderStatus: "Filled", qty: order.qty, leavesQty: "0", cumExecValue: "40" };
+  };
+
+  try {
+    const buySignal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    await connector.placeOrder(buySignal, 0.5);
+    assert.equal(capturedOrder.reduceOnly, false);
+
+    const sellSignal = { ...buySignal, type: "sell" as const };
+    await connector.placeOrder(sellSignal, 0.5);
+    assert.equal(capturedOrder.reduceOnly, true);
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+  }
+});
+
+// Regression coverage: a sell whose quantity floors below the exchange minimum
+// must be skipped (hold), never bumped up to minQty — bumping up a close is
+// exactly the "sell more than is held" bug this section exists to prevent.
+test("placeOrder skips (holds) a sell that floors below the exchange minimum, never bumps it up", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.01", qtyStep: "0.001" });
+  let placeOrderCalled = false;
+  const originalPlaceOrder = connector.rest.placeOrder;
+  connector.rest.placeOrder = async (order: any) => {
+    placeOrderCalled = true;
+    return { symbol: "BTCUSDT", side: order.side, cumExecQty: order.qty, cumExecFee: "0", avgPrice: "40000", price: "40000", createdTime: String(Date.now()), orderId: "1", orderLinkId: "1", orderStatus: "Filled", qty: order.qty, leavesQty: "0", cumExecValue: "40" };
+  };
+
+  try {
+    const sellSignal = { type: "sell" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    const result = await connector.placeOrder(sellSignal, 0.0049); // floors to 0.004, below minQty 0.01
+    assert.equal(result.side, "hold");
+    assert.equal(placeOrderCalled, false, "must never call the exchange with a bumped-up sell quantity");
   } finally {
     connector.rest.placeOrder = originalPlaceOrder;
   }
