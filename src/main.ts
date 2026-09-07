@@ -116,6 +116,14 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       lastSignal = tradeSignal;
 
       if (tradeSignal.type === "buy" || tradeSignal.type === "sell") {
+        // Skip sell signals if we don't have an open position in that symbol
+        if (tradeSignal.type === "sell") {
+          const existing = portfolio.positions.find(p => p.symbol === tradeSignal.symbol);
+          if (!existing) {
+            statusMessage = `${mode.toUpperCase()} | HOLD (no position to close for ${tradeSignal.symbol})`;
+            continue;
+          }
+        }
         const positionUsd = calcPositionSize(tradeSignal.confidence, portfolio, config);
 
         if (positionUsd <= 0) {
@@ -147,6 +155,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
             if (bybitErr instanceof BybitInsufficientBalanceError) {
               statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
               logger.warn("Bybit insufficient balance — falling back to paper mode");
+              logger.info("To trade on Bybit: transfer USDT to your Unified Trading Account in Bybit (Assets > Transfer > Funding → Unified Trading Account)");
               useBybit = false;
               bybitFallenBack = true;
               bybit.disconnect();
@@ -175,7 +184,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
         portfolio = update(portfolio, result);
         statusMessage = `${mode.toUpperCase()} | ${result.side} ${result.symbol} @ $${result.price.toFixed(2)}`;
-        logger.trade(`${result.side} ${result.symbol}`, `qty=${result.quantity.toFixed(4)}`, `price=$${result.price.toFixed(2)}`, `fee=$${result.fee.toFixed(4)}`);
+        // Only log trades with valid values (not NaN from failed SDK responses)
+        if (!Number.isNaN(result.quantity) && result.side !== "hold") {
+          logger.trade(`${result.side} ${result.symbol}`, `qty=${result.quantity.toFixed(4)}`, `price=$${result.price.toFixed(2)}`, `fee=$${result.fee.toFixed(4)}`);
+        }
 
         if (result.side === "buy") recordEntry(tradeSignal, result);
         if (result.side === "sell") {
