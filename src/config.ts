@@ -12,6 +12,10 @@ export interface Config {
   takeProfitPercent: number;   // e.g. 10 = sell if price rises 10% above entry
   refreshIntervalMs: number;   // how often to poll market data (min 1000)
   autoSelectSymbols?: boolean; // if true, automatically pick best symbols for your capital at startup
+  /** How close (as % of mark price) a position may get to its liquidation
+   *  price before entries are halted and it's flagged for the user — see
+   *  specs/live-trading-readiness.md §3.2. Default 15 if unset. */
+  liquidationBufferPercent?: number;
 }
 
 export class ConfigError extends Error {
@@ -46,6 +50,7 @@ export function loadConfig(path: string): Config {
     takeProfitPercent: raw["takeProfitPercent"] as number | undefined,
     refreshIntervalMs: raw["refreshIntervalMs"] as number | undefined,
     autoSelectSymbols: raw["autoSelectSymbols"] as boolean | undefined,
+    liquidationBufferPercent: raw["liquidationBufferPercent"] as number | undefined,
   };
 
   // Validation
@@ -81,6 +86,12 @@ export function loadConfig(path: string): Config {
   }
   if (typeof config.refreshIntervalMs !== "number" || config.refreshIntervalMs < 1000) {
     throw new ConfigError("config.refreshIntervalMs must be >= 1000");
+  }
+  if (
+    config.liquidationBufferPercent !== undefined &&
+    (typeof config.liquidationBufferPercent !== "number" || config.liquidationBufferPercent <= 0 || config.liquidationBufferPercent >= 100)
+  ) {
+    throw new ConfigError("config.liquidationBufferPercent must be a number between 0 and 100 (exclusive) if set");
   }
 
   return config as Config;

@@ -414,6 +414,24 @@ test("handlePosition dispatches positions to registered handlers", () => {
   assert.equal(received[0].symbol, "BTC/USDT");
 });
 
+// Regression coverage for spec §3.2/§3.4: onPosition's adapted Position type
+// has no leverage/liquidationPrice fields, so the leverage-drift and
+// liquidation-buffer checks in main.ts need the raw data preserved.
+test("handlePosition dispatches unadapted data (with leverage/liquidationPrice intact) to onRawPosition", () => {
+  const connector = new BybitConnector(mockConfig);
+  let received: any = null;
+  connector.onRawPosition((positions) => { received = positions; });
+
+  (connector as any).handlePosition([
+    { symbol: "BTCUSDT", size: "0.5", entryPrice: "40000", markPrice: "41000", leverage: "5", liquidationPrice: "35000" },
+  ]);
+
+  assert(received !== null, "raw handler should have been called");
+  assert.equal(received[0].symbol, "BTCUSDT", "raw handler must NOT get the app-format symbol");
+  assert.equal(received[0].leverage, "5");
+  assert.equal(received[0].liquidationPrice, "35000");
+});
+
 test("handlePosition ignores non-array data", () => {
   const connector = new BybitConnector(mockConfig);
   let callCount = 0;
@@ -599,4 +617,108 @@ test("placeOrder skips (holds) a sell that floors below the exchange minimum, ne
   } finally {
     connector.rest.placeOrder = originalPlaceOrder;
   }
+});
+
+// ── ensureLeverageAndMargin ───────────────────────────────────────────
+// Regression coverage for spec §3.1 — the leverage pin is what makes the
+// cash guardrail's "notional = capital at risk" assumption actually true on
+// a leveraged product. These tests exercise the three outcomes: clean
+// success, an idempotent "already set" rejection (must not be fatal), and a
+// position blocking the change (must restrict that symbol, not halt
+// everything) — plus the genuinely-fatal case where nothing can be confirmed.
+
+function withMocked(connector: BybitConnector, overrides: Record<string, any>, fn: () => Promise<void>) {
+  const originals: Record<string, any> = {};
+  for (const key of Object.keys(overrides)) {
+    originals[key] = (connector.rest as any)[key];
+    (connector.rest as any)[key] = overrides[key];
+  }
+  return fn().finally(() => {
+    for (const key of Object.keys(overrides)) (connector.rest as any)[key] = originals[key];
+  });
+}
+
+test("ensureLeverageAndMargin succeeds cleanly when there are no open positions", async () => {
+  const connector = new BybitConnector(mockConfig);
+  await withMocked(connector, {
+    setLeverage: async () => {},
+    setMarginMode: async () => {},
+    getPositions: async () => ({ list: [] }),
+  }, async () => {
+    const result = await connector.ensureLeverageAndMargin();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.restrictedSymbols, []);
+  });
+});
+
+test("ensureLeverageAndMargin treats an 'already set' rejection as success, not failure", async () => {
+  const connector = new BybitConnector(mockConfig);
+  await withMocked(connector, {
+    setLeverage: async () => { throw new Error("leverage not modified"); },
+    setMarginMode: async () => { throw new Error("Margin mode is already set"); },
+    getPositions: async () => ({ list: [] }),
+  }, async () => {
+    const result = await connector.ensureLeverageAndMargin();
+    assert.equal(result.ok, true, "an idempotent 'no change needed' rejection must not be treated as failure");
+  });
+});
+
+test("ensureLeverageAndMargin restricts (does not halt) a symbol whose open position blocks the leverage change", async () => {
+  const connector = new BybitConnector(mockConfig);
+  await withMocked(connector, {
+    setLeverage: async (_cat: string, symbol: string) => {
+      if (symbol === "BTCUSDT") throw new Error("leverage cannot be changed while a position is open");
+    },
+    setMarginMode: async () => {},
+    getPositions: async () => ({
+      list: [
+        { symbol: "BTCUSDT", side: "Buy", size: "0.01", entryPrice: "40000", markPrice: "40000", unrealisedPnl: "0", realisedPnl: "0", liquidationPrice: "0", leverage: "5", positionStatus: "Normal" },
+      ],
+    }),
+  }, async () => {
+    const result = await connector.ensureLeverageAndMargin();
+    assert.equal(result.ok, true, "a restricted symbol is not the same as a fatal failure");
+    assert.deepEqual(result.restrictedSymbols, ["BTC/USDT"]);
+  });
+});
+
+test("ensureLeverageAndMargin ignores flat (zero-size) positions when checking leverage", async () => {
+  const connector = new BybitConnector(mockConfig);
+  await withMocked(connector, {
+    setLeverage: async () => {},
+    setMarginMode: async () => {},
+    getPositions: async () => ({
+      list: [
+        { symbol: "BTCUSDT", side: "Buy", size: "0", entryPrice: "0", markPrice: "40000", unrealisedPnl: "0", realisedPnl: "0", liquidationPrice: "0", leverage: "10", positionStatus: "Normal" },
+      ],
+    }),
+  }, async () => {
+    const result = await connector.ensureLeverageAndMargin();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.restrictedSymbols, [], "a flat position's stale leverage field must not restrict the symbol");
+  });
+});
+
+test("ensureLeverageAndMargin is fatal when margin mode can't be confirmed at all", async () => {
+  const connector = new BybitConnector(mockConfig);
+  await withMocked(connector, {
+    setLeverage: async () => {},
+    setMarginMode: async () => { throw new Error("insufficient permissions"); },
+    getPositions: async () => ({ list: [] }),
+  }, async () => {
+    const result = await connector.ensureLeverageAndMargin();
+    assert.equal(result.ok, false);
+  });
+});
+
+test("ensureLeverageAndMargin is fatal when position leverage can't be read back at all", async () => {
+  const connector = new BybitConnector(mockConfig);
+  await withMocked(connector, {
+    setLeverage: async () => {},
+    setMarginMode: async () => {},
+    getPositions: async () => { throw new Error("network error"); },
+  }, async () => {
+    const result = await connector.ensureLeverageAndMargin();
+    assert.equal(result.ok, false, "if the safety invariant can't be confirmed, it must not be assumed true");
+  });
 });

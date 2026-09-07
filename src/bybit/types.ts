@@ -311,6 +311,8 @@ export const ENDPOINT_LIMITS: Record<string, { maxPerSecond: number; maxBurst: n
   "/v5/order/history": { maxPerSecond: 5, maxBurst: 10 },
   "/v5/position/list": { maxPerSecond: 5, maxBurst: 10 },
   "/v5/account/wallet-balance": { maxPerSecond: 5, maxBurst: 10 },
+  "/v5/position/set-leverage": { maxPerSecond: 2, maxBurst: 5 },
+  "/v5/account/set-margin-mode": { maxPerSecond: 2, maxBurst: 5 },
 };
 
 export function getEndpointLimit(path: string): { maxPerSecond: number; maxBurst: number } {

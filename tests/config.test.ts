@@ -188,11 +188,28 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     takeProfitPercent: 12.5,
     refreshIntervalMs: 9000,
     autoSelectSymbols: true,
+    liquidationBufferPercent: 20,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {
     const result = loadConfig(path);
     assert.deepEqual(result, raw);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on out-of-range liquidationBufferPercent", () => {
+  const path = tmp("badliqbuffer");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    liquidationBufferPercent: 150,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
   } finally {
     if (existsSync(path)) unlinkSync(path);
   }

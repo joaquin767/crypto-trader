@@ -11,8 +11,8 @@ import { defaultParams, optimize, getInsights, type StrategyParams, type Learnin
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
 import { BybitInsufficientBalanceError, BybitInvalidQtyError, BybitFatalError, BybitFillUncertainError } from "./bybit/types.ts";
-import { appSymbolToBybit } from "./bybit/adapters.ts";
-import type { BybitConfig } from "./bybit/types.ts";
+import { appSymbolToBybit, bybitSymbolToApp } from "./bybit/adapters.ts";
+import type { BybitConfig, BybitPosition } from "./bybit/types.ts";
 import { logger } from "./logger.ts";
 import { recommendSymbols, checkConfiguredSymbols } from "./strategy/symbol-recommender.ts";
 import { acquireInstanceLock } from "./instance-lock.ts";
@@ -487,6 +487,43 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       }
     });
 
+    // Continuous leverage-drift + liquidation-buffer monitoring (spec §3.2/§3.4).
+    // reconcilePositions()/ensureLeverageAndMargin() only run once, at connect()
+    // time — this fires on every position update pushed by Bybit's private WS
+    // stream (near-real-time), which is what actually catches leverage changed
+    // manually mid-session or a position drifting toward liquidation.
+    const liquidationBufferPercent = config.liquidationBufferPercent ?? 15;
+    bybit.onRawPosition((positions: BybitPosition[]) => {
+      for (const pos of positions) {
+        const size = Math.abs(Number.parseFloat(pos.size));
+        if (size <= 0) continue;
+        const appSymbol = bybitSymbolToApp(pos.symbol);
+
+        // Leverage drift: a direct violation of the §3.1 safety invariant that
+        // the cash guardrail's notional-equals-capital-at-risk assumption
+        // depends on. Escalates straight to halting entries, not just a log.
+        if (pos.leverage !== "1" && !haltedSymbols.has(appSymbol)) {
+          haltedSymbols.add(appSymbol);
+          statusMessage = `🔴 ${appSymbol} leverage drifted to ${pos.leverage}x (expected 1x) — entries halted. Closes still active.`;
+          logger.error(`[leverage] ${statusMessage}`);
+        }
+
+        // Liquidation buffer: even at 1x isolated, a position can still be
+        // liquidated — this is independent of (and checked more often than)
+        // the stop-loss logic in signals.ts, since liquidation is unforgiving.
+        const markPrice = Number.parseFloat(pos.markPrice);
+        const liquidationPrice = Number.parseFloat(pos.liquidationPrice);
+        if (markPrice > 0 && liquidationPrice > 0) {
+          const bufferPercent = (Math.abs(markPrice - liquidationPrice) / markPrice) * 100;
+          if (bufferPercent <= liquidationBufferPercent && !haltedSymbols.has(appSymbol)) {
+            haltedSymbols.add(appSymbol);
+            statusMessage = `🔴 ${appSymbol} is ${bufferPercent.toFixed(1)}% from liquidation (buffer: ${liquidationBufferPercent}%) — entries halted. Closes still active.`;
+            logger.error(`[liquidation] ${statusMessage}`);
+          }
+        }
+      }
+    });
+
     // Real-time tickers → latestMarketData (used by the timer loop)
     bybit.onTicker((snapshots: Map<string, MarketSnapshot>) => {
       // Merge updates so we keep all symbols on the dashboard
@@ -523,6 +560,30 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       await bybit.connect();
       statusMessage = `Bybit ${bybit.state.mode.toUpperCase()} — ${config.symbols.length} symbols`;
       logger.info(`Bybit connected. Mode: ${bybit.state.mode}`);
+
+      // Pin leverage to 1x + isolated margin, verified — see spec §3.1. This is
+      // what makes the cash guardrail's "notional = capital at risk" assumption
+      // actually hold on a leveraged product. A failure here is NOT a case to
+      // fall back to paper trading (that would silently substitute fake data
+      // for a real safety problem) — it halts all new trading exactly like a
+      // fatal Bybit account error, while keeping the dashboard/connection up so
+      // the user can see why and existing positions keep being monitored.
+      const leverageCheck = await bybit.ensureLeverageAndMargin();
+      for (const d of leverageCheck.details) logger.warn(`[leverage] ${d}`);
+      if (!leverageCheck.ok) {
+        fatalHalt = true;
+        statusMessage = `🔴 HALTED — could not confirm 1x leverage / isolated margin. See logs.`;
+        logger.error(statusMessage);
+        dashboardState.bybitError = statusMessage;
+      } else if (leverageCheck.restrictedSymbols.length > 0) {
+        // A pre-existing open position blocked the leverage change for these
+        // specific symbols (see spec §3.1's second integration subtlety) — not
+        // fatal, but new entries for them are unsafe until they're flat and
+        // re-pinned. Reuses the same haltedSymbols mechanism as a rejected
+        // live order (§6.2): closes stay fully active, only entries are blocked.
+        for (const s of leverageCheck.restrictedSymbols) haltedSymbols.add(s);
+        statusMessage = `⚠️ Entries restricted for ${leverageCheck.restrictedSymbols.join(", ")} — not at confirmed 1x leverage. Closes still active.`;
+      }
 
       // Reconcile local (journal-derived) positions against what Bybit actually
       // reports. Without this, a crash between a real fill and journaling it would

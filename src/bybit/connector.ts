@@ -27,6 +27,9 @@ export interface BybitConnectorState {
 export type TickerHandler = (snapshots: Map<string, MarketSnapshot>) => void;
 export type TradeHandler = (result: TradeResult) => void;
 export type PositionHandler = (positions: Position[]) => void;
+/** Unadapted position data — carries leverage/liquidationPrice, which the
+ *  app's Position type doesn't (see onRawPosition). */
+export type RawPositionHandler = (positions: BybitPosition[]) => void;
 export type ConnectionHandler = (state: BybitConnectorState) => void;
 
 export class BybitConnector {
@@ -38,6 +41,7 @@ export class BybitConnector {
   private tickerHandlers = new Set<TickerHandler>();
   private tradeHandlers = new Set<TradeHandler>();
   private positionHandlers = new Set<PositionHandler>();
+  private rawPositionHandlers = new Set<RawPositionHandler>();
   private connectionHandlers = new Set<ConnectionHandler>();
   private lastSnapshots = new Map<string, MarketSnapshot>();
   private lotSizeCache = new Map<string, { minQty: string; qtyStep: string }>();
@@ -291,6 +295,91 @@ export class BybitConnector {
     return { merged, unaccountedFor, warnings };
   }
 
+  /**
+   * Pin leverage to 1x for every configured symbol and margin mode to isolated
+   * for the account, then verify. See specs/live-trading-readiness.md §3.1 —
+   * this is what makes the cash guardrail's "notional = capital at risk"
+   * assumption actually true on a leveraged product, instead of silently false.
+   *
+   * `ok: false` means the safety invariant could not be confirmed at all and
+   * the caller must halt everything (same severity as a fatal Bybit error) —
+   * this is NOT a case to fall back to paper trading, which would silently
+   * substitute fake data instead of surfacing the real problem.
+   *
+   * `restrictedSymbols` lists symbols where an already-open position blocked
+   * the leverage change (a real, expected scenario for a crash-recovered
+   * position — see spec §3.1) — these aren't fatal. The caller should block
+   * new entries for them (they're safe to add to the existing haltedSymbols
+   * mechanism) while leaving existing position management fully active.
+   */
+  async ensureLeverageAndMargin(): Promise<{ ok: boolean; restrictedSymbols: string[]; details: string[] }> {
+    const details: string[] = [];
+    const restrictedSymbols: string[] = [];
+    let fatal = false;
+
+    // Bybit rejects both calls with a specific error when the target is already
+    // in effect (the expected steady state after the first successful pin on a
+    // later restart). The exact retCode for that hasn't been verified against
+    // live Bybit responses (see rest.ts's setLeverage/setMarginMode docs) — so
+    // rather than guess a numeric code and risk silently swallowing a real
+    // failure, this matches the documented phrasing Bybit uses for "no change
+    // needed" rejections. If a real Bybit response uses different wording,
+    // this needs updating against an actual testnet run — see spec §12.3.
+    const isNoChangeNeeded = (msg: string) => /not modified|already (set|in effect)|same as current|no need to modify/i.test(msg);
+
+    try {
+      await this.rest.setMarginMode("ISOLATED_MARGIN");
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      if (!isNoChangeNeeded(msg)) {
+        details.push(`Could not confirm isolated margin mode: ${msg}`);
+        fatal = true;
+      }
+    }
+
+    for (const bybitSymbol of this.config.symbols) {
+      try {
+        await this.rest.setLeverage("linear", bybitSymbol, "1");
+      } catch (err) {
+        const msg = (err as Error).message ?? "";
+        if (!isNoChangeNeeded(msg)) {
+          // Could be a genuine failure, or an open position blocking the change
+          // (spec §3.1's second integration subtlety) — the position read-back
+          // below is the authoritative check either way, so just note it here.
+          details.push(`setLeverage(${bybitSymbol}) was rejected (${msg}) — verifying actual position leverage.`);
+        }
+      }
+    }
+
+    // Read back actual leverage for every symbol with an open position — this
+    // is the authoritative check. setLeverage can succeed with no error and
+    // still not reflect what's really configured if it silently no-ops for a
+    // reason we didn't anticipate, and a position blocking the change (above)
+    // needs this to determine which specific symbol is affected.
+    try {
+      const raw = await this.rest.getPositions("linear", undefined, "USDT");
+      for (const pos of raw.list as BybitPosition[]) {
+        if (Math.abs(Number.parseFloat(pos.size)) <= 0) continue; // no open position — nothing to verify
+        if (pos.leverage !== "1") {
+          const appSymbol = bybitSymbolToApp(pos.symbol);
+          restrictedSymbols.push(appSymbol);
+          details.push(
+            `${pos.symbol} has an open position at ${pos.leverage}x leverage (expected 1x) — new entries ` +
+            `blocked for this symbol until it's flat and leverage is re-pinned. Its stop-loss/take-profit ` +
+            `and liquidation-buffer monitoring stay fully active.`,
+          );
+        }
+      }
+    } catch (err) {
+      // Can't confirm the safety invariant for ANY symbol — this must halt
+      // everything, not just proceed on faith.
+      details.push(`Could not verify position leverage: ${(err as Error).message}`);
+      fatal = true;
+    }
+
+    return { ok: !fatal, restrictedSymbols, details };
+  }
+
   /** Fetch and cache lot size info for a symbol. */
   private async ensureLotSize(symbol: string): Promise<{ minQty: string; qtyStep: string } | null> {
     const bybitSymbol = symbol.replace("/", "");
@@ -488,6 +577,9 @@ export class BybitConnector {
   onTicker(handler: TickerHandler): void { this.tickerHandlers.add(handler); }
   onTrade(handler: TradeHandler): void { this.tradeHandlers.add(handler); }
   onPosition(handler: PositionHandler): void { this.positionHandlers.add(handler); }
+  /** Unadapted position updates — use for leverage/liquidationPrice, which
+   *  onPosition's adapted Position type doesn't carry (spec §3.2/§3.4). */
+  onRawPosition(handler: RawPositionHandler): void { this.rawPositionHandlers.add(handler); }
   onConnection(handler: ConnectionHandler): void { this.connectionHandlers.add(handler); }
 
   // ── Internal Handlers ─────────────────────────────────────────────
@@ -536,6 +628,10 @@ export class BybitConnector {
   private handlePosition(data: unknown): void {
     const posData = data as any;
     if (!posData || !Array.isArray(posData)) return;
+
+    for (const handler of this.rawPositionHandlers) {
+      handler(posData as BybitPosition[]);
+    }
 
     const positions = posData.map((p: any) => bybitPositionToPosition(p));
     for (const handler of this.positionHandlers) {
