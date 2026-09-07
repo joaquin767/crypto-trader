@@ -23,7 +23,7 @@ function makeResult(overrides: Partial<TradeResult> = {}): TradeResult {
 
 test("recordEntry adds a new trade to the journal", () => {
   clearJournal();
-  const record = recordEntry(makeSignal(), makeResult());
+  const record = recordEntry(makeSignal(), makeResult(), "paper");
   assert.equal(record.symbol, "BTC/USDT");
   assert.equal(record.side, "buy");
   assert.equal(record.status, "open");
@@ -32,7 +32,7 @@ test("recordEntry adds a new trade to the journal", () => {
 
 test("recordExit closes an open trade", () => {
   clearJournal();
-  recordEntry(makeSignal(), makeResult({ side: "buy", price: 40000 }));
+  recordEntry(makeSignal(), makeResult({ side: "buy", price: 40000 }), "paper");
   const closed = recordExit("BTC/USDT", 42000, Date.now(), 0.42);
   assert(closed !== null);
   assert.equal(closed.status, "closed");
@@ -48,7 +48,7 @@ test("recordExit returns null if no open trade", () => {
 
 test("getClosedTrades returns only closed trades", () => {
   clearJournal();
-  recordEntry(makeSignal(), makeResult({ side: "buy" }));
+  recordEntry(makeSignal(), makeResult({ side: "buy" }), "paper");
   assert.equal(getClosedTrades().length, 0);
   recordExit("BTC/USDT", 42000, Date.now(), 0);
   assert.equal(getClosedTrades().length, 1);
@@ -56,7 +56,7 @@ test("getClosedTrades returns only closed trades", () => {
 
 test("clearJournal resets state", () => {
   clearJournal();
-  recordEntry(makeSignal(), makeResult());
+  recordEntry(makeSignal(), makeResult(), "paper");
   clearJournal();
   assert.equal(getHistory().length, 0);
 });

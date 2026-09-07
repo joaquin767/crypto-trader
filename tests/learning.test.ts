@@ -32,9 +32,9 @@ test("analyze returns zero metrics with no trades", () => {
 
 test("analyze calculates correct win rate after trades", () => {
   clearJournal();
-  recordEntry(makeSignal(), makeResult({ side: "buy", price: 40000 }));
+  recordEntry(makeSignal(), makeResult({ side: "buy", price: 40000 }), "paper");
   recordExit("BTC/USDT", 42000, Date.now(), 0.42); // win
-  recordEntry(makeSignal({ symbol: "ETH/USDT" }), makeResult({ symbol: "ETH/USDT", side: "buy", price: 2000 }));
+  recordEntry(makeSignal({ symbol: "ETH/USDT" }), makeResult({ symbol: "ETH/USDT", side: "buy", price: 2000 }), "paper");
   recordExit("ETH/USDT", 1900, Date.now(), 0.19); // loss
 
   const report = analyze(10000);
@@ -45,7 +45,7 @@ test("analyze calculates correct win rate after trades", () => {
 
 test("analyze calculates Sharpe ratio", () => {
   clearJournal();
-  recordEntry(makeSignal(), makeResult({ side: "buy", price: 100 }));
+  recordEntry(makeSignal(), makeResult({ side: "buy", price: 100 }), "paper");
   recordExit("BTC/USDT", 200, Date.now(), 0.01); // big profit
   const report = analyze(10000);
   assert(typeof report.sharpeRatio === "number");

@@ -1,6 +1,6 @@
 // Performance analyzer — calculates metrics from the trade journal.
 
-import { getClosedTrades } from "./journal.ts";
+import { getClosedTrades, type TradeVenue } from "./journal.ts";
 import { calcWinRate, calcSharpe, calcProfitFactor, calcMaxDrawdown } from "../strategy/risk.ts";
 
 export interface PerformanceReport {
@@ -25,9 +25,15 @@ export interface PerformanceReport {
 /**
  * Analyze the full trade journal and return comprehensive performance metrics.
  * Call this periodically to feed the learning system.
+ *
+ * Pass the current run's venue to keep performance numbers (and therefore the
+ * learning optimizer's strategy-parameter adjustments) computed only from
+ * trades of the same kind as this run — paper/simulated results must never
+ * silently blend with real fills. Omitting it analyzes everything in the
+ * journal regardless of venue (used by call sites that don't care, e.g. tests).
  */
-export function analyze(initialCash: number): PerformanceReport {
-  const closed = getClosedTrades();
+export function analyze(initialCash: number, venue?: TradeVenue): PerformanceReport {
+  const closed = getClosedTrades(venue);
   const allPnls = closed.map(t => t.pnl ?? 0);
   const wins = allPnls.filter(p => p > 0);
   const losses = allPnls.filter(p => p < 0);
@@ -56,7 +62,7 @@ export function analyze(initialCash: number): PerformanceReport {
   }
 
   return {
-    totalTrades: getClosedTrades().length + (closed.length > 0 ? 0 : 0),
+    totalTrades: closed.length,
     closedTrades: closed.length,
     openTrades: closed.length > 0 ? 0 : 0,  // simplified
     winRate: calcWinRate(allPnls),

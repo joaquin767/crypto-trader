@@ -85,7 +85,7 @@ test("journal records and closes trades end-to-end", () => {
   };
   const entry = recordEntry(signal, {
     symbol: "BTC/USDT", side: "buy", quantity: 0.01, price: 40000, fee: 0.4, timestamp: 1,
-  });
+  }, "paper");
   assert.equal(entry.status, "open");
 
   const exit = recordExit("BTC/USDT", 42000, 2, 0.42);
@@ -104,6 +104,7 @@ test("performance analyzer works with trade journal", () => {
         bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 },
         momentum: 2, atr: 100 } },
     { symbol: "BTC/USDT", side: "buy", quantity: 0.01, price: 40000, fee: 0.4, timestamp: 1 },
+    "paper",
   );
   recordExit("BTC/USDT", 42000, 2, 0.42);
 
@@ -126,6 +127,9 @@ test("executor handles hold signals", async () => {
         bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 },
         momentum: 0, atr: 100 } },
     config,
+    empty(),
+    { symbol: "BTC/USDT", price: 40000, change24h: 0, volume24h: 0, timestamp: Date.now() },
+    0,
   );
   assert.equal(result.side, "hold");
   assert.equal(result.quantity, 0);

@@ -1,5 +1,7 @@
 import type { TradeSignal } from "./strategy/signals.ts";
 import type { Config } from "./config.ts";
+import type { Portfolio } from "./portfolio.ts";
+import type { MarketSnapshot } from "./market.ts";
 
 export interface TradeResult {
   symbol: string;
@@ -11,22 +13,28 @@ export interface TradeResult {
 }
 
 /**
- * Execute a trade signal against the exchange via ccxt.
- * In paper mode (default), simulates fills at market price with 0.1% fee.
- * In live mode, calls the exchange API.
+ * Simulate a trade fill at the real current market price, with a configurable
+ * simulated fee (0.1%). This is the standalone no-exchange paper-trading path —
+ * it must never run as a silent substitute for a real Bybit order (see
+ * specs/live-trading-readiness.md §6.1/§6.2): a previous version fabricated a
+ * random $40,000-42,000 price regardless of the actual symbol, and a hardcoded
+ * 0.01 sell quantity regardless of what was actually held, which — when this
+ * function ran as an automatic fallback after a rejected live order — could
+ * silently mark a real position "closed" in the local books at a fantasy price
+ * while it stayed open and unmanaged on the exchange.
  *
- * If the signal is "hold", returns a no-op result.
- * If balance is insufficient, returns { side: "hold" } with a reason via quantity=0.
+ * `positionUsd` is the caller's already-sized position (from
+ * `calcPositionSize()`), so paper-mode sizing matches live-mode sizing exactly.
+ * For a sell, quantity is always the actual held quantity from `portfolio` —
+ * never a guess.
  */
-/**
- * Execute a trade signal against the exchange via ccxt.
- * In paper mode (default), simulates fills at market price with 0.1% fee.
- * In live mode, calls the exchange API.
- *
- * If the signal is "hold", returns a no-op result.
- * If balance is insufficient, returns { side: "hold" }.
- */
-export async function execute(signal: TradeSignal, config: Config, cashUsd?: number): Promise<TradeResult> {
+export async function execute(
+  signal: TradeSignal,
+  config: Config,
+  portfolio: Portfolio,
+  snapshot: MarketSnapshot,
+  positionUsd: number,
+): Promise<TradeResult> {
   if (signal.type === "hold") {
     return {
       symbol: signal.symbol,
@@ -38,45 +46,33 @@ export async function execute(signal: TradeSignal, config: Config, cashUsd?: num
     };
   }
 
-  // Paper trading simulation
-  const simulatedPrice = 40000 + Math.random() * 2000;
-  const rawQty = signal.type === "buy" ? config.maxPositionSizeUsd / simulatedPrice : 0.01;
-  const fee = (rawQty * simulatedPrice) * 0.001;
+  const price = snapshot.price;
+  const FEE_RATE = 0.001;
 
-  // Check if we can afford this trade
-  if (signal.type === "buy" && cashUsd !== undefined) {
-    const cost = rawQty * simulatedPrice + fee;
-    if (cost > cashUsd) {
-      // Not enough cash — return a minimal trade with what we have
-      const affordableQty = Math.max((cashUsd * 0.99) / simulatedPrice, 0);
-      if (affordableQty <= 0.000001) {
-        return {
-          symbol: signal.symbol,
-          side: "hold",
-          quantity: 0,
-          price: 0,
-          fee: 0,
-          timestamp: Date.now(),
-        };
-      }
-      const affordableFee = (affordableQty * simulatedPrice) * 0.001;
-      return {
-        symbol: signal.symbol,
-        side: signal.type,
-        quantity: affordableQty,
-        price: simulatedPrice,
-        fee: affordableFee,
-        timestamp: Date.now(),
-      };
+  if (signal.type === "sell") {
+    const existing = portfolio.positions.find(p => p.symbol === signal.symbol);
+    const quantity = existing?.quantity ?? 0;
+    if (quantity <= 0) {
+      return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() };
     }
+    const fee = quantity * price * FEE_RATE;
+    return { symbol: signal.symbol, side: "sell", quantity, price, fee, timestamp: Date.now() };
   }
 
-  return {
-    symbol: signal.symbol,
-    side: signal.type,
-    quantity: rawQty,
-    price: simulatedPrice,
-    fee,
-    timestamp: Date.now(),
-  };
+  // "buy"
+  const rawQty = positionUsd / price;
+  const fee = rawQty * price * FEE_RATE;
+  const cost = rawQty * price + fee;
+
+  if (cost > portfolio.cashUsd) {
+    // Not enough cash for the full sized position — buy what's affordable instead.
+    const affordableQty = Math.max((portfolio.cashUsd * 0.99) / price, 0);
+    if (affordableQty <= 0.000001) {
+      return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() };
+    }
+    const affordableFee = affordableQty * price * FEE_RATE;
+    return { symbol: signal.symbol, side: "buy", quantity: affordableQty, price, fee: affordableFee, timestamp: Date.now() };
+  }
+
+  return { symbol: signal.symbol, side: "buy", quantity: rawQty, price, fee, timestamp: Date.now() };
 }

@@ -6,10 +6,20 @@ import type { TradeSignal } from "../strategy/signals.ts";
 import type { TradeResult } from "../executor.ts";
 import type { Portfolio } from "../portfolio.ts";
 
+/**
+ * Where a trade actually executed. Set once at entry and never changed.
+ * Keeps paper/simulated trades structurally distinguishable from real fills —
+ * performance metrics, win rate, and anything feeding the learning optimizer
+ * must never silently blend "bybit-live"/"bybit-testnet" with "paper" results.
+ * See specs/live-trading-readiness.md §6.3.
+ */
+export type TradeVenue = "bybit-live" | "bybit-testnet" | "paper";
+
 export interface TradeRecord {
   id: number;
   symbol: string;
   side: "buy" | "sell";
+  venue: TradeVenue;
   entryTime: number;
   exitTime?: number;
   entryPrice: number;
@@ -62,11 +72,13 @@ function persistJournal(): void {
 export function recordEntry(
   signal: TradeSignal,
   result: TradeResult,
+  venue: TradeVenue,
 ): TradeRecord {
   const record: TradeRecord = {
     id: _nextId++,
     symbol: signal.symbol,
     side: result.side as "buy" | "sell",
+    venue,
     entryTime: result.timestamp,
     entryPrice: result.price,
     quantity: result.quantity,
@@ -110,19 +122,24 @@ export function recordExit(
   return openTrade;
 }
 
-/** Get all recorded trades. */
-export function getHistory(): TradeRecord[] {
-  return [..._trades];
+/**
+ * Get all recorded trades, optionally filtered to one venue. Pass the current
+ * run's venue wherever the result feeds performance metrics or capital
+ * calculations — see specs/live-trading-readiness.md §6.3: paper and real
+ * fills must never silently blend.
+ */
+export function getHistory(venue?: TradeVenue): TradeRecord[] {
+  return venue ? _trades.filter(t => t.venue === venue) : [..._trades];
 }
 
-/** Get closed trades only. */
-export function getClosedTrades(): TradeRecord[] {
-  return _trades.filter(t => t.status === "closed");
+/** Get closed trades only, optionally filtered to one venue. */
+export function getClosedTrades(venue?: TradeVenue): TradeRecord[] {
+  return _trades.filter(t => t.status === "closed" && (!venue || t.venue === venue));
 }
 
-/** Get open trades only. */
-export function getOpenTrades(): TradeRecord[] {
-  return _trades.filter(t => t.status === "open");
+/** Get open trades only, optionally filtered to one venue. */
+export function getOpenTrades(venue?: TradeVenue): TradeRecord[] {
+  return _trades.filter(t => t.status === "open" && (!venue || t.venue === venue));
 }
 
 /** Clear all trades (for tests). */
@@ -137,15 +154,20 @@ export function clearJournal(): void {
  * This recovers open positions from a previous session so the system
  * can properly close them instead of leaving them orphaned.
  *
- * Call this at startup AFTER creating the initial portfolio.
+ * Call this at startup AFTER creating the initial portfolio, passing the
+ * current run's venue — recovery only ever considers trades from the same
+ * venue as this run. Without this, a paper/testnet session could recover
+ * "open positions" and carried-forward P&L from a live run's real trades
+ * (or vice versa), silently mixing fantasy and real capital accounting.
  * Returns the reconstructed portfolio with correct cash and positions.
  */
 export function reconstructPortfolio(
   portfolio: Portfolio,
   latestPrices: Map<string, number>,
+  venue: TradeVenue,
 ): Portfolio {
-  const openTrades = getOpenTrades();
-  const closedTrades = getClosedTrades();
+  const openTrades = getOpenTrades(venue);
+  const closedTrades = getClosedTrades(venue);
 
   // Calculate total P&L from closed trades
   const closedPnl = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);

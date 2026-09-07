@@ -5,7 +5,7 @@ import { calcPositionSize } from "./strategy/risk.ts";
 import { create, update, canAfford, deploymentRatio, markToMarket, type Portfolio, type Position } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
-import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, reconstructPortfolio, type TradeRecord } from "./learning/journal.ts";
+import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, reconstructPortfolio, type TradeRecord, type TradeVenue } from "./learning/journal.ts";
 import { analyze as analyzePerformance, type PerformanceReport } from "./learning/analyzer.ts";
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
@@ -50,10 +50,19 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // Unlike bybitFallenBack, this halts ALL trading (not just Bybit trading) and
   // is never cleared automatically — the account issue needs the user's attention.
   let fatalHalt = false;
+  // Fixed for the life of this run — derived from the same flags that decide
+  // bybitConfig.testnet, so it always matches bybit.state.mode. Every journaled
+  // trade is tagged with this so paper/testnet/live results can never blend
+  // (see specs/live-trading-readiness.md §6.3).
+  const venue: TradeVenue = !useBybit ? "paper" : mode === "live" ? "bybit-live" : "bybit-testnet";
+  // Symbols with new-entry trading blocked after a real Bybit rejection
+  // (insufficient balance / qty too small). Closing trades for these symbols
+  // are never blocked — only entries. Cleared on restart (see §6.2/§13.3).
+  const haltedSymbols = new Set<string>();
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
-  // Recover open positions from previous session
-  portfolio = reconstructPortfolio(portfolio, new Map());
+  // Recover open positions from previous session — only ever this run's venue.
+  portfolio = reconstructPortfolio(portfolio, new Map(), venue);
   let lastSignal: TradeSignal | null = null;
   let statusMessage = "starting...";
   let strategyParams: StrategyParams = defaultParams();
@@ -147,11 +156,27 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
             continue;
           }
         }
-        const positionUsd = calcPositionSize(tradeSignal.confidence, portfolio, config);
 
-        if (positionUsd <= 0) {
-          statusMessage = `${mode.toUpperCase()} | insufficient cash for ${tradeSignal.symbol}`;
+        // A prior real Bybit rejection (insufficient balance / qty too small) blocks
+        // only NEW entries for this symbol — closes are never blocked (see §6.2).
+        if (tradeSignal.type === "buy" && haltedSymbols.has(tradeSignal.symbol)) {
+          statusMessage = `⚠️ Entries halted for ${tradeSignal.symbol} (prior Bybit rejection) — closes still active`;
           continue;
+        }
+
+        // Sizing only applies to opening a new position — a close always sells the
+        // full held quantity (computed below from portfolio.positions), never a
+        // fraction of cash. calcPositionSize() naturally returns ~0 when cash is
+        // low, which is exactly when a stop-loss/take-profit close is most likely
+        // to fire (cash is low because capital is deployed in the position being
+        // closed) — gating on it here would have silently skipped real closes.
+        let positionUsd = 0;
+        if (tradeSignal.type === "buy") {
+          positionUsd = calcPositionSize(tradeSignal.confidence, portfolio, config);
+          if (positionUsd <= 0) {
+            statusMessage = `${mode.toUpperCase()} | insufficient cash for ${tradeSignal.symbol}`;
+            continue;
+          }
         }
 
         let result: TradeResult;
@@ -176,26 +201,22 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
             result = await bybit.placeOrder(tradeSignal, qty, portfolio.cashUsd);
           } catch (bybitErr) {
             if (bybitErr instanceof BybitInsufficientBalanceError) {
-              statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
-              logger.warn("Bybit insufficient balance — falling back to paper mode");
+              // Real rejection from a real order. Per specs/live-trading-readiness.md
+              // §6.2: never disconnect, never fabricate a substitute trade — that
+              // combination previously let the bot mark a real position "closed" in
+              // its own books at a fantasy price while it stayed open, unmanaged, on
+              // Bybit. Only new entries for this symbol are blocked; the connection,
+              // WS position feed, and closes all stay fully active.
+              haltedSymbols.add(tradeSignal.symbol);
+              statusMessage = `⚠️ Bybit insufficient balance for ${tradeSignal.symbol} — entries halted. Fund your testnet wallet.`;
+              logger.warn(`Bybit insufficient balance for ${tradeSignal.symbol} — entries halted, closes still active.`);
               logger.info("To trade on Bybit: transfer USDT to your Unified Trading Account in Bybit (Assets > Transfer > Funding → Unified Trading Account)");
-              useBybit = false;
-              bybitFallenBack = true;
-              bybit.disconnect();
-              dashboardState.bybitConnected = false;
-              dashboardState.bybitError = null;
-              dashboardState.bybitMode = "paper";
-              result = await execute(tradeSignal, config, portfolio.cashUsd);
+              continue;
             } else if (bybitErr instanceof BybitInvalidQtyError) {
-              statusMessage = `Bybit rejected order (qty too small) — falling back to paper mode.`;
-              logger.warn("Bybit rejected order (qty too small) — falling back to paper mode");
-              useBybit = false;
-              bybitFallenBack = true;
-              bybit.disconnect();
-              dashboardState.bybitConnected = false;
-              dashboardState.bybitError = null;
-              dashboardState.bybitMode = "paper";
-              result = await execute(tradeSignal, config, portfolio.cashUsd);
+              haltedSymbols.add(tradeSignal.symbol);
+              statusMessage = `⚠️ Bybit rejected order for ${tradeSignal.symbol} (qty too small) — entries halted.`;
+              logger.warn(`Bybit rejected order for ${tradeSignal.symbol} (qty too small) — entries halted, closes still active.`);
+              continue;
             } else if (bybitErr instanceof BybitFatalError) {
               // Account-level ban/restriction (see anti-ban spec §9D). This is never
               // safe to retry or paper-fallback from silently — stop everything and
@@ -220,8 +241,11 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
             }
           }
         } else {
-          // Execute via simulated paper trading
-          result = await execute(tradeSignal, config, portfolio.cashUsd);
+          // Execute via simulated paper trading — only reached when Bybit isn't
+          // configured/connected at all, never as a mid-session substitute for a
+          // real order (see §6.2). Always priced off the real snapshot and sized
+          // identically to the Bybit path.
+          result = await execute(tradeSignal, config, portfolio, snapshot, positionUsd);
         }
 
         try {
@@ -239,17 +263,18 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           logger.trade(`${result.side} ${result.symbol}`, `qty=${result.quantity.toFixed(4)}`, `price=$${result.price.toFixed(2)}`, `fee=$${result.fee.toFixed(4)}`);
         }
 
-        if (result.side === "buy") recordEntry(tradeSignal, result);
+        if (result.side === "buy") recordEntry(tradeSignal, result, venue);
         if (result.side === "sell") {
           const closed = recordExit(symbol, result.price, result.timestamp, result.fee);
           if (closed) statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
         }
 
-        // Update performance report on every trade so the equity curve updates
-        performanceReport = analyzePerformance(initialCash);
+        // Update performance report on every trade so the equity curve updates.
+        // Scoped to this run's venue — see §6.3, paper/real results never blend.
+        performanceReport = analyzePerformance(initialCash, venue);
 
         broadcast("trade", {
-          tradeHistory: getHistory(),
+          tradeHistory: getHistory(venue),
           performanceReport,
           learningInsights: [],
           strategyParams,
@@ -266,7 +291,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     dashboardState.portfolio = portfolio;
     dashboardState.lastSignal = lastSignal;
     dashboardState.statusMessage = statusMessage;
-    dashboardState.tradeHistory = getHistory();
+    dashboardState.tradeHistory = getHistory(venue);
     dashboardState.performanceReport = performanceReport;
     dashboardState.learningInsights = learningInsights;
     dashboardState.strategyParams = strategyParams;
@@ -297,10 +322,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
   // ── Periodic learning cycle ────────────────────────────────────────
   async function runLearningCycle(): Promise<void> {
-    const closedTrades = getClosedTrades();
+    const closedTrades = getClosedTrades(venue);
     if (closedTrades.length < 3) return;
 
-    performanceReport = analyzePerformance(initialCash);
+    performanceReport = analyzePerformance(initialCash, venue);
 
     strategyParams = optimize(
       strategyParams,
