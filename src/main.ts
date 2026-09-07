@@ -285,6 +285,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       statusMessage,
       mode,
       performanceReport,
+      bybitConnected: dashboardState.bybitConnected,
+      bybitLatencyMs: dashboardState.bybitLatencyMs,
+      bybitMode: dashboardState.bybitMode,
+      bybitError: dashboardState.bybitError,
+      operatingCapitalUsd: dashboardState.operatingCapitalUsd,
+      walletTotalUsd: dashboardState.walletTotalUsd,
+      deploymentRatio: dashboardState.deploymentRatio,
     });
   }
 
@@ -462,6 +469,17 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         statusMessage,
         mode,
         performanceReport,
+        // bybitConnected etc. only ever get set on dashboardState directly (by
+        // onConnection, below) — this broadcast previously never carried them,
+        // so a browser tab open across a reconnect/status change never saw it
+        // update until the page was reloaded and re-read dashboardState fresh.
+        bybitConnected: dashboardState.bybitConnected,
+        bybitLatencyMs: dashboardState.bybitLatencyMs,
+        bybitMode: dashboardState.bybitMode,
+        bybitError: dashboardState.bybitError,
+        operatingCapitalUsd: dashboardState.operatingCapitalUsd,
+        walletTotalUsd: dashboardState.walletTotalUsd,
+        deploymentRatio: dashboardState.deploymentRatio,
       });
     });
 

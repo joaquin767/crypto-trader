@@ -45,6 +45,7 @@ export function loadConfig(path: string): Config {
     stopLossPercent: raw["stopLossPercent"] as number | undefined,
     takeProfitPercent: raw["takeProfitPercent"] as number | undefined,
     refreshIntervalMs: raw["refreshIntervalMs"] as number | undefined,
+    autoSelectSymbols: raw["autoSelectSymbols"] as boolean | undefined,
   };
 
   // Validation
