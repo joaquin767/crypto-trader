@@ -354,6 +354,64 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
     bybit = new BybitConnector(bybitConfig);
 
+    // Auto-select symbols for small capital if enabled. This MUST run before
+    // bybit.connect() — the WebSocket subscribes to whatever's in
+    // bybitConfig.symbols at that point (see WsClient subscribe in
+    // BybitConnector.connect()), so recommendations discovered after connecting
+    // would just be logged and never actually traded (the bug this replaces).
+    // bybitConfig is the same object reference the connector holds as its
+    // internal config, so mutating bybitConfig.symbols here is picked up.
+    if (config.autoSelectSymbols) {
+      try {
+        logger.info("Analyzing best symbols for your capital...");
+        const recommendations = await recommendSymbols(bybit.rest, config.maxCapitalUsd, config.maxPositionSizeUsd, 3);
+        if (recommendations.length > 0) {
+          logger.info("=".repeat(50));
+          logger.info("RECOMMENDED SYMBOLS FOR YOUR CAPITAL:");
+          logger.info("-".repeat(50));
+          for (const rec of recommendations) {
+            const canBuy = Math.floor(config.maxCapitalUsd / rec.minTradeCost);
+            logger.info(`  ${rec.symbol.padEnd(10)} $${rec.price.toFixed(2).padEnd(8)} min: $${rec.minTradeCost.toFixed(2).padEnd(8)} ${rec.reason} (${canBuy}x in budget)`);
+          }
+          logger.info("-".repeat(50));
+          logger.info(`Previously configured: ${config.symbols.join(", ")}`);
+
+          // Keep any symbol with an open position subscribed even if it didn't
+          // make the recommendations — otherwise the bot would lose its ticker
+          // feed for that position and could never generate a stop-loss/take-
+          // profit sell signal for it again.
+          const recommendedSymbols = recommendations.map(r => r.symbol);
+          const heldSymbols = portfolio.positions.map(p => p.symbol).filter(s => !recommendedSymbols.includes(s));
+          if (heldSymbols.length > 0) {
+            logger.info(`Keeping open position symbol(s) subscribed too: ${heldSymbols.join(", ")}`);
+          }
+          const finalSymbols = [...recommendedSymbols, ...heldSymbols];
+
+          config.symbols = finalSymbols;
+          bybitConfig.symbols = finalSymbols.map(appSymbolToBybit);
+          logger.info(`Auto-selected for this session: ${config.symbols.join(", ")}`);
+          logger.info("=".repeat(50));
+        } else {
+          logger.warn("Symbol analysis returned no recommendations — keeping configured symbols.");
+        }
+      } catch (err) {
+        logger.warn(`Symbol analysis skipped, keeping configured symbols: ${(err as Error).message}`);
+      }
+    } else {
+      // Even without auto-select, check if current symbols are affordable
+      try {
+        const checks = await checkConfiguredSymbols(bybit.rest, config.symbols, config.maxCapitalUsd);
+        const unaffordable = checks.filter(c => !c.affordable);
+        if (unaffordable.length > 0) {
+          logger.warn("Some symbols may be too expensive for your capital:");
+          for (const c of unaffordable) {
+            logger.warn(`  ${c.symbol}: minimum ~$${c.minTradeCost.toFixed(2)} per trade (capital: $${config.maxCapitalUsd})`);
+          }
+          logger.info("Tip: set autoSelectSymbols: true in config.json to auto-pick the best symbols");
+        }
+      } catch { /* skip check */ }
+    }
+
     // Connection state → dashboard
     bybit.onConnection((state: BybitConnectorState) => {
       // If we've already fallen back to paper mode, ignore all Bybit events
@@ -433,42 +491,6 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         }
       } catch (err) {
         logger.warn(`[reconcile] Position reconciliation skipped: ${(err as Error).message}`);
-      }
-
-      // Auto-select symbols for small capital if enabled
-      if (config.autoSelectSymbols) {
-        try {
-          logger.info("Analyzing best symbols for your capital...");
-          const recommendations = await recommendSymbols(bybit.rest, config.maxCapitalUsd, config.maxPositionSizeUsd, 3);
-          if (recommendations.length > 0) {
-            logger.info("=".repeat(50));
-            logger.info("RECOMMENDED SYMBOLS FOR YOUR CAPITAL:");
-            logger.info("-".repeat(50));
-            for (const rec of recommendations) {
-              const canBuy = Math.floor(config.maxCapitalUsd / rec.minTradeCost);
-              logger.info(`  ${rec.symbol.padEnd(10)} $${rec.price.toFixed(2).padEnd(8)} min: $${rec.minTradeCost.toFixed(2).padEnd(8)} ${rec.reason} (${canBuy}x in budget)`);
-            }
-            logger.info("-".repeat(50));
-            logger.info(`Current config symbols: ${config.symbols.join(", ")}`);
-            logger.info(`Recommended: ${recommendations.map(r => r.symbol).join(", ")}`);
-            logger.info("=".repeat(50));
-          }
-        } catch (err) {
-          logger.warn(`Symbol analysis skipped: ${(err as Error).message}`);
-        }
-      } else {
-        // Even without auto-select, check if current symbols are affordable
-        try {
-          const checks = await checkConfiguredSymbols(bybit.rest, config.symbols, config.maxCapitalUsd);
-          const unaffordable = checks.filter(c => !c.affordable);
-          if (unaffordable.length > 0) {
-            logger.warn("Some symbols may be too expensive for your capital:");
-            for (const c of unaffordable) {
-              logger.warn(`  ${c.symbol}: minimum ~$${c.minTradeCost.toFixed(2)} per trade (capital: $${config.maxCapitalUsd})`);
-            }
-            logger.info("Tip: set autoSelectSymbols: true in config.json to auto-pick the best symbols");
-          }
-        } catch { /* skip check */ }
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
