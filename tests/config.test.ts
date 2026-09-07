@@ -189,6 +189,11 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     refreshIntervalMs: 9000,
     autoSelectSymbols: true,
     liquidationBufferPercent: 20,
+    maxDailyLossPercent: 12,
+    maxDrawdownHaltPercent: 25,
+    maxConsecutiveLosses: 7,
+    maxSlippagePercent: false as const,
+    maxCapitalUsdWarnThreshold: 750,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {
@@ -207,6 +212,55 @@ test("loadConfig throws ConfigError on out-of-range liquidationBufferPercent", (
     maxPositionSizeUsd: 100,
     maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
     liquidationBufferPercent: 150,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on out-of-range maxDailyLossPercent", () => {
+  const path = tmp("baddailyloss");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    maxDailyLossPercent: 0,
+  }));
+  try {
+    assert.throws(() => loadConfig(path), ConfigError);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig accepts `false` for a circuit-breaker field to disable it", () => {
+  const path = tmp("disabledbreaker");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    maxDrawdownHaltPercent: false,
+  }));
+  try {
+    const result = loadConfig(path);
+    assert.equal(result.maxDrawdownHaltPercent, false);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
+test("loadConfig throws ConfigError on non-integer maxConsecutiveLosses", () => {
+  const path = tmp("badconsecutive");
+  writeFileSync(path, JSON.stringify({
+    exchange: "binance", apiKey: "a", apiSecret: "b",
+    symbols: ["BTC/USDT"], maxCapitalUsd: 100,
+    maxPositionSizeUsd: 100,
+    maxDailyTrades: 5, stopLossPercent: 5, takeProfitPercent: 10, refreshIntervalMs: 5000,
+    maxConsecutiveLosses: 2.5,
   }));
   try {
     assert.throws(() => loadConfig(path), ConfigError);

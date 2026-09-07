@@ -48,6 +48,11 @@ export interface DashboardState {
   // shown as informational rather than blended into trade-based P&L that
   // decisions get made from.
   fundingPnlUsd?: number;
+  // 🔴 Portfolio-wide circuit breaker state (spec §5) — distinct from
+  // bybitConnected/fatalHalt. null/undefined = not tripped. New entries are
+  // halted for every symbol while set; closes are never affected. Only
+  // cleared by a restart (see spec §13.3) — never auto-clears.
+  circuitBreakerTripped?: { trigger: string; at: number; details: string } | null;
 }
 
 /**
@@ -154,5 +159,6 @@ function serializeState(state: DashboardState) {
     walletTotalUsd: state.walletTotalUsd,
     deploymentRatio: state.deploymentRatio,
     fundingPnlUsd: state.fundingPnlUsd,
+    circuitBreakerTripped: state.circuitBreakerTripped,
   };
 }

@@ -10,12 +10,17 @@ import { analyze as analyzePerformance, type PerformanceReport } from "./learnin
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
-import { BybitInsufficientBalanceError, BybitInvalidQtyError, BybitFatalError, BybitFillUncertainError } from "./bybit/types.ts";
+import { BybitInsufficientBalanceError, BybitInvalidQtyError, BybitFatalError, BybitFillUncertainError, BybitAuthError } from "./bybit/types.ts";
 import { appSymbolToBybit, bybitSymbolToApp } from "./bybit/adapters.ts";
 import type { BybitConfig, BybitPosition } from "./bybit/types.ts";
 import { logger } from "./logger.ts";
 import { recommendSymbols, checkConfiguredSymbols } from "./strategy/symbol-recommender.ts";
 import { acquireInstanceLock } from "./instance-lock.ts";
+import {
+  createCircuitBreakerState, checkEquityBreakers, recordTradeOutcome, checkConsecutiveLosses,
+  checkSlippage, DEFAULT_CIRCUIT_BREAKER_CONFIG, type CircuitBreakerConfig, type CircuitBreakerTrip,
+} from "./risk/circuit-breaker.ts";
+import { assertCapitalThresholdOk } from "./startup-safety.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
@@ -44,6 +49,13 @@ function parseArgs(argv: string[]): { configPath?: string; live: boolean; port: 
  */
 export async function start(config: Config, signal?: AbortSignal): Promise<void> {
   const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live" | "testnet";
+  // First gate, before anything else happens — see specs/live-trading-readiness.md
+  // §7.2. Throws StartupSafetyError (uncaught here, deliberately fatal) if a
+  // --live run's maxCapitalUsd is above the safety threshold and either the
+  // confirmation phrase wasn't typed (interactive) or there's nobody to ask
+  // (non-interactive, e.g. a background service — exactly where an unattended
+  // large-capital run is least supervised).
+  await assertCapitalThresholdOk(config, mode, logger);
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
   let useBybit = config.exchange.toLowerCase() === "bybit";
   // Refuse to start a second instance trading the same real account (see
@@ -71,6 +83,21 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   let portfolio: Portfolio = create(config.maxCapitalUsd);
   // Recover open positions from previous session — only ever this run's venue.
   portfolio = reconstructPortfolio(portfolio, new Map(), venue);
+
+  // Portfolio-level circuit breakers (spec §5). `??` (not `||`) so an explicit
+  // `false` — disabling a trigger — is preserved rather than falling back to
+  // the default; only an actually-missing field (undefined) uses the default.
+  const circuitBreakerConfig: CircuitBreakerConfig = {
+    maxDailyLossPercent: config.maxDailyLossPercent ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxDailyLossPercent,
+    maxDrawdownHaltPercent: config.maxDrawdownHaltPercent ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxDrawdownHaltPercent,
+    maxConsecutiveLosses: config.maxConsecutiveLosses ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxConsecutiveLosses,
+    maxSlippagePercent: config.maxSlippagePercent ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxSlippagePercent,
+  };
+  let circuitBreakerState = createCircuitBreakerState(portfolio.totalValueUsd);
+  // Portfolio-wide (unlike haltedSymbols, which is per-symbol) — blocks new
+  // entries for EVERY symbol, never closes. Cleared only by restart (§13.3).
+  let circuitBreakerTripped: CircuitBreakerTrip | null = null;
+
   let lastSignal: TradeSignal | null = null;
   let statusMessage = "starting...";
   let strategyParams: StrategyParams = defaultParams();
@@ -150,6 +177,21 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       }
     }
 
+    // Portfolio-wide circuit breakers (spec §5) — checked once per cycle, before
+    // any symbol is evaluated, off current mark-to-market equity. This only
+    // ever sets circuitBreakerTripped; it never blocks the loop below from
+    // running, because closes (and the stale-feed/daily-trade-limit checks
+    // above) must keep working even while entries are halted.
+    {
+      const { state, trip } = checkEquityBreakers(circuitBreakerState, circuitBreakerConfig, portfolio.totalValueUsd, config.maxCapitalUsd);
+      circuitBreakerState = state;
+      if (trip && !circuitBreakerTripped) {
+        circuitBreakerTripped = trip;
+        statusMessage = `🔴 CIRCUIT BREAKER: ${trip.details}`;
+        logger.error(`[circuit-breaker] ${trip.details}`);
+      }
+    }
+
     for (const [symbol, snapshot] of latestMarketData) {
       if (config.maxDailyTrades > 0 && portfolio.dailyTradeCount >= config.maxDailyTrades) {
         statusMessage = `daily trade limit reached (${config.maxDailyTrades})`;
@@ -169,8 +211,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           }
         }
 
-        // A prior real Bybit rejection (insufficient balance / qty too small) blocks
-        // only NEW entries for this symbol — closes are never blocked (see §6.2).
+        // A tripped circuit breaker (portfolio-wide) or a prior real Bybit
+        // rejection (per-symbol) blocks only NEW entries — closes are never
+        // blocked (see §5/§6.2).
+        if (tradeSignal.type === "buy" && circuitBreakerTripped) {
+          statusMessage = `🔴 Entries halted — circuit breaker tripped (${circuitBreakerTripped.trigger}). Closes still active.`;
+          continue;
+        }
         if (tradeSignal.type === "buy" && haltedSymbols.has(tradeSignal.symbol)) {
           statusMessage = `⚠️ Entries halted for ${tradeSignal.symbol} (prior Bybit rejection) — closes still active`;
           continue;
@@ -278,7 +325,30 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         if (result.side === "buy") recordEntry(tradeSignal, result, venue);
         if (result.side === "sell") {
           const closed = recordExit(symbol, result.price, result.timestamp, result.fee);
-          if (closed) statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
+          if (closed) {
+            statusMessage += ` | P&L: ${(closed.pnl ?? 0) >= 0 ? "+" : ""}$${(closed.pnl ?? 0).toFixed(2)}`;
+            // Consecutive-loss circuit breaker (spec §5) — portfolio-wide, only
+            // meaningful for real closed trades, so this lives here rather than
+            // on every fill.
+            circuitBreakerState = recordTradeOutcome(circuitBreakerState, closed.pnl ?? 0);
+            const consecutiveTrip = checkConsecutiveLosses(circuitBreakerState, circuitBreakerConfig);
+            if (consecutiveTrip && !circuitBreakerTripped) {
+              circuitBreakerTripped = consecutiveTrip;
+              logger.error(`[circuit-breaker] ${consecutiveTrip.details}`);
+            }
+          }
+        }
+
+        // Slippage circuit breaker (spec §5) — scoped to this one symbol, never
+        // the whole portfolio. Checked against the price the signal was
+        // evaluated at, which is `snapshot.price` from this cycle's iteration.
+        if (result.side !== "hold") {
+          const slippageTrip = checkSlippage(circuitBreakerConfig, result.symbol, snapshot.price, result.price);
+          if (slippageTrip && !haltedSymbols.has(result.symbol)) {
+            haltedSymbols.add(result.symbol);
+            statusMessage = `🔴 ${slippageTrip.details}`;
+            logger.error(`[circuit-breaker] ${slippageTrip.details}`);
+          }
         }
 
         // Update performance report on every trade so the equity curve updates.
@@ -309,6 +379,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     dashboardState.strategyParams = strategyParams;
     dashboardState.deploymentRatio = deploymentRatio(portfolio);
     dashboardState.operatingCapitalUsd = portfolio.maxCapitalUsd;
+    dashboardState.circuitBreakerTripped = circuitBreakerTripped;
 
     appState.marketData = latestMarketData;
     appState.portfolio = portfolio;
@@ -330,6 +401,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       walletTotalUsd: dashboardState.walletTotalUsd,
       deploymentRatio: dashboardState.deploymentRatio,
       fundingPnlUsd: dashboardState.fundingPnlUsd,
+      circuitBreakerTripped: dashboardState.circuitBreakerTripped,
     });
   }
 
@@ -571,6 +643,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         walletTotalUsd: dashboardState.walletTotalUsd,
         deploymentRatio: dashboardState.deploymentRatio,
         fundingPnlUsd: dashboardState.fundingPnlUsd,
+        circuitBreakerTripped: dashboardState.circuitBreakerTripped,
       });
     });
 
@@ -627,8 +700,15 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      statusMessage = `Bybit connection failed: ${errorMsg}. Paper mode.`;
-      logger.error(`Bybit connection failed: ${errorMsg}`);
+      // A likely, specific cause for an auth failure that Bybit's own error
+      // message doesn't name — see spec §7.2. testnet/mainnet API keys are
+      // separate credentials; using one against the other's endpoint reads as
+      // a generic auth error with nothing pointing at the actual mismatch.
+      const hint = err instanceof BybitAuthError
+        ? ` This can happen when a testnet API key is used for a mainnet (--live) run or vice versa — double-check config.apiKey/apiSecret were issued for the environment you're running against.`
+        : "";
+      statusMessage = `Bybit connection failed: ${errorMsg}.${hint} Paper mode.`;
+      logger.error(`Bybit connection failed: ${errorMsg}.${hint}`);
       bybitFallenBack = true; // prevent onConnection from re-setting error state
       dashboardState.bybitError = null;
       dashboardState.bybitConnected = false;
