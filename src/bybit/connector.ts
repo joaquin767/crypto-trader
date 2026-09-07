@@ -9,6 +9,7 @@ import type { TradeResult } from "../executor.ts";
 import type { TradeSignal } from "../strategy/signals.ts";
 import type { Position } from "../portfolio.ts";
 import { tickerToMarketSnapshot, orderResponseToTradeResult, bybitPositionToPosition, bybitSymbolToApp } from "./adapters.ts";
+import { logger } from "../logger.ts";
 
 export interface BybitConnectorState {
   connected: boolean;
@@ -181,7 +182,7 @@ export class BybitConnector {
   }
 
   /** Place an order via REST API with exact quantity. */
-  async placeOrder(signal: TradeSignal, qty: number): Promise<TradeResult> {
+  async placeOrder(signal: TradeSignal, qty: number, maxCostUsd?: number): Promise<TradeResult> {
     // Convert app signal to Bybit order
     const symbol = signal.symbol.replace("/", "");
     const side = signal.type === "buy" ? "Buy" : "Sell";
@@ -189,15 +190,39 @@ export class BybitConnector {
     // Validate qty against lot size rules
     const validQty = await this.validateQty(signal.symbol, qty);
     let formattedQty = "";
+    let actualQty = 0;
     if (validQty === null) {
       // qty too small — use minimum possible
       const minQty = await this.getMinQty(signal.symbol);
       formattedQty = minQty.toFixed(4);
+      actualQty = minQty;
     } else {
       // Format using the qty step for precision
       const qtyStep = await this.getQtyStep(signal.symbol);
       const decimals = Math.max(0, Math.ceil(-Math.log10(qtyStep)));
       formattedQty = validQty.toFixed(decimals);
+      actualQty = validQty;
+    }
+
+    // Check if we can afford this order (for buy signals)
+    if (side === "Buy" && maxCostUsd !== undefined) {
+      // We need a price estimate — use the last cached price from tickers
+      const lastSnapshot = this.lastSnapshots.get(signal.symbol);
+      const estimatedPrice = lastSnapshot?.price ?? 0;
+      if (estimatedPrice > 0) {
+        const estimatedCost = actualQty * estimatedPrice * 1.001; // +0.1% fee buffer
+        if (estimatedCost > maxCostUsd) {
+          logger.warn(`Order would cost ~$${estimatedCost.toFixed(2)} but only $${maxCostUsd.toFixed(2)} available — skipping`);
+          return {
+            symbol: signal.symbol,
+            side: "hold",
+            quantity: 0,
+            price: 0,
+            fee: 0,
+            timestamp: Date.now(),
+          };
+        }
+      }
     }
 
     const order = await this.rest.placeOrder({

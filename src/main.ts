@@ -150,7 +150,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
           // Execute via Bybit REST API
           try {
-            result = await bybit.placeOrder(tradeSignal, qty);
+            result = await bybit.placeOrder(tradeSignal, qty, portfolio.cashUsd);
           } catch (bybitErr) {
             if (bybitErr instanceof BybitInsufficientBalanceError) {
               statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
