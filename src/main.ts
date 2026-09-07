@@ -22,6 +22,7 @@ import {
   checkSlippage, DEFAULT_CIRCUIT_BREAKER_CONFIG, type CircuitBreakerConfig, type CircuitBreakerTrip,
 } from "./risk/circuit-breaker.ts";
 import { assertCapitalThresholdOk } from "./startup-safety.ts";
+import { createWalletMonitorState, checkWalletShortfall } from "./risk/wallet-monitor.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
@@ -98,6 +99,9 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // Portfolio-wide (unlike haltedSymbols, which is per-symbol) — blocks new
   // entries for EVERY symbol, never closes. Cleared only by restart (§13.3).
   let circuitBreakerTripped: CircuitBreakerTrip | null = null;
+  // Wallet-vs-ledger sanity check (spec §8.3) — informational only, never
+  // changes cashUsd.
+  let walletMonitorState = createWalletMonitorState();
 
   let lastSignal: TradeSignal | null = null;
   let statusMessage = "starting...";
@@ -423,6 +427,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       deploymentRatio: dashboardState.deploymentRatio,
       fundingPnlUsd: dashboardState.fundingPnlUsd,
       circuitBreakerTripped: dashboardState.circuitBreakerTripped,
+      walletShortfallWarning: dashboardState.walletShortfallWarning,
     });
   }
 
@@ -440,6 +445,28 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         }
       } catch (err) {
         logger.warn(`[funding] Failed to fetch funding P&L: ${(err as Error).message}`);
+      }
+
+      // Wallet-vs-ledger sanity check (spec §8.3) — never changes cashUsd,
+      // purely an early-warning signal for a shortfall the bot can't see any
+      // other way (a manual withdrawal, a funding payment draining margin,
+      // another manual trade on the same account).
+      try {
+        const balances = await bybit.getWalletBalance();
+        const usdt = balances.find(b => b.coin === "USDT");
+        if (usdt) {
+          const available = Number.parseFloat(usdt.available);
+          if (!Number.isNaN(available)) {
+            const { state, warning } = checkWalletShortfall(walletMonitorState, available, portfolio.cashUsd, config.maxCapitalUsd);
+            walletMonitorState = state;
+            if (warning && warning !== dashboardState.walletShortfallWarning) {
+              logger.warn(`[wallet] ${warning}`);
+            }
+            dashboardState.walletShortfallWarning = warning;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[wallet] Failed to fetch wallet balance: ${(err as Error).message}`);
       }
     }
 
@@ -665,6 +692,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         deploymentRatio: dashboardState.deploymentRatio,
         fundingPnlUsd: dashboardState.fundingPnlUsd,
         circuitBreakerTripped: dashboardState.circuitBreakerTripped,
+        walletShortfallWarning: dashboardState.walletShortfallWarning,
       });
     });
 

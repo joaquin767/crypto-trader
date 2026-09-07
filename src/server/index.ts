@@ -53,6 +53,10 @@ export interface DashboardState {
   // halted for every symbol while set; closes are never affected. Only
   // cleared by a restart (see spec §13.3) — never auto-clears.
   circuitBreakerTripped?: { trigger: string; at: number; details: string } | null;
+  // ⚠️ Sustained gap between Bybit's real available balance and what the bot
+  // believes its cash is (spec §8.3) — informational only, never changes
+  // cashUsd. null/undefined = no shortfall detected.
+  walletShortfallWarning?: string | null;
 }
 
 /**
@@ -160,5 +164,6 @@ function serializeState(state: DashboardState) {
     deploymentRatio: state.deploymentRatio,
     fundingPnlUsd: state.fundingPnlUsd,
     circuitBreakerTripped: state.circuitBreakerTripped,
+    walletShortfallWarning: state.walletShortfallWarning,
   };
 }
