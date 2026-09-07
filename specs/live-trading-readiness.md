@@ -615,12 +615,36 @@ Also fixed along the way, found during self-review rather than pre-planned: a
 silently skip a stop-loss close exactly when cash is low (i.e. exactly when a stop-loss is
 likely to fire) — sizing now only applies to opening a new position.
 
-**Before Phase 2 or real capital**, per spec §12.3, do a live testnet soak and specifically
-verify the items flagged as unverified guesses in code comments: the "leverage already set"
-rejection phrasing in `ensureLeverageAndMargin` (matched by message substring, not a
-confirmed retCode), the `execFee` sign convention for a funding settlement in
-`getFundingPnlSince`, and that `BybitPosition.leverage`/`liquidationPrice` actually arrive on
-every WS position push (not just the REST snapshot) the way §3.2/§3.4 assume.
+**Partial verification done (2026-09-07, live Bybit testnet call, not a full 24h soak — see
+§12.3, still outstanding):**
+- ✅ Confirmed: `setLeverage` rejects with **retCode 110043 "leverage not modified"** when a
+  symbol is already at the target leverage — the existing message-substring match already
+  catches this correctly.
+- ✅ Confirmed, and different from what the code originally assumed: `setLeverage` does
+  **not** throw at all when a position is already open at a different leverage — it resolves
+  successfully while silently leaving the position's actual leverage unchanged. There's no
+  error to classify for that case; the mandatory position read-back is the *only* thing that
+  catches it (comments in `rest.ts`/`connector.ts` updated to state this as fact).
+- ✅ Confirmed live: `BybitPosition.leverage` does arrive on WS position pushes — this run's
+  testnet account actually had three real open positions (BTC/USDT, ETH/USDT, SOL/USDT, all
+  at 10x, left over from earlier sessions) and `onRawPosition`'s leverage-drift halt fired
+  correctly and immediately for all three, independently of and slightly before the
+  REST-based `ensureLeverageAndMargin` check finished.
+- ✅ Confirmed: `setMarginMode("ISOLATED_MARGIN")` resolves without throwing on this account.
+  Not independently confirmed to have actually changed anything (no separate account-mode
+  read-back call exists yet) — lower risk than the leverage case since nothing currently
+  depends on margin mode being correct beyond this call not erroring.
+- ❓ Still unverified: the `execFee` sign convention for an actual funding settlement in
+  `getFundingPnlSince` (funding settles every ~8h; no settlement occurred during this check).
+- ❓ Still outstanding: a real 24h+ continuous soak with forced disconnects/restarts, per the
+  full §12.3 checklist — what was done above was a targeted, several-minute live check of the
+  specific unverified assumptions, not a soak.
+
+One finding worth the user's attention: the testnet account currently has three real open
+10x-leverage positions (BTC/USDT qty 0.003, ETH/USDT qty 0.04, SOL/USDT qty 0.2) from earlier
+sessions, correctly picked up as "restricted — closes only" by this session's own leverage
+pin. Not closed automatically — that's an exchange-account action outside what this
+verification pass was asked to do.
 
 ### Phase 2 (P0) — required before real-capital run
 - §5 circuit breakers

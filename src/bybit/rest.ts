@@ -273,14 +273,17 @@ export class RestClient {
    * path as a read — unlike order placement, retrying this can't double-execute
    * anything. See specs/live-trading-readiness.md §3.1.
    *
-   * Bybit rejects this with a specific error when the requested leverage is
-   * already in effect (the expected steady state after the first successful
-   * pin) — callers should treat that specific rejection as success rather than
-   * failure. This method deliberately does not swallow it itself: which retCode
-   * that is has not been verified against live Bybit responses, and guessing
-   * wrong here would risk mis-classifying a real failure as success. Callers
-   * inspect the thrown error's message for the known "not modified"-style
-   * phrasing instead (see BybitConnector.ensureLeverageAndMargin).
+   * Bybit rejects this with retCode 110043 "leverage not modified" when the
+   * requested leverage is already in effect (confirmed against a live testnet
+   * call — the expected steady state after the first successful pin) — callers
+   * should treat that specific rejection as success rather than failure. This
+   * method deliberately does not swallow it itself — callers inspect the
+   * thrown error's message for the "not modified" phrasing instead (see
+   * BybitConnector.ensureLeverageAndMargin). Note the asymmetric case that's
+   * NOT an error at all: when a position is already open at a different
+   * leverage, this resolves successfully without throwing and without
+   * actually changing anything — also confirmed live. Callers cannot detect
+   * that from this call's outcome; only a position read-back catches it.
    */
   async setLeverage(category: string, symbol: string, leverage: string): Promise<void> {
     return this.withReadRetry("/v5/position/set-leverage", async () => {

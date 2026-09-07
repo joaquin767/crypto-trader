@@ -317,14 +317,14 @@ export class BybitConnector {
     const restrictedSymbols: string[] = [];
     let fatal = false;
 
-    // Bybit rejects both calls with a specific error when the target is already
-    // in effect (the expected steady state after the first successful pin on a
-    // later restart). The exact retCode for that hasn't been verified against
-    // live Bybit responses (see rest.ts's setLeverage/setMarginMode docs) — so
-    // rather than guess a numeric code and risk silently swallowing a real
-    // failure, this matches the documented phrasing Bybit uses for "no change
-    // needed" rejections. If a real Bybit response uses different wording,
-    // this needs updating against an actual testnet run — see spec §12.3.
+    // Confirmed against a live testnet call (spec §12.3): setLeverage rejects
+    // with retCode 110043 "leverage not modified" when the symbol is already at
+    // the target leverage — this is the expected steady state after the first
+    // successful pin on a later restart, and must be treated as success, not
+    // failure. Matched by message substring (covers the confirmed case; kept
+    // broad in case wording varies by endpoint/account type) rather than the
+    // bare code, since classifyError() doesn't have a dedicated error class for
+    // it and the raw SDK error's message is what's actually available here.
     const isNoChangeNeeded = (msg: string) => /not modified|already (set|in effect)|same as current|no need to modify/i.test(msg);
 
     try {
@@ -343,19 +343,18 @@ export class BybitConnector {
       } catch (err) {
         const msg = (err as Error).message ?? "";
         if (!isNoChangeNeeded(msg)) {
-          // Could be a genuine failure, or an open position blocking the change
-          // (spec §3.1's second integration subtlety) — the position read-back
-          // below is the authoritative check either way, so just note it here.
           details.push(`setLeverage(${bybitSymbol}) was rejected (${msg}) — verifying actual position leverage.`);
         }
       }
     }
 
     // Read back actual leverage for every symbol with an open position — this
-    // is the authoritative check. setLeverage can succeed with no error and
-    // still not reflect what's really configured if it silently no-ops for a
-    // reason we didn't anticipate, and a position blocking the change (above)
-    // needs this to determine which specific symbol is affected.
+    // is the authoritative check, and it's load-bearing, not just a
+    // double-check. Confirmed against live testnet (spec §12.3): when a
+    // position is already open at a different leverage, setLeverage does NOT
+    // throw at all — it resolves successfully while silently leaving the
+    // position's actual leverage unchanged. There is no error to catch for
+    // that case; this read-back is the only thing that catches it.
     try {
       const raw = await this.rest.getPositions("linear", undefined, "USDT");
       for (const pos of raw.list as BybitPosition[]) {
