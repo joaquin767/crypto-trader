@@ -15,6 +15,7 @@ import { appSymbolToBybit } from "./bybit/adapters.ts";
 import type { BybitConfig } from "./bybit/types.ts";
 import { logger } from "./logger.ts";
 import { recommendSymbols, checkConfiguredSymbols } from "./strategy/symbol-recommender.ts";
+import { acquireInstanceLock } from "./instance-lock.ts";
 
 export { loadConfig, type Config };
 export { type MarketSnapshot };
@@ -45,6 +46,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   const mode = (process.argv.includes("--live") ? "live" : "paper") as "paper" | "live" | "testnet";
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
   let useBybit = config.exchange.toLowerCase() === "bybit";
+  // Refuse to start a second instance trading the same real account (see
+  // specs/live-trading-readiness.md §7.3/F6) — two unsynchronized local
+  // portfolios against one account is a direct path to doubled risk exposure.
+  // Scoped to useBybit only: pure paper/simulated mode has no real account to
+  // protect. Throws InstanceLockError (uncaught here — deliberately fatal;
+  // this must stop startup, not be logged and continued past).
+  const instanceLock = useBybit ? acquireInstanceLock(config.apiKey) : null;
   let bybitFallenBack = false; // flag to prevent onConnection from overwriting error state after fallback
   // Set on a fatal Bybit account error (banned/restricted — see BybitFatalError).
   // Unlike bybitFallenBack, this halts ALL trading (not just Bybit trading) and
@@ -570,6 +578,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // Cleanup
   clearInterval(timer);
   bybit?.disconnect();
+  instanceLock?.release();
   await server.close();
 }
 
