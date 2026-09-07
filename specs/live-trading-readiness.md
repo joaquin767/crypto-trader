@@ -1,6 +1,8 @@
 # Live Trading Readiness — Financial Logic Spec v1
 
-Status: **REVIEWED (self-review + independent adversarial agent review, both incorporated) — Phase 1 implementation starting**
+Status: **Phase 1 implemented and self-reviewed (§3, §4.1-§4.2, §6, §7.1, §7.3) — 236/236 tests
+passing. Needs a live testnet soak (§12.3) to verify the guessed-but-flagged Bybit response
+details before Phase 2. Phase 2 (§5 circuit breakers, §7.2) not yet started.**
 Owner: crypto-trader financial core (portfolio, risk, execution, Bybit integration)
 Purpose: define what must change before this system operates **real capital**, in priority
 order, with concrete acceptance criteria. This spec is the audit + the plan; it supersedes
@@ -595,18 +597,30 @@ testnet soak (documented in §12.3) before moving to the next.
 ### Phase 0 — this spec
 Self-review to convergence (in progress). No code changes.
 
-### Phase 1 (P0) — required before any real-capital run
-- §3.1 leverage pinned to 1x + isolated margin, verified at startup
-- §3.2 liquidation-buffer monitoring
-- §3.3 funding-rate accounting
-- §3.4 leverage/margin drift assertion after reconciliation
-- §4.1 `reduceOnly` on closes
-- §4.2 sell-quantity never exceeds exchange-confirmed holding
-- §6.2 live→fallback becomes a halt, not a silent mode switch
-- §6.1 paper mode uses real prices
-- §6.3 journal venue tagging
-- §7.1 config round-trip test + fix (structural, not just the one field)
-- §7.3 duplicate-instance lock
+### Phase 1 (P0) — required before any real-capital run — ✅ DONE
+- [x] §3.1 leverage pinned to 1x + isolated margin, verified at startup (`ensureLeverageAndMargin`)
+- [x] §3.2 liquidation-buffer monitoring (`onRawPosition`, config `liquidationBufferPercent`)
+- [x] §3.3 funding-rate accounting (`getFundingPnlSince`, kept separate — sign unverified)
+- [x] §3.4 leverage-drift halting wired into the WS position stream, not just at connect()
+- [x] §4.1 `reduceOnly` on closes
+- [x] §4.2 sell-quantity never exceeds exchange-confirmed holding (floor-rounds, skips below minQty)
+- [x] §6.2 live→fallback becomes a halt (per-symbol, entries only), not a silent mode switch
+- [x] §6.1 paper mode uses real prices, sized identically to the live path
+- [x] §6.3 journal venue tagging (`bybit-live` / `bybit-testnet` / `paper`)
+- [x] §7.1 config round-trip test (verified it catches the regression it's meant to catch)
+- [x] §7.3 duplicate-instance lock (PID-liveness based, self-healing)
+
+Also fixed along the way, found during self-review rather than pre-planned: a
+`positionUsd <= 0` cash-sizing check was gating ALL trades including sells, which could
+silently skip a stop-loss close exactly when cash is low (i.e. exactly when a stop-loss is
+likely to fire) — sizing now only applies to opening a new position.
+
+**Before Phase 2 or real capital**, per spec §12.3, do a live testnet soak and specifically
+verify the items flagged as unverified guesses in code comments: the "leverage already set"
+rejection phrasing in `ensureLeverageAndMargin` (matched by message substring, not a
+confirmed retCode), the `execFee` sign convention for a funding settlement in
+`getFundingPnlSince`, and that `BybitPosition.leverage`/`liquidationPrice` actually arrive on
+every WS position push (not just the REST snapshot) the way §3.2/§3.4 assume.
 
 ### Phase 2 (P0) — required before real-capital run
 - §5 circuit breakers
