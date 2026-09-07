@@ -252,6 +252,22 @@ export class RestClient {
   }
 
   /**
+   * Funding fee settlements for a symbol (execType "Funding") — the real,
+   * recurring P&L a perpetual position accrues every ~8h that a mid-price
+   * ticker never reflects. See specs/live-trading-readiness.md §3.3.
+   * `execFee` per Bybit's documented convention: negative = paid, positive =
+   * received. (The SDK's ExecDetail type confirms the field names below; the
+   * sign convention itself should still be spot-checked against a live
+   * testnet run before this is relied on for real accounting — see spec §12.3.)
+   */
+  async getFundingHistory(category: string, symbol: string, startTime?: number): Promise<{ list: unknown[] }> {
+    return this.withReadRetry("/v5/execution/list", async () => {
+      const res = await this.client.trade.getTradeHistory({ category: category as any, symbol, execType: "Funding", startTime });
+      return res.result as any;
+    });
+  }
+
+  /**
    * Pin leverage for a symbol. Idempotent by nature (setting to a fixed target
    * value), so it's safe to use the same rate-limited retry-on-ambiguous-error
    * path as a read — unlike order placement, retrying this can't double-execute

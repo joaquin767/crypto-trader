@@ -667,7 +667,7 @@ test("ensureLeverageAndMargin restricts (does not halt) a symbol whose open posi
   const connector = new BybitConnector(mockConfig);
   await withMocked(connector, {
     setLeverage: async (_cat: string, symbol: string) => {
-      if (symbol === "BTCUSDT") throw new Error("leverage cannot be changed while a position is open");
+      if (symbol === "BTC/USDT") throw new Error("leverage cannot be changed while a position is open");
     },
     setMarginMode: async () => {},
     getPositions: async () => ({
@@ -721,4 +721,56 @@ test("ensureLeverageAndMargin is fatal when position leverage can't be read back
     const result = await connector.ensureLeverageAndMargin();
     assert.equal(result.ok, false, "if the safety invariant can't be confirmed, it must not be assumed true");
   });
+});
+
+// ── getFundingPnlSince ─────────────────────────────────────────────────
+// Regression coverage for spec §3.3. Sign convention is explicitly flagged
+// as unverified in the implementation (see connector.ts) — these tests pin
+// down the *current* documented behavior (negate execFee) so a future change
+// to that constant is a deliberate, visible diff rather than a silent drift.
+
+test("getFundingPnlSince sums execFee (negated) across all configured symbols", async () => {
+  const connector = new BybitConnector(mockConfig); // symbols: BTC/USDT, ETH/USDT
+  const originalGetFundingHistory = connector.rest.getFundingHistory;
+  connector.rest.getFundingHistory = async (_category: string, symbol: string) => {
+    if (symbol === "BTC/USDT") return { list: [{ execFee: "1.5" }, { execFee: "-0.5" }] };
+    return { list: [{ execFee: "2" }] };
+  };
+
+  try {
+    const total = await connector.getFundingPnlSince(0);
+    // Raw sum: 1.5 - 0.5 + 2 = 3; negated per the current (unverified) convention → -3.
+    assert.equal(total, -3);
+  } finally {
+    connector.rest.getFundingHistory = originalGetFundingHistory;
+  }
+});
+
+test("getFundingPnlSince skips a symbol whose fetch fails, rather than failing entirely", async () => {
+  const connector = new BybitConnector(mockConfig);
+  const originalGetFundingHistory = connector.rest.getFundingHistory;
+  connector.rest.getFundingHistory = async (_category: string, symbol: string) => {
+    if (symbol === "BTC/USDT") throw new Error("network error");
+    return { list: [{ execFee: "1" }] };
+  };
+
+  try {
+    const total = await connector.getFundingPnlSince(0);
+    assert.equal(total, -1); // only ETH/USDT's entry counted
+  } finally {
+    connector.rest.getFundingHistory = originalGetFundingHistory;
+  }
+});
+
+test("getFundingPnlSince ignores unparseable execFee values", async () => {
+  const connector = new BybitConnector(mockConfig);
+  const originalGetFundingHistory = connector.rest.getFundingHistory;
+  connector.rest.getFundingHistory = async () => ({ list: [{ execFee: "not-a-number" }, { execFee: "2" }] });
+
+  try {
+    const total = await connector.getFundingPnlSince(0);
+    assert.equal(total, -4); // two symbols × 2, negated — the malformed entry contributes 0
+  } finally {
+    connector.rest.getFundingHistory = originalGetFundingHistory;
+  }
 });

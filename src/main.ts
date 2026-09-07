@@ -102,7 +102,11 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     operatingCapitalUsd: config.maxCapitalUsd,
     walletTotalUsd: config.maxCapitalUsd,
     deploymentRatio: 0,
+    fundingPnlUsd: 0,
   };
+  // When funding was last fetched — see runLearningCycle. Starts at process
+  // start; only meaningful once useBybit is true (see acquisition below).
+  let lastFundingCheckMs = Date.now();
 
   // Start the web server
   const server = await createServer(dashboardState, port);
@@ -325,11 +329,27 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       operatingCapitalUsd: dashboardState.operatingCapitalUsd,
       walletTotalUsd: dashboardState.walletTotalUsd,
       deploymentRatio: dashboardState.deploymentRatio,
+      fundingPnlUsd: dashboardState.fundingPnlUsd,
     });
   }
 
   // ── Periodic learning cycle ────────────────────────────────────────
   async function runLearningCycle(): Promise<void> {
+    // Funding P&L (spec §3.3) — independent of trade count, a position accrues
+    // funding well before 3 closed trades exist to trigger the block below.
+    if (useBybit && bybit?.state.connected) {
+      try {
+        const since = lastFundingCheckMs;
+        lastFundingCheckMs = Date.now();
+        const delta = await bybit.getFundingPnlSince(since);
+        if (delta !== 0) {
+          dashboardState.fundingPnlUsd = (dashboardState.fundingPnlUsd ?? 0) + delta;
+        }
+      } catch (err) {
+        logger.warn(`[funding] Failed to fetch funding P&L: ${(err as Error).message}`);
+      }
+    }
+
     const closedTrades = getClosedTrades(venue);
     if (closedTrades.length < 3) return;
 
@@ -550,6 +570,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         operatingCapitalUsd: dashboardState.operatingCapitalUsd,
         walletTotalUsd: dashboardState.walletTotalUsd,
         deploymentRatio: dashboardState.deploymentRatio,
+        fundingPnlUsd: dashboardState.fundingPnlUsd,
       });
     });
 

@@ -573,6 +573,41 @@ export class BybitConnector {
     }));
   }
 
+  /**
+   * Sum funding fee settlements across all configured symbols since `sinceMs`.
+   * See spec §3.3. Per-symbol failures are logged and skipped rather than
+   * failing the whole call, so one symbol's API hiccup doesn't hide funding
+   * on the rest.
+   *
+   * IMPORTANT — sign convention is NOT verified against a live Bybit response.
+   * `execFee`'s polarity for a trading fee (positive = cost to you) is well
+   * established in this codebase already (see adapters.ts's TradeResult.fee,
+   * always subtracted from P&L) — but funding is a payment *between* position
+   * holders, not a fee paid to the exchange, and Bybit's docs are not
+   * unambiguous from static reading alone on whether execFee keeps the same
+   * polarity for execType "Funding". This returns the raw summed execFee,
+   * NEGATED to match the trading-fee convention (positive execFee = cost =
+   * negative P&L) as the more likely default — but treat this as a best
+   * guess: verify against an actual testnet funding settlement (spec §12.3)
+   * before trusting the sign, and flip FUNDING_SIGN below if it's backwards.
+   */
+  async getFundingPnlSince(sinceMs: number): Promise<number> {
+    const FUNDING_SIGN = -1; // UNVERIFIED — see doc comment above.
+    let total = 0;
+    for (const bybitSymbol of this.config.symbols) {
+      try {
+        const res = await this.rest.getFundingHistory("linear", bybitSymbol, sinceMs);
+        for (const exec of res.list as any[]) {
+          const fee = Number.parseFloat(exec.execFee ?? "0");
+          if (!Number.isNaN(fee)) total += FUNDING_SIGN * fee;
+        }
+      } catch (err) {
+        logger.warn(`[bybit] Failed to fetch funding history for ${bybitSymbol}: ${(err as Error).message}`);
+      }
+    }
+    return total;
+  }
+
   /** Register callbacks. */
   onTicker(handler: TickerHandler): void { this.tickerHandlers.add(handler); }
   onTrade(handler: TradeHandler): void { this.tradeHandlers.add(handler); }

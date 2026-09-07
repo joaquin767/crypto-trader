@@ -42,6 +42,12 @@ export interface DashboardState {
   operatingCapitalUsd: number;      // 🔒 User-defined operating capital
   walletTotalUsd?: number;          // 💰 Total wallet balance (display only)
   deploymentRatio: number;          // 📊 How much of operating capital is deployed (0-1)
+  // 💸 Cumulative perpetual funding P&L since this session started (spec §3.3).
+  // Deliberately kept separate from portfolio/performanceReport — the sign
+  // convention isn't yet verified against a live Bybit response, so it's
+  // shown as informational rather than blended into trade-based P&L that
+  // decisions get made from.
+  fundingPnlUsd?: number;
 }
 
 /**
@@ -147,5 +153,6 @@ function serializeState(state: DashboardState) {
     operatingCapitalUsd: state.operatingCapitalUsd,
     walletTotalUsd: state.walletTotalUsd,
     deploymentRatio: state.deploymentRatio,
+    fundingPnlUsd: state.fundingPnlUsd,
   };
 }
