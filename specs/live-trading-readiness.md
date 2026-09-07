@@ -1,9 +1,11 @@
 # Live Trading Readiness — Financial Logic Spec v1
 
-Status: **Phase 1 and Phase 2 implemented and self-reviewed — 261/261 tests passing. Phase 1's
+Status: **Phases 1-3 implemented and self-reviewed — 301/301 tests passing. Phase 1's
 leverage-pin behavior was partially verified against a live Bybit testnet call (§11's Phase 1
-notes); a full 24h §12.3 soak is still outstanding before real capital. Phase 3 (journal
-durability, risk-aware sizing, concentration limits) not yet started.**
+notes); a full 24h §12.3 soak, plus a soak specifically forcing a partial fill and a mid-order
+crash (§11's Phase 3 notes), are both still outstanding before real capital. Phase 4
+(centralized formatting, decimal-precision audit, dry-run mode, real-Kelly overlay) not yet
+started — none of it is a blocker per §11, it's hardening.**
 Owner: crypto-trader financial core (portfolio, risk, execution, Bybit integration)
 Purpose: define what must change before this system operates **real capital**, in priority
 order, with concrete acceptance criteria. This spec is the audit + the plan; it supersedes
@@ -658,13 +660,27 @@ false-trip circuit breaker at $100 capital / 0 trades — expected). Not separat
 Phase 2 is pure local logic (no new Bybit API surface to verify) apart from the auth-hint
 string, which needs no live verification beyond the type check already covering it.
 
-### Phase 3 (P1) — safe to scale capital
-- §8.1 atomic/backed-up journal
-- §8.2 pending-order durability
-- §8.3 wallet monitoring
-- §9 risk-aware position sizing
-- §10 concentration limits
-- §4.3 partial-fill tracking
+### Phase 3 (P1) — safe to scale capital — ✅ DONE
+- [x] §8.1 atomic/backed-up journal (temp-file-then-rename, 5 rotated backups, tested via
+  forced fresh module evaluations against an isolated temp dir — confirms recovery from both
+  a missing and a corrupted live file)
+- [x] §8.2 pending-order durability (`src/bybit/pending-orders.ts` + `checkPendingOrders()`;
+  deliberately produces a diagnostic only, never auto-injects a fabricated journal entry)
+- [x] §8.3 wallet monitoring (`src/risk/wallet-monitor.ts`; 3-consecutive-check hysteresis,
+  informational only, never touches cashUsd)
+- [x] §9 risk-aware position sizing (`calcPositionSize()` now risk-based via ATR-implied stop
+  distance, not confidence-scaled — signature changed, confidence no longer feeds sizing)
+- [x] §10 concentration limits (`src/strategy/concentration.ts`: maxConcurrentPositions +
+  trailing-correlation guard)
+- [x] §4.3 partial-fill tracking (`pollForFill()` accepts PartiallyFilled, journals the
+  running-total fill exactly once, never a duplicate Position row)
+
+63 new tests across 6 new/extended test files; 301/301 passing. Not independently
+testnet-soaked as a whole — the higher-risk items (§4.3, §8.2) were unit-tested against
+mocked Bybit responses matching the SDK's own documented ExecDetail/order-history shapes,
+not exercised against a live partial fill or an actual crash-recovery scenario. Worth a
+soak specifically forcing a partial fill (a market order on a thin book) and a mid-order
+process kill before scaling real capital meaningfully past Phase 1/2's pilot tier.
 
 ### Phase 4 (P2/P3) — production hardening
 - §4.4 centralized quantity/price formatting
