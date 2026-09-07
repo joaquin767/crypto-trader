@@ -382,7 +382,9 @@ export class BybitConnector {
       await this.rest.setMarginMode("ISOLATED_MARGIN");
     } catch (err) {
       const msg = (err as Error).message ?? "";
-      if (!isNoChangeNeeded(msg)) {
+      if (isNoChangeNeeded(msg)) {
+        logger.info(`[leverage] Margin mode already isolated (Bybit rejected the no-op change: "${msg}") — treating as confirmed, not a failure.`);
+      } else {
         details.push(`Could not confirm isolated margin mode: ${msg}`);
         fatal = true;
       }
@@ -393,7 +395,9 @@ export class BybitConnector {
         await this.rest.setLeverage("linear", bybitSymbol, "1");
       } catch (err) {
         const msg = (err as Error).message ?? "";
-        if (!isNoChangeNeeded(msg)) {
+        if (isNoChangeNeeded(msg)) {
+          logger.info(`[leverage] ${bybitSymbol} already at 1x (Bybit rejected the no-op change: "${msg}") — treating as confirmed, not a failure.`);
+        } else {
           details.push(`setLeverage(${bybitSymbol}) was rejected (${msg}) — verifying actual position leverage.`);
         }
       }
@@ -613,6 +617,7 @@ export class BybitConnector {
         const history = await this.rest.getOrderHistory("linear", symbol, 10);
         const match = (history.list as any[]).find(o => o.orderId === orderId);
         if (!match) continue;
+
         if (match.orderStatus === "Filled") {
           try {
             return orderResponseToTradeResult(match as BybitOrderResponse);
@@ -620,6 +625,34 @@ export class BybitConnector {
             continue; // still unparseable — keep polling
           }
         }
+
+        if (match.orderStatus === "Cancelled" || match.orderStatus === "Rejected") {
+          // Terminal — nothing about this order will change further, so
+          // there's no reason to keep polling. Market orders are IOC
+          // (immediate-or-cancel) by default: if there's no immediate
+          // liquidity to match against, Bybit cancels the whole order rather
+          // than leaving it open — this is a normal, safe outcome (observed
+          // live: three separate GRT/USDT buys all cancelled this exact way
+          // with cumExecQty=0, "EC_NoImmediateQtyToFill", on a thin testnet
+          // book), not an "uncertain" fill that needs escalating to the user.
+          const cumQty = Number.parseFloat(match.cumExecQty ?? "0");
+          if (cumQty > 0) {
+            try {
+              logger.warn(`[bybit] Order ${orderId} (${symbol}) was ${match.orderStatus} after partially filling qty=${cumQty} — journaling that partial fill; the remainder was never executed.`);
+              return orderResponseToTradeResult(match as BybitOrderResponse);
+            } catch {
+              // Unparseable even here — fall through to the zero-fill message
+              // below, which is still accurate: nothing usable to journal.
+            }
+          }
+          logger.warn(
+            `[bybit] Order ${orderId} (${symbol}) was ${match.orderStatus} with zero fill` +
+            `${match.rejectReason ? ` (${match.rejectReason})` : ""} — likely no immediate liquidity available for ` +
+            `a market order. Treating as a clean no-op: nothing executed, nothing to journal.`,
+          );
+          return { symbol: bybitSymbolToApp(symbol), side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() };
+        }
+
         if (match.orderStatus === "PartiallyFilled") {
           try {
             const partial = orderResponseToTradeResult(match as BybitOrderResponse);

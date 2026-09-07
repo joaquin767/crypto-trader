@@ -846,6 +846,104 @@ test("placeOrder still surfaces BybitFillUncertainError when polling never finds
   }
 });
 
+// Regression coverage for a real event observed live: a market order (IOC by
+// default) with no immediate liquidity to match against gets Cancelled by
+// Bybit with cumExecQty=0 — a completely safe, definitive no-op — but
+// pollForFill previously only recognized "Filled", so it burned through all 4
+// poll attempts and surfaced a scary BybitFillUncertainError ("check Bybit
+// manually") for something that was actually fully resolved on the first poll.
+test("placeOrder treats a Cancelled order with zero fill as a clean hold, not an error", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  connector.rest.placeOrder = async () => ({
+    symbol: "BTCUSDT", side: "Buy", cumExecQty: "", cumExecFee: "", avgPrice: "", price: "",
+    createdTime: String(Date.now()), orderId: "order-3", orderLinkId: "link-3",
+    orderStatus: "New", qty: "0.01", leavesQty: "0.01",
+  });
+  connector.rest.getOrderHistory = async () => ({
+    list: [{
+      orderId: "order-3", symbol: "BTCUSDT", side: "Buy",
+      orderStatus: "Cancelled", rejectReason: "EC_NoImmediateQtyToFill",
+      cumExecQty: "0", cumExecFee: "0", avgPrice: "", price: "0.026",
+      leavesQty: "0", createdTime: String(Date.now()),
+    }],
+  });
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    const result = await connector.placeOrder(signal, 0.01); // must NOT reject
+    assert.equal(result.side, "hold");
+    assert.equal(result.quantity, 0);
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+});
+
+test("placeOrder journals the partial quantity of an order that partially filled before being cancelled", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  connector.rest.placeOrder = async () => ({
+    symbol: "BTCUSDT", side: "Buy", cumExecQty: "", cumExecFee: "", avgPrice: "", price: "",
+    createdTime: String(Date.now()), orderId: "order-4", orderLinkId: "link-4",
+    orderStatus: "New", qty: "0.01", leavesQty: "0.01",
+  });
+  connector.rest.getOrderHistory = async () => ({
+    list: [{
+      orderId: "order-4", symbol: "BTCUSDT", side: "Buy",
+      orderStatus: "Cancelled", rejectReason: "EC_NoImmediateQtyToFill",
+      cumExecQty: "0.003", cumExecFee: "0.001", avgPrice: "40000", price: "40000",
+      leavesQty: "0.007", createdTime: String(Date.now()),
+    }],
+  });
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    const result = await connector.placeOrder(signal, 0.01);
+    assert.equal(result.side, "buy");
+    assert.equal(result.quantity, 0.003, "must journal the qty that filled before cancellation, never a fabricated full/zero fill");
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+});
+
+test("placeOrder still polls past a Rejected order status if no match is found at all (no premature success)", async () => {
+  const connector = new BybitConnector(mockConfig);
+  (connector as any).lotSizeCache.set("BTCUSDT", { minQty: "0.001", qtyStep: "0.001" });
+
+  const originalPlaceOrder = connector.rest.placeOrder;
+  const originalGetOrderHistory = connector.rest.getOrderHistory;
+  connector.rest.placeOrder = async () => ({
+    symbol: "BTCUSDT", side: "Buy", cumExecQty: "", cumExecFee: "", avgPrice: "", price: "",
+    createdTime: String(Date.now()), orderId: "order-5", orderLinkId: "link-5",
+    orderStatus: "New", qty: "0.01", leavesQty: "0.01",
+  });
+  connector.rest.getOrderHistory = async () => ({
+    list: [{
+      orderId: "order-5", symbol: "BTCUSDT", side: "Buy",
+      orderStatus: "Rejected", rejectReason: "EC_SomeOtherReason",
+      cumExecQty: "0", cumExecFee: "0", avgPrice: "", price: "40000",
+      leavesQty: "0", createdTime: String(Date.now()),
+    }],
+  });
+
+  try {
+    const signal = { type: "buy" as const, symbol: "BTC/USDT", confidence: 0.8, reason: "test", indicators: { rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false }, bollinger: { upper: 50000, middle: 40000, lower: 30000, width: 0.5 }, momentum: 0, atr: 100 } };
+    const result = await connector.placeOrder(signal, 0.01);
+    assert.equal(result.side, "hold", "a Rejected order with zero fill is also a clean, safe no-op");
+  } finally {
+    connector.rest.placeOrder = originalPlaceOrder;
+    connector.rest.getOrderHistory = originalGetOrderHistory;
+  }
+});
+
 // ── Pending-order durability (spec §8.2) ────────────────────────────────
 
 test("placeOrder records a pending order before sending, and clears it once resolved", async () => {

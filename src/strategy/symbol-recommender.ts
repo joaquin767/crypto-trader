@@ -14,15 +14,52 @@ export interface SymbolRecommendation {
   reason: string;           // why this symbol was selected
 }
 
+type RecommenderRestClient = {
+  getInstruments: (category: string, symbol?: string) => Promise<{ category: string; list: unknown[] }>;
+  getTickers: (category: string, symbol?: string) => Promise<{ category: string; list: unknown[] }>;
+  getOrderbook: (category: string, symbol: string, level?: number) => Promise<{ bids: [string, string][]; asks: [string, string][]; timestamp: number }>;
+};
+
+/**
+ * 24h reported volume says nothing about liquidity *right now* — a symbol can
+ * have real 24h turnover yet an empty book at this instant, especially on
+ * testnet. This was observed live: GRT/USDT scored "Excellent for small
+ * capital" on affordability alone and was auto-selected, then three separate
+ * market buys were cancelled outright by Bybit (IOC, "EC_NoImmediateQtyToFill",
+ * cumExecQty 0) because there was nothing on the ask side to match against.
+ * Checks whether the ask side of the book actually has enough depth to fill a
+ * market buy of `requiredUsd` without immediately cancelling for lack of
+ * an immediate match.
+ */
+async function hasImmediateLiquidity(
+  restClient: Pick<RecommenderRestClient, "getOrderbook">,
+  bybitSymbol: string,
+  requiredUsd: number,
+): Promise<{ ok: boolean; reason: string }> {
+  try {
+    const book = await restClient.getOrderbook("linear", bybitSymbol, 25);
+    if (!book.asks || book.asks.length === 0) {
+      return { ok: false, reason: "empty ask side" };
+    }
+    let depthUsd = 0;
+    for (const [priceStr, sizeStr] of book.asks) {
+      depthUsd += Number.parseFloat(priceStr) * Number.parseFloat(sizeStr);
+      if (depthUsd >= requiredUsd) return { ok: true, reason: "" };
+    }
+    return { ok: false, reason: `only ~$${depthUsd.toFixed(2)} of ask-side depth in the top 25 levels, need ~$${requiredUsd.toFixed(2)}` };
+  } catch (err) {
+    // Fail closed — an unverifiable symbol is excluded, not assumed fine.
+    return { ok: false, reason: `orderbook check failed: ${(err as Error).message}` };
+  }
+}
+
 /**
  * Fetch and recommend the best symbols for the user's capital.
- * Uses the Bybit REST client to get instruments info and current prices.
+ * Uses the Bybit REST client to get instruments info, current prices, and
+ * (for the top-scoring candidates) actual order-book depth.
  */
 export async function recommendSymbols(
-  restClient: {
-    getInstruments: (category: string, symbol?: string) => Promise<{ category: string; list: unknown[] }>;
-    getTickers: (category: string, symbol?: string) => Promise<{ category: string; list: unknown[] }>;
-  },
+  restClient: RecommenderRestClient,
   maxCapitalUsd: number,
   maxPositionSizeUsd: number,
   maxSymbols: number = 5,
@@ -132,8 +169,25 @@ export async function recommendSymbols(
     // Sort by score descending
     scored.sort((a, b) => b.score - a.score);
 
-    // Return top N
-    return scored.slice(0, maxSymbols);
+    // Filter down to symbols with real, immediate order-book depth — the
+    // score above is otherwise blind to "is there actually anyone to trade
+    // against right now" (see hasImmediateLiquidity's doc comment). Checked
+    // in score order, capped at a bounded number of candidates so a long tail
+    // of illiquid symbols can't turn this into dozens of orderbook calls.
+    const requiredDepthUsd = Math.max(maxPositionSizeUsd, 10);
+    const MAX_CANDIDATES_CHECKED = 20;
+    const withLiquidity: SymbolRecommendation[] = [];
+    for (const rec of scored.slice(0, MAX_CANDIDATES_CHECKED)) {
+      if (withLiquidity.length >= maxSymbols) break;
+      const liquidity = await hasImmediateLiquidity(restClient, rec.bybitSymbol, requiredDepthUsd);
+      if (liquidity.ok) {
+        withLiquidity.push(rec);
+      } else {
+        console.warn(`[symbols] Skipping ${rec.symbol} (score ${rec.score.toFixed(1)}) — insufficient order-book liquidity: ${liquidity.reason}`);
+      }
+    }
+
+    return withLiquidity;
   } catch (err) {
     console.warn(`[symbols] Failed to recommend symbols: ${(err as Error).message}`);
     return [];
