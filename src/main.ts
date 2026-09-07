@@ -1,7 +1,8 @@
 import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
-import { analyze, type TradeSignal, clearHistory } from "./strategy/signals.ts";
+import { analyze, type TradeSignal, clearHistory, getHistory as getPriceHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
+import { checkConcurrentPositionsLimit, checkCorrelationLimit } from "./strategy/concentration.ts";
 import { create, update, canAfford, deploymentRatio, markToMarket, type Portfolio, type Position } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
@@ -221,6 +222,26 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         if (tradeSignal.type === "buy" && haltedSymbols.has(tradeSignal.symbol)) {
           statusMessage = `⚠️ Entries halted for ${tradeSignal.symbol} (prior Bybit rejection) — closes still active`;
           continue;
+        }
+
+        // Concentration limits (spec §10) — only relevant when opening a new
+        // position; an existing position closing doesn't add concentration.
+        if (tradeSignal.type === "buy") {
+          const concurrentCheck = checkConcurrentPositionsLimit(portfolio.positions.length, config.maxConcurrentPositions);
+          if (concurrentCheck.skip) {
+            statusMessage = `⚠️ Skipping entry for ${tradeSignal.symbol}: ${concurrentCheck.reason}`;
+            continue;
+          }
+          const correlationCheck = checkCorrelationLimit(
+            tradeSignal.symbol,
+            getPriceHistory(tradeSignal.symbol).prices,
+            portfolio.positions.map(p => ({ symbol: p.symbol, prices: getPriceHistory(p.symbol).prices })),
+            config.maxCorrelation,
+          );
+          if (correlationCheck.skip) {
+            statusMessage = `⚠️ Skipping entry for ${tradeSignal.symbol}: ${correlationCheck.reason}`;
+            continue;
+          }
         }
 
         // Sizing only applies to opening a new position — a close always sells the
