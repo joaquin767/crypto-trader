@@ -418,6 +418,51 @@ test("getPositions fetches and converts positions", async () => {
   }
 });
 
+// ── reconcilePositions ───────────────────────────────────────────────
+// Regression coverage for the bug where a real exchange position with no
+// matching local journal entry was merged straight into the auto-traded
+// portfolio. That let the trading loop sell a position the local cash
+// ledger never paid for and credit 100% of the proceeds to cashUsd,
+// blowing the operating-capital guardrail (an orphaned 33.1 SOL testnet
+// position turned $97 of tracked cash into ~$3,560 once sold).
+
+test("reconcilePositions does NOT merge an exchange position absent from the local journal", async () => {
+  const connector = new BybitConnector(mockConfig);
+  const originalGetPositions = connector.rest.getPositions;
+  connector.rest.getPositions = async () => ({
+    list: [{ symbol: "SOLUSDT", size: "33.1", entryPrice: "104.8", markPrice: "104.67", side: "Buy", unrealisedPnl: "0", realisedPnl: "0", liquidationPrice: "0", leverage: "1", positionStatus: "Normal" }],
+  });
+
+  try {
+    const { merged, unaccountedFor, warnings } = await connector.reconcilePositions([]);
+    assert.equal(merged.length, 0, "an orphaned exchange position must not enter the tradeable portfolio");
+    assert.equal(unaccountedFor.length, 1);
+    assert.equal(unaccountedFor[0]!.symbol, "SOL/USDT");
+    assert.equal(unaccountedFor[0]!.quantity, 33.1);
+    assert(warnings.some(w => w.includes("NOT adopting")));
+  } finally {
+    connector.rest.getPositions = originalGetPositions;
+  }
+});
+
+test("reconcilePositions still corrects quantity drift for a locally-tracked position", async () => {
+  const connector = new BybitConnector(mockConfig);
+  const originalGetPositions = connector.rest.getPositions;
+  connector.rest.getPositions = async () => ({
+    list: [{ symbol: "SOLUSDT", size: "0.4", entryPrice: "104.8", markPrice: "104.8", side: "Buy", unrealisedPnl: "0", realisedPnl: "0", liquidationPrice: "0", leverage: "1", positionStatus: "Normal" }],
+  });
+
+  try {
+    const local = [{ symbol: "SOL/USDT", quantity: 0.2, entryPrice: 104.8, currentPrice: 104.8 }];
+    const { merged, unaccountedFor } = await connector.reconcilePositions(local);
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0]!.quantity, 0.4);
+    assert.equal(unaccountedFor.length, 0);
+  } finally {
+    connector.rest.getPositions = originalGetPositions;
+  }
+});
+
 test("getWalletBalance fetches and formats balances", async () => {
   const connector = new BybitConnector(mockConfig);
   const originalGetWallet = connector.rest.getWalletBalance;

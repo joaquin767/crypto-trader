@@ -34,6 +34,11 @@ export function create(maxCapitalUsd: number): Portfolio {
   };
 }
 
+/** cash + the current mark-to-market value of every open position. */
+export function markToMarket(cashUsd: number, positions: Position[]): number {
+  return cashUsd + positions.reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
+}
+
 /**
  * Update portfolio after a trade result.
  * For "buy": adds a new position, deducts cash (never below 0).
@@ -42,13 +47,30 @@ export function create(maxCapitalUsd: number): Portfolio {
  */
 export function update(portfolio: Portfolio, trade: TradeResult): Portfolio {
   if (trade.side === "hold") {
+    const positions = portfolio.positions.map((p) => ({
+      ...p,
+      currentPrice: trade.price > 0 ? trade.price : p.currentPrice,
+    }));
     return {
       ...portfolio,
-      positions: portfolio.positions.map((p) => ({
-        ...p,
-        currentPrice: trade.price > 0 ? trade.price : p.currentPrice,
-      })),
+      positions,
+      totalValueUsd: markToMarket(portfolio.cashUsd, positions),
     };
+  }
+
+  // Refuse to apply a corrupted trade. A NaN or negative quantity/price/fee here
+  // (e.g. from a malformed exchange response) would otherwise poison cashUsd with
+  // NaN for the rest of the session — every future canAfford() check silently
+  // fails and the bot effectively bricks itself. The caller is responsible for
+  // handling a rejected trade separately (log it, do not journal it as-is).
+  if (
+    Number.isNaN(trade.quantity) || Number.isNaN(trade.price) || Number.isNaN(trade.fee) ||
+    trade.quantity < 0 || trade.price < 0 || trade.fee < 0
+  ) {
+    throw new Error(
+      `portfolio.update() refused an invalid trade result for ${trade.symbol}: ` +
+      `quantity=${trade.quantity}, price=${trade.price}, fee=${trade.fee}.`,
+    );
   }
 
   if (trade.side === "buy") {
@@ -59,11 +81,12 @@ export function update(portfolio: Portfolio, trade: TradeResult): Portfolio {
       currentPrice: trade.price,
     };
     const cost = trade.quantity * trade.price + trade.fee;
-    const newCash = portfolio.cashUsd - cost;
+    const newCash = Math.max(portfolio.cashUsd - cost, 0);
+    const positions = [...portfolio.positions, newPosition];
     return {
-      positions: [...portfolio.positions, newPosition],
-      totalValueUsd: newCash + cost,
-      cashUsd: Math.max(newCash, 0),
+      positions,
+      totalValueUsd: markToMarket(newCash, positions),
+      cashUsd: newCash,
       dailyTradeCount: portfolio.dailyTradeCount + 1,
       maxCapitalUsd: portfolio.maxCapitalUsd,
     };
@@ -77,7 +100,7 @@ export function update(portfolio: Portfolio, trade: TradeResult): Portfolio {
 
   return {
     positions: remaining,
-    totalValueUsd: newCash,
+    totalValueUsd: markToMarket(newCash, remaining),
     cashUsd: newCash,
     dailyTradeCount: portfolio.dailyTradeCount + 1,
     maxCapitalUsd: portfolio.maxCapitalUsd,

@@ -4,6 +4,10 @@ export interface MarketSnapshot {
   change24h: number;
   volume24h: number;
   timestamp: number;
+  /** Real 24h high/low from the exchange, when available (e.g. live Bybit tickers).
+   *  Left undefined in paper/simulated mode — callers fall back to their own estimate. */
+  high24h?: number;
+  low24h?: number;
 }
 
 /**

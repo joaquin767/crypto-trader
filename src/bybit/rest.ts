@@ -1,15 +1,31 @@
 // Bybit REST API client — wraps the official bybit-official-ts-sdk
 // and exposes the same interface our custom RestClient used to.
 // This gives us Bybit-maintained REST logic with our custom WebSocket/connector layers.
+//
+// Reliability layer added on top of the SDK (see docs/bybit-integration spec §7/§9):
+// - Per-endpoint token-bucket rate limiting (EndpointRateLimiter), so we never
+//   hammer an endpoint fast enough to trip Bybit's own limiter or an IP ban.
+// - One retry with backoff for ambiguous network/timeout failures on read-only
+//   endpoints (a structured Bybit error is never retried — it's a real answer).
+// - placeOrder() always carries an orderLinkId. If the create call fails with an
+//   ambiguous (non-API) error, we retry EXACTLY ONCE with the SAME orderLinkId so
+//   Bybit's own dedup prevents a double fill; a confirmed rejection is never
+//   retried (avoids accidental double-execution, per spec §7).
 
+import { randomUUID } from "node:crypto";
 import { BybitClient, BybitApiError as SdkApiError, BybitAuthError as SdkAuthError, BybitRateLimitError as SdkRateLimitError } from "bybit-official-ts-sdk";
 import type { BybitConfig } from "./types.ts";
-import { BybitConnectionError, BybitConfigError } from "./types.ts";
+import { BybitApiError, BybitConnectionError, BybitConfigError } from "./types.ts";
 import { classifyError } from "./types.ts";
+import { EndpointRateLimiter } from "./rate-limiter.ts";
 
 export interface RestClientOptions {
   timeoutMs?: number;
   recvWindowMs?: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export class RestClient {
@@ -17,6 +33,7 @@ export class RestClient {
   private client: BybitClient;
   private serverTimeDiff = 0;
   private lastTimeSync = 0;
+  private limiter = new EndpointRateLimiter();
 
   constructor(config: BybitConfig, opts: RestClientOptions = {}) {
     this.config = config;
@@ -37,9 +54,48 @@ export class RestClient {
     });
   }
 
-  async syncTime(): Promise<number> {
-    const start = Date.now();
+  /**
+   * Run a read-only (idempotent) REST call: rate-limited, and retried once on an
+   * ambiguous network/timeout failure. A structured Bybit error (auth, rate-limit,
+   * business rejection) is classified and thrown immediately — never retried blindly.
+   */
+  private async withReadRetry<T>(path: string, fn: () => Promise<T>): Promise<T> {
+    await this.limiter.acquire(path);
     try {
+      return await fn();
+    } catch (err) {
+      const classified = this.classifyOrNull(path, err);
+      if (classified) throw classified;
+
+      // Not a structured Bybit response — likely a network/timeout blip. Retry once.
+      await sleep(400);
+      await this.limiter.acquire(path);
+      try {
+        return await fn();
+      } catch (err2) {
+        const classified2 = this.classifyOrNull(path, err2);
+        if (classified2) throw classified2;
+        throw err2;
+      }
+    }
+  }
+
+  /** Classify a caught error into our error types if it's a structured SDK error; else null. */
+  private classifyOrNull(path: string, err: unknown): Error | null {
+    if (err instanceof SdkAuthError) return classifyError(err.retCode ?? 10003, err.message);
+    if (err instanceof SdkRateLimitError) {
+      this.limiter.reportRateLimited(path);
+      return classifyError(err.retCode ?? 10006, err.message);
+    }
+    if (err instanceof SdkApiError) return classifyError(err.retCode ?? 10001, err.message);
+    return null;
+  }
+
+  async syncTime(): Promise<number> {
+    const path = "/v5/market/time";
+    const attemptOnce = async (): Promise<number> => {
+      await this.limiter.acquire(path);
+      const start = Date.now();
       const res = await this.client.market.getServerTime();
       const end = Date.now();
       const rtt = end - start;
@@ -48,45 +104,74 @@ export class RestClient {
       this.lastTimeSync = Date.now();
       console.log(`[bybit] Time synced: diff=${this.serverTimeDiff}ms, rtt=${rtt}ms`);
       return this.serverTimeDiff;
+    };
+
+    try {
+      return await attemptOnce();
     } catch (err) {
-      throw new BybitConnectionError(`Time sync failed: ${(err as Error).message}`);
+      try {
+        await sleep(400);
+        return await attemptOnce();
+      } catch (err2) {
+        throw new BybitConnectionError(`Time sync failed: ${(err2 as Error).message}`);
+      }
     }
   }
 
   async getTickers(category: string, symbol?: string): Promise<{ category: string; list: unknown[] }> {
-    const res = await this.client.market.getTickers({ category, symbol });
-    return res.result as any;
+    return this.withReadRetry("/v5/market/tickers", async () => {
+      const res = await this.client.market.getTickers({ category, symbol });
+      return res.result as any;
+    });
   }
 
   async getKline(
     category: string, symbol: string, interval: string,
     start?: number, end?: number, limit?: number,
   ): Promise<{ category: string; symbol: string; list: string[][] }> {
-    const res = await this.client.market.getMarketKline({
-      category, symbol, interval,
-      start: start ?? 0,
-      end: end ?? 0,
-      limit: limit ?? 200,
+    return this.withReadRetry("/v5/market/kline", async () => {
+      const res = await this.client.market.getMarketKline({
+        category, symbol, interval,
+        start: start ?? 0,
+        end: end ?? 0,
+        limit: limit ?? 200,
+      });
+      return res.result as any;
     });
-    return res.result as any;
   }
 
   async getOrderbook(category: string, symbol: string, level = 25): Promise<{ bids: [string, string][]; asks: [string, string][]; timestamp: number }> {
-    const res = await this.client.market.getOrderbook({ category, symbol, limit: level });
-    const data = res.result as any;
-    return { bids: data.b, asks: data.a, timestamp: res.time };
+    return this.withReadRetry("/v5/market/orderbook", async () => {
+      const res = await this.client.market.getOrderbook({ category, symbol, limit: level });
+      const data = res.result as any;
+      return { bids: data.b, asks: data.a, timestamp: res.time };
+    });
   }
 
   async getInstruments(category: string, symbol?: string): Promise<{ category: string; list: unknown[] }> {
-    const res = await this.client.market.getInstrumentsInfo({ category, symbol });
-    return res.result as any;
+    return this.withReadRetry("/v5/market/instruments", async () => {
+      const res = await this.client.market.getInstrumentsInfo({ category, symbol });
+      return res.result as any;
+    });
   }
 
   async getRecentTrades(category: string, symbol: string, limit?: number): Promise<{ category: string; list: unknown[] }> {
-    const res = await this.client.market.getRecentPublicTrades({ category, symbol, limit });
-    return res.result as any;
+    return this.withReadRetry("/v5/market/recent-trade", async () => {
+      const res = await this.client.market.getRecentPublicTrades({ category, symbol, limit });
+      return res.result as any;
+    });
   }
 
+  /**
+   * Place a market/limit order. Always carries an orderLinkId (generated if the
+   * caller didn't supply one) so a retry after an ambiguous failure can never
+   * result in Bybit accepting the same order twice.
+   *
+   * A confirmed rejection (a real Bybit error response) is thrown immediately and
+   * NEVER retried — per spec §7, auto-retrying a rejected order risks double
+   * execution. Only a genuinely ambiguous failure (no response at all — timeout,
+   * network drop) gets a single retry, reusing the same orderLinkId.
+   */
   async placeOrder(order: {
     category: string; symbol: string; side: string; orderType: string;
     qty: string; price?: string; timeInForce?: string;
@@ -98,44 +183,71 @@ export class RestClient {
     leavesQty: string; cumExecQty: string; cumExecFee: string;
     cumExecValue?: string; avgPrice?: string; createdTime: string;
   }> {
+    const orderLinkId = order.orderLinkId ?? randomUUID();
+    const orderWithLinkId = { ...order, orderLinkId };
+    const path = "/v5/order/create";
+
+    const attemptOnce = async () => {
+      await this.limiter.acquire(path);
+      try {
+        const res = await this.client.trade.createOrder(orderWithLinkId);
+        return res.result as any;
+      } catch (err) {
+        const classified = this.classifyOrNull(path, err);
+        if (classified) throw classified;
+        throw err; // ambiguous — no structured Bybit response
+      }
+    };
+
     try {
-      const res = await this.client.trade.createOrder(order);
-      return res.result as any;
+      return await attemptOnce();
     } catch (err) {
-      if (err instanceof SdkAuthError) {
-        throw classifyError(err.retCode ?? 10003, err.message);
+      if (err instanceof BybitApiError) throw err; // real rejection — never retry
+      console.warn(`[bybit] placeOrder network error, retrying once with orderLinkId=${orderLinkId}:`, (err as Error).message);
+      try {
+        return await attemptOnce();
+      } catch (err2) {
+        if (err2 instanceof BybitApiError) throw err2;
+        throw new BybitConnectionError(
+          `placeOrder failed twice for orderLinkId=${orderLinkId} — order status is UNKNOWN. ` +
+          `Check Bybit manually before retrying (do not assume it failed): ${(err2 as Error).message}`,
+        );
       }
-      if (err instanceof SdkRateLimitError) {
-        throw classifyError(err.retCode ?? 10006, err.message);
-      }
-      if (err instanceof SdkApiError) {
-        throw classifyError(err.retCode ?? 10001, err.message);
-      }
-      throw err;
     }
   }
 
   async cancelOrder(category: string, symbol: string, orderId: string): Promise<void> {
-    await this.client.trade.cancelOrder({ category, symbol, orderId });
+    await this.withReadRetry("/v5/order/cancel", async () => {
+      await this.client.trade.cancelOrder({ category, symbol, orderId });
+      return undefined;
+    });
   }
 
   async getOpenOrders(category: string, symbol?: string): Promise<{ list: unknown[] }> {
-    const res = await this.client.trade.getOpenOrders({ category, symbol });
-    return res.result as any;
+    return this.withReadRetry("/v5/order/realtime", async () => {
+      const res = await this.client.trade.getOpenOrders({ category, symbol });
+      return res.result as any;
+    });
   }
 
   async getOrderHistory(category: string, symbol?: string, limit?: number): Promise<{ list: unknown[] }> {
-    const res = await this.client.trade.getOrderHistory({ category, symbol, limit });
-    return res.result as any;
+    return this.withReadRetry("/v5/order/history", async () => {
+      const res = await this.client.trade.getOrderHistory({ category, symbol, limit });
+      return res.result as any;
+    });
   }
 
-  async getPositions(category: string, symbol?: string): Promise<{ list: unknown[] }> {
-    const res = await this.client.position.getPositionInfo({ category, symbol });
-    return res.result as any;
+  async getPositions(category: string, symbol?: string, settleCoin?: string): Promise<{ list: unknown[] }> {
+    return this.withReadRetry("/v5/position/list", async () => {
+      const res = await this.client.position.getPositionInfo({ category, symbol, settleCoin });
+      return res.result as any;
+    });
   }
 
   async getWalletBalance(coin?: string): Promise<{ list: unknown[] }> {
-    const res = await this.client.account.getWalletBalance({ accountType: "UNIFIED", coin });
-    return res.result as any;
+    return this.withReadRetry("/v5/account/wallet-balance", async () => {
+      const res = await this.client.account.getWalletBalance({ accountType: "UNIFIED", coin });
+      return res.result as any;
+    });
   }
 }

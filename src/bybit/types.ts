@@ -10,6 +10,9 @@ export interface BybitConfig {
   symbols: string[];        // e.g. ["BTCUSDT", "ETHUSDT"] (Bybit format, no /)
   wsPingIntervalMs: number; // default 20000
   maxRetries: number;       // default 5
+  /** How often (ms) to poll REST tickers when the WebSocket has exhausted its
+   *  reconnect attempts. Defaults to 3000ms. See BybitConnector's REST fallback. */
+  restPollIntervalMs?: number;
 }
 
 // ── REST Endpoints ───────────────────────────────────────────────────
@@ -230,6 +233,34 @@ export class BybitConfigError extends Error {
   }
 }
 
+/**
+ * Account-level errors that require trading to stop immediately — the account is
+ * banned, restricted, or otherwise cannot trade regardless of retrying.
+ * See docs/bybit-integration spec §9D — these are NOT recoverable by falling back
+ * to paper mode and continuing; the caller must halt and notify the user.
+ */
+export class BybitFatalError extends BybitApiError {
+  constructor(retCode: number, retMsg: string) {
+    super(retCode, retMsg);
+    this.name = "BybitFatalError";
+  }
+}
+
+/**
+ * Thrown when an order was accepted by Bybit but the response we can see does not
+ * contain a parseable fill (NaN/empty qty, price, or fee) — e.g. a market order
+ * whose execution report hadn't landed yet when the REST ack came back.
+ * Callers must NOT synthesize a trade result from this — doing so previously
+ * corrupted portfolio.cashUsd into NaN permanently. Instead, poll for the real
+ * fill (see BybitConnector.placeOrder) or surface this for manual reconciliation.
+ */
+export class BybitFillUncertainError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "BybitFillUncertainError";
+  }
+}
+
 // ── Error Classification ─────────────────────────────────────────────
 
 /**
@@ -245,6 +276,17 @@ export function classifyError(retCode: number, retMsg: string): BybitApiError {
       return new BybitRateLimitError(retCode, retMsg);
     case 110007:
       return new BybitInsufficientBalanceError(retCode, retMsg);
+    // Account-level bans/restrictions — never safe to retry or silently paper-fallback.
+    // See anti-ban spec §9D: 10005 permission denied, 10008 common banned,
+    // 10009 region restricted, 10010 IP not whitelisted, 10027 transactions banned,
+    // 10028 not a UTA account.
+    case 10005:
+    case 10008:
+    case 10009:
+    case 10010:
+    case 10027:
+    case 10028:
+      return new BybitFatalError(retCode, retMsg);
     default:
       // Check for known error patterns in retMsg
       if (retMsg.includes("exceeds minimum limit")) {

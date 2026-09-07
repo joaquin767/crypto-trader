@@ -63,10 +63,15 @@ export function analyze(
 ): TradeSignal {
   const history = getHistory(snapshot.symbol);
 
-  // Record this snapshot in history
+  // Record this snapshot in history. Prefer the exchange's real 24h high/low
+  // (populated on live Bybit tickers) over fabricated noise — ATR and the
+  // volatility gate below previously reasoned over Math.random() output even
+  // when connected to a real market, which is noise dressed up as data.
+  // Paper/simulated snapshots don't carry high24h/low24h, so they still fall
+  // back to the simulated spread.
   history.prices.push(snapshot.price);
-  history.highs.push(snapshot.price * (1 + Math.random() * 0.02)); // simulated high
-  history.lows.push(snapshot.price * (1 - Math.random() * 0.02));  // simulated low
+  history.highs.push(snapshot.high24h ?? snapshot.price * (1 + Math.random() * 0.02));
+  history.lows.push(snapshot.low24h ?? snapshot.price * (1 - Math.random() * 0.02));
   history.timestamps.push(snapshot.timestamp);
 
   // Keep last 100 data points

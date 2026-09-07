@@ -2,7 +2,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
 import { analyze, type TradeSignal, clearHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
-import { create, update, canAfford, deploymentRatio, type Portfolio } from "./portfolio.ts";
+import { create, update, canAfford, deploymentRatio, markToMarket, type Portfolio, type Position } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
 import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, reconstructPortfolio, type TradeRecord } from "./learning/journal.ts";
@@ -10,7 +10,7 @@ import { analyze as analyzePerformance, type PerformanceReport } from "./learnin
 import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
-import { BybitInsufficientBalanceError, BybitInvalidQtyError } from "./bybit/types.ts";
+import { BybitInsufficientBalanceError, BybitInvalidQtyError, BybitFatalError, BybitFillUncertainError } from "./bybit/types.ts";
 import { appSymbolToBybit } from "./bybit/adapters.ts";
 import type { BybitConfig } from "./bybit/types.ts";
 import { logger } from "./logger.ts";
@@ -46,6 +46,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   const port = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] ?? "3081");
   let useBybit = config.exchange.toLowerCase() === "bybit";
   let bybitFallenBack = false; // flag to prevent onConnection from overwriting error state after fallback
+  // Set on a fatal Bybit account error (banned/restricted — see BybitFatalError).
+  // Unlike bybitFallenBack, this halts ALL trading (not just Bybit trading) and
+  // is never cleared automatically — the account issue needs the user's attention.
+  let fatalHalt = false;
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
   // Recover open positions from previous session
@@ -105,7 +109,25 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // This function runs every refreshIntervalMs to evaluate signals and trade.
   // It uses the latest market data regardless of source (Bybit or simulated).
   async function runTradingCycle(): Promise<void> {
+    if (fatalHalt) {
+      statusMessage = "🔴 HALTED — Bybit account error requires attention. Restart after resolving on Bybit.";
+      return;
+    }
+
     if (latestMarketData.size === 0) return;
+
+    // Refuse to trade off a feed that's gone quiet. Without this, an exhausted
+    // WebSocket reconnect (before REST polling catches up, or if it's also
+    // failing) would leave the bot acting on a price that stopped updating —
+    // the dashboard's "connected" flag alone doesn't guarantee fresh ticks.
+    if (useBybit && bybit) {
+      const lastTick = bybit.state.lastTickerTime;
+      const staleAfterMs = Math.max(15000, config.refreshIntervalMs * 5);
+      if (lastTick > 0 && Date.now() - lastTick > staleAfterMs) {
+        statusMessage = `⚠️ Bybit market data stale (no ticks for ${Math.round((Date.now() - lastTick) / 1000)}s) — pausing trading until it recovers`;
+        return;
+      }
+    }
 
     for (const [symbol, snapshot] of latestMarketData) {
       if (config.maxDailyTrades > 0 && portfolio.dailyTradeCount >= config.maxDailyTrades) {
@@ -174,6 +196,25 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
               dashboardState.bybitError = null;
               dashboardState.bybitMode = "paper";
               result = await execute(tradeSignal, config, portfolio.cashUsd);
+            } else if (bybitErr instanceof BybitFatalError) {
+              // Account-level ban/restriction (see anti-ban spec §9D). This is never
+              // safe to retry or paper-fallback from silently — stop everything and
+              // make the problem impossible to miss until the user resolves it.
+              fatalHalt = true;
+              statusMessage = `🔴 HALTED — Bybit fatal error [${bybitErr.retCode}]: ${bybitErr.message}`;
+              logger.error(statusMessage);
+              bybit.disconnect();
+              dashboardState.bybitConnected = false;
+              dashboardState.bybitError = statusMessage;
+              return;
+            } else if (bybitErr instanceof BybitFillUncertainError) {
+              // We placed the order but can't confirm what actually filled, even
+              // after polling. Do NOT fabricate a trade result (that's the bug that
+              // used to corrupt the portfolio) — skip this cycle and keep trying;
+              // this doesn't necessarily mean the account is broken.
+              statusMessage = `⚠️ Bybit order status unknown for ${tradeSignal.symbol} — check manually. ${bybitErr.message}`;
+              logger.error(statusMessage);
+              continue;
             } else {
               throw bybitErr;
             }
@@ -183,7 +224,15 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           result = await execute(tradeSignal, config, portfolio.cashUsd);
         }
 
-        portfolio = update(portfolio, result);
+        try {
+          portfolio = update(portfolio, result);
+        } catch (err) {
+          // portfolio.update() refuses NaN/negative trade data rather than silently
+          // corrupting cashUsd. Skip journaling this one instead of bricking the session.
+          logger.error(`Refusing corrupted trade result for ${result.symbol}: ${(err as Error).message}`);
+          statusMessage = `⚠️ Trade result looked corrupted for ${result.symbol} — skipped. Check logs/Bybit manually.`;
+          continue;
+        }
         statusMessage = `${mode.toUpperCase()} | ${result.side} ${result.symbol} @ $${result.price.toFixed(2)}`;
         // Only log trades with valid values (not NaN from failed SDK responses)
         if (!Number.isNaN(result.quantity) && result.side !== "hold") {
@@ -300,6 +349,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       symbols: config.symbols.map(appSymbolToBybit),
       wsPingIntervalMs: 20000,
       maxRetries: 5,
+      restPollIntervalMs: config.refreshIntervalMs,
     };
 
     bybit = new BybitConnector(bybitConfig);
@@ -314,6 +364,28 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       dashboardState.bybitError = state.connected ? null : state.error;
       if (state.connected) {
         statusMessage = `Bybit ${state.mode.toUpperCase()} live`;
+      }
+    });
+
+    // Confirmed fills from the private stream — observability only for now (REST
+    // is still the source of truth for what we journal), but logging them makes
+    // it possible to spot a fill the REST ack path missed.
+    bybit.onTrade((result: TradeResult) => {
+      logger.info(`[bybit:ws] Confirmed fill via private stream: ${result.side} ${result.symbol} qty=${result.quantity} @ $${result.price}`);
+    });
+
+    // Lightweight drift check: warn loudly if Bybit's own position reports ever
+    // disagree with what the bot believes it holds. This does not mutate state —
+    // it's a signal for the user to investigate (restart to re-reconcile).
+    bybit.onPosition((positions: Position[]) => {
+      for (const exch of positions) {
+        if (Math.abs(exch.quantity) <= 0) continue;
+        const local = portfolio.positions.find(p => p.symbol === exch.symbol);
+        if (!local) {
+          logger.warn(`[bybit] Position drift: Bybit reports an open ${exch.symbol} position (qty ${exch.quantity}) not tracked locally. Restart to reconcile, or check Bybit manually.`);
+        } else if (Math.abs(local.quantity - exch.quantity) > Math.max(1e-8, exch.quantity * 0.01)) {
+          logger.warn(`[bybit] Position drift for ${exch.symbol}: local qty ${local.quantity} vs Bybit qty ${exch.quantity}.`);
+        }
       }
     });
 
@@ -342,6 +414,26 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       await bybit.connect();
       statusMessage = `Bybit ${bybit.state.mode.toUpperCase()} — ${config.symbols.length} symbols`;
       logger.info(`Bybit connected. Mode: ${bybit.state.mode}`);
+
+      // Reconcile local (journal-derived) positions against what Bybit actually
+      // reports. Without this, a crash between a real fill and journaling it would
+      // leave that position permanently untracked — the bot would never generate a
+      // sell signal for it because it doesn't believe it holds anything.
+      try {
+        const { merged, unaccountedFor, warnings } = await bybit.reconcilePositions(portfolio.positions);
+        for (const w of warnings) logger.warn(`[reconcile] ${w}`);
+        if (warnings.length > 0 || merged.length !== portfolio.positions.length) {
+          portfolio = { ...portfolio, positions: merged, totalValueUsd: markToMarket(portfolio.cashUsd, merged) };
+          logger.info(`[reconcile] Portfolio positions reconciled with Bybit: ${merged.length} open position(s).`);
+        }
+        if (unaccountedFor.length > 0) {
+          const summary = unaccountedFor.map(p => `${p.symbol} qty ${p.quantity}`).join(", ");
+          statusMessage = `⚠️ Bybit has position(s) not opened by this bot (${summary}) — not auto-trading them, please review on Bybit.`;
+          logger.error(`[reconcile] Unaccounted-for exchange position(s): ${summary}. These were NOT added to the tradeable portfolio — check your Bybit account manually.`);
+        }
+      } catch (err) {
+        logger.warn(`[reconcile] Position reconciliation skipped: ${(err as Error).message}`);
+      }
 
       // Auto-select symbols for small capital if enabled
       if (config.autoSelectSymbols) {

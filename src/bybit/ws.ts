@@ -11,6 +11,15 @@ interface SubscriptionState {
   subscribed: boolean;
 }
 
+/** Lifecycle callbacks so a wrapping layer (BybitConnector) can track real
+ *  connection status through reconnects and react when retries are exhausted. */
+export interface WsLifecycleHandlers {
+  onOpen?: () => void;
+  onClose?: () => void;
+  /** Fired once tryReconnect() gives up after maxReconnectAttempts. */
+  onReconnectFailed?: () => void;
+}
+
 export class WsClient {
   private config: BybitConfig;
   private ws: WebSocket | null = null;
@@ -25,6 +34,7 @@ export class WsClient {
   private pingIntervalMs: number;
   private _connected = false;
   private _latencyMs = 0;
+  private lifecycle: WsLifecycleHandlers = {};
 
   constructor(config: BybitConfig, isPrivate = false) {
     this.config = config;
@@ -65,6 +75,7 @@ export class WsClient {
         // Start heartbeat
         this.startPing();
 
+        this.lifecycle.onOpen?.();
         resolve();
       };
 
@@ -75,6 +86,7 @@ export class WsClient {
       this.ws.onclose = () => {
         this._connected = false;
         this.stopPing();
+        this.lifecycle.onClose?.();
         this.tryReconnect();
       };
 
@@ -152,6 +164,11 @@ export class WsClient {
       .map(([topic, _]) => topic);
   }
 
+  /** Register lifecycle callbacks (open/close/reconnect-exhausted). Overwrites any previous set. */
+  setLifecycleHandlers(handlers: WsLifecycleHandlers): void {
+    this.lifecycle = handlers;
+  }
+
   // ── Private Methods ────────────────────────────────────────────────
 
   private sendSubscribe(topic: string): void {
@@ -217,35 +234,45 @@ export class WsClient {
   }
 
   private handleMessage(raw: string): void {
+    // Parse errors (e.g. keepalive comments) are the only thing we silently ignore here.
+    // A bug inside a registered handler must NOT be swallowed the same way — that
+    // previously hid real defects (a throwing ticker/order handler looked identical
+    // to a malformed frame). Each is now isolated and logged.
+    let msg: any;
     try {
-      const msg = JSON.parse(raw);
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
 
-      // Handle pong
-      if (msg.op === "pong") return;
+    // Handle pong
+    if (msg.op === "pong") return;
 
-      // Handle subscription response
-      if (msg.op === "subscribe") {
-        console.log(`[bybit:ws] Subscribed to: ${msg.ret_msg}`);
-        return;
-      }
+    // Handle subscription response
+    if (msg.op === "subscribe") {
+      console.log(`[bybit:ws] Subscribed to: ${msg.ret_msg}`);
+      return;
+    }
 
-      // Handle topic data
-      if (msg.topic) {
-        const handlers = this.handlers.get(msg.topic);
-        if (handlers) {
-          for (const handler of handlers) {
+    // Handle topic data
+    if (msg.topic) {
+      const handlers = this.handlers.get(msg.topic);
+      if (handlers) {
+        for (const handler of handlers) {
+          try {
             handler(msg.topic, msg.data || msg);
+          } catch (err) {
+            console.error(`[bybit:ws] Handler for topic "${msg.topic}" threw:`, err);
           }
         }
       }
-    } catch {
-      // Ignore parse errors (e.g., keepalive comments)
     }
   }
 
   private tryReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error(`[bybit:ws] Max reconnect attempts (${this.maxReconnectAttempts}) reached.`);
+      this.lifecycle.onReconnectFailed?.();
       return;
     }
 

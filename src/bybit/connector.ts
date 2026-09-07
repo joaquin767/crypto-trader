@@ -1,15 +1,20 @@
 // Bybit Connector — ties together REST client, WebSocket client, and adapters.
 // Manages connection lifecycle, data flow, and error recovery.
 
+import { randomUUID } from "node:crypto";
 import { RestClient } from "./rest.ts";
 import { WsClient } from "./ws.ts";
-import { BybitConnectionError, type BybitConfig, type BybitApiError, type BybitOrderResponse, type BybitPosition, type BybitWalletBalance } from "./types.ts";
+import { BybitConnectionError, BybitFillUncertainError, type BybitConfig, type BybitApiError, type BybitOrderResponse, type BybitPosition, type BybitWalletBalance } from "./types.ts";
 import type { MarketSnapshot } from "../market.ts";
 import type { TradeResult } from "../executor.ts";
 import type { TradeSignal } from "../strategy/signals.ts";
 import type { Position } from "../portfolio.ts";
 import { tickerToMarketSnapshot, orderResponseToTradeResult, bybitPositionToPosition, bybitSymbolToApp } from "./adapters.ts";
 import { logger } from "../logger.ts";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface BybitConnectorState {
   connected: boolean;
@@ -38,12 +43,17 @@ export class BybitConnector {
   private lotSizeCache = new Map<string, { minQty: string; qtyStep: string }>();
   private _state: BybitConnectorState;
   private _connected = false;
+  private manuallyDisconnected = false;
+  private restPollTimer: ReturnType<typeof setInterval> | null = null;
+  private restPollIntervalMs: number;
+  private slowReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: BybitConfig) {
     this.config = config;
     this.rest = new RestClient(config);
     this.wsPublic = new WsClient(config, false);
     this.wsPrivate = new WsClient(config, true);
+    this.restPollIntervalMs = config.restPollIntervalMs ?? 3000;
 
     this._state = {
       connected: false,
@@ -52,6 +62,20 @@ export class BybitConnector {
       lastTickerTime: 0,
       error: null,
     };
+
+    // Track real WS status through reconnects (not just the initial connect()),
+    // and fall back to REST ticker polling once the public WS gives up retrying.
+    // Without this, the dashboard could keep showing "connected" indefinitely
+    // after a dropped socket, and the trading loop would keep acting on stale ticks.
+    this.wsPublic.setLifecycleHandlers({
+      onOpen: () => this.handlePublicWsStatusChange(),
+      onClose: () => this.handlePublicWsStatusChange(),
+      onReconnectFailed: () => this.handlePublicReconnectExhausted(),
+    });
+    this.wsPrivate.setLifecycleHandlers({
+      onOpen: () => this.notifyConnection(),
+      onClose: () => this.notifyConnection(),
+    });
   }
 
   get state(): BybitConnectorState {
@@ -60,6 +84,7 @@ export class BybitConnector {
 
   /** Connect to Bybit: sync time, start WebSocket streams, subscribe to topics. */
   async connect(): Promise<void> {
+    this.manuallyDisconnected = false;
     try {
       this._state.error = null;
 
@@ -117,12 +142,153 @@ export class BybitConnector {
 
   /** Disconnect from Bybit. */
   disconnect(): void {
+    this.manuallyDisconnected = true;
+    this.stopRestPolling();
+    if (this.slowReconnectTimer) {
+      clearTimeout(this.slowReconnectTimer);
+      this.slowReconnectTimer = null;
+    }
     this.wsPublic.disconnect();
     this.wsPrivate.disconnect();
     this._connected = false;
     this._state.connected = false;
     this._state.error = null;
     this.notifyConnection();
+  }
+
+  // ── WebSocket status tracking + REST polling fallback ────────────────
+  // WsClient gives up reconnecting after maxReconnectAttempts (exponential backoff,
+  // see ws.ts). Per the integration spec (§7 "WebSocket reconnect exhausted"), once
+  // that happens we switch to polling REST tickers so the trading loop keeps seeing
+  // fresh prices, and we keep trying to restore the socket in the background at a
+  // slower, deliberately-conservative cadence (never faster than once per second,
+  // per the anti-ban policy).
+
+  private handlePublicWsStatusChange(): void {
+    const wasConnected = this._state.connected;
+    this._state.connected = this.wsPublic.isConnected();
+    if (this._state.connected && !wasConnected) {
+      this.stopRestPolling();
+    }
+    this.notifyConnection();
+  }
+
+  private handlePublicReconnectExhausted(): void {
+    if (this.manuallyDisconnected) return;
+    this.startRestPolling();
+    this.scheduleSlowReconnect();
+  }
+
+  private scheduleSlowReconnect(delayMs = 30000): void {
+    if (this.manuallyDisconnected) return;
+    this.slowReconnectTimer = setTimeout(() => {
+      if (this.manuallyDisconnected) return;
+      this.wsPublic.connect().catch(() => {
+        this.scheduleSlowReconnect(delayMs);
+      });
+    }, delayMs);
+  }
+
+  private startRestPolling(): void {
+    if (this.restPollTimer) return;
+    logger.warn(`[bybit] WebSocket reconnect attempts exhausted — falling back to REST ticker polling every ${this.restPollIntervalMs}ms until it recovers.`);
+    this.restPollTimer = setInterval(() => {
+      this.pollTickersOnce().catch((err) => {
+        console.error("[bybit] REST ticker poll failed:", (err as Error).message);
+      });
+    }, this.restPollIntervalMs);
+  }
+
+  private stopRestPolling(): void {
+    if (this.restPollTimer) {
+      clearInterval(this.restPollTimer);
+      this.restPollTimer = null;
+      logger.info("[bybit] WebSocket reconnected — stopping REST ticker polling fallback.");
+    }
+  }
+
+  private async pollTickersOnce(): Promise<void> {
+    const snapshots = new Map<string, MarketSnapshot>();
+    for (const bybitSymbol of this.config.symbols) {
+      try {
+        const res = await this.rest.getTickers("linear", bybitSymbol);
+        const list = (res as any).list;
+        if (list && list.length > 0) {
+          const appSymbol = bybitSymbolToApp(bybitSymbol);
+          const previous = this.lastSnapshots.get(appSymbol);
+          const snap = tickerToMarketSnapshot(list[0], previous);
+          this.lastSnapshots.set(appSymbol, snap);
+          snapshots.set(snap.symbol, snap);
+        }
+      } catch (err) {
+        console.warn(`[bybit] REST ticker poll failed for ${bybitSymbol}:`, (err as Error).message);
+      }
+    }
+    if (snapshots.size > 0) {
+      this._state.lastTickerTime = Date.now();
+      for (const handler of this.tickerHandlers) {
+        handler(snapshots);
+      }
+    }
+  }
+
+  /**
+   * Reconcile locally-tracked positions against what Bybit actually reports.
+   * Call this once after connect() (and optionally periodically) so a crash
+   * between an exchange fill and journaling it doesn't leave a real position
+   * silently untracked (which would make the bot unable to ever sell it).
+   *
+   * Per the cash guardrail design, this only ever corrects POSITIONS — cashUsd
+   * stays a locally-tracked operating budget and is never derived from the
+   * exchange wallet balance.
+   *
+   * IMPORTANT: a position Bybit reports that isn't in the local journal at all
+   * (`unaccountedFor` below) is deliberately NOT added to `merged`. The local
+   * cash ledger never paid for it, so if it were merged in, the auto-trading
+   * loop could generate a signal that sells it and credit 100% of the
+   * proceeds to cashUsd — inflating cash far past maxCapitalUsd from a
+   * position the bot never bought with tracked money (this happened in
+   * practice: an orphaned 33.1 SOL testnet position got adopted this way and,
+   * once sold, pushed cashUsd from ~$97 to ~$3,560 against a $100 operating
+   * cap). Surface `unaccountedFor` to the user instead so they can review and
+   * close it manually on the exchange.
+   */
+  async reconcilePositions(localPositions: Position[]): Promise<{ merged: Position[]; unaccountedFor: Position[]; warnings: string[] }> {
+    const warnings: string[] = [];
+    const unaccountedFor: Position[] = [];
+    let exchangePositions: Position[];
+    try {
+      exchangePositions = (await this.getPositions()).filter(p => Math.abs(p.quantity) > 0);
+    } catch (err) {
+      warnings.push(`Could not fetch exchange positions for reconciliation: ${(err as Error).message}`);
+      return { merged: localPositions, unaccountedFor, warnings };
+    }
+
+    const localBySymbol = new Map(localPositions.map(p => [p.symbol, p] as const));
+    const exchangeBySymbol = new Map(exchangePositions.map(p => [p.symbol, p] as const));
+    const merged: Position[] = [];
+
+    for (const [symbol, exch] of exchangeBySymbol) {
+      const local = localBySymbol.get(symbol);
+      if (!local) {
+        warnings.push(`Bybit reports an open ${symbol} position (qty ${exch.quantity}) that isn't in the local journal. NOT adopting it into auto-trading (the cash ledger never paid for it) — please review and close it manually on Bybit if unexpected.`);
+        unaccountedFor.push(exch);
+      } else if (Math.abs(local.quantity - exch.quantity) > Math.max(1e-8, exch.quantity * 0.01)) {
+        warnings.push(`Position size mismatch for ${symbol}: journal says ${local.quantity}, Bybit says ${exch.quantity} — using Bybit's number.`);
+        merged.push({ ...local, quantity: exch.quantity, currentPrice: exch.currentPrice });
+      } else {
+        merged.push(local);
+      }
+    }
+
+    for (const [symbol, local] of localBySymbol) {
+      if (!exchangeBySymbol.has(symbol)) {
+        warnings.push(`Journal believes ${symbol} is open (qty ${local.quantity}) but Bybit reports no such position — the buy may never have filled. Keeping it locally flagged; please verify manually on Bybit.`);
+        merged.push(local);
+      }
+    }
+
+    return { merged, unaccountedFor, warnings };
   }
 
   /** Fetch and cache lot size info for a symbol. */
@@ -225,6 +391,7 @@ export class BybitConnector {
       }
     }
 
+    const orderLinkId = randomUUID();
     const order = await this.rest.placeOrder({
       category: "linear",
       symbol,
@@ -232,14 +399,53 @@ export class BybitConnector {
       orderType: "Market",
       qty: formattedQty,
       reduceOnly: false,
+      orderLinkId,
     });
 
-    return orderResponseToTradeResult(order as unknown as BybitOrderResponse);
+    try {
+      return orderResponseToTradeResult(order as unknown as BybitOrderResponse);
+    } catch (err) {
+      if (!(err instanceof BybitFillUncertainError)) throw err;
+      // Bybit accepted the order (we have an orderId) but the immediate ack didn't
+      // carry a parseable fill yet — market fills can lag the REST response by a
+      // few hundred ms. Poll order history briefly instead of fabricating a trade
+      // result, which previously corrupted portfolio.cashUsd into NaN forever.
+      logger.warn(`[bybit] ${err.message} — polling order history for the confirmed fill...`);
+      const confirmed = await this.pollForFill(symbol, (order as any).orderId as string);
+      if (confirmed) return confirmed;
+      logger.error(`[bybit] Could not confirm fill for order ${(order as any).orderId} (orderLinkId=${orderLinkId}) after polling — check Bybit manually.`);
+      throw err;
+    }
+  }
+
+  /** Poll order history briefly for a confirmed fill after an ambiguous ack. */
+  private async pollForFill(symbol: string, orderId: string): Promise<TradeResult | null> {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await sleep(400 * (attempt + 1));
+      try {
+        const history = await this.rest.getOrderHistory("linear", symbol, 10);
+        const match = (history.list as any[]).find(o => o.orderId === orderId);
+        if (match && match.orderStatus === "Filled") {
+          try {
+            return orderResponseToTradeResult(match as BybitOrderResponse);
+          } catch {
+            continue; // still unparseable — keep polling
+          }
+        }
+      } catch (err) {
+        console.warn(`[bybit] Fill-status poll failed for order ${orderId}:`, (err as Error).message);
+      }
+    }
+    return null;
   }
 
   /** Get current positions from Bybit. */
   async getPositions(): Promise<Position[]> {
-    const result = await this.rest.getPositions("linear");
+    // Bybit's /v5/position/list requires either `symbol` or `settleCoin` for
+    // category=linear when listing all positions — without one it rejects the
+    // request with error 10001. USDT is the settle coin for every symbol this
+    // app trades (see adapters.ts appSymbolToBybit), so it's a safe default.
+    const result = await this.rest.getPositions("linear", undefined, "USDT");
     return (result.list as BybitPosition[]).map(bybitPositionToPosition);
   }
 

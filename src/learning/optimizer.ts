@@ -95,50 +95,64 @@ export function optimize(
 ): StrategyParams {
   _round++;
   const adjusted = { ...params };
-  const insights: string[] = [];
+  // Each change records the actual param it touched — a prior version hardcoded
+  // "minBuyScore" for every insight, so the dashboard's "what the system learned"
+  // panel misreported adjustments made by rules 2-4 (e.g. a volatilityCap change
+  // showed up mislabeled as a minBuyScore change).
+  const changes: { param: keyof StrategyParams; oldValue: number; newValue: number; reason: string }[] = [];
 
   // Rule 1: Low win rate → be more selective (min 3 trades)
   if (totalTrades >= 3 && winRate < 0.4) {
     if (adjusted.minBuyScore < 6) {
+      const oldValue = adjusted.minBuyScore;
       adjusted.minBuyScore = Math.min(6, adjusted.minBuyScore + 1);
-      insights.push(`win rate ${(winRate * 100).toFixed(0)}% < 40% → minBuyScore ${adjusted.minBuyScore}`);
+      changes.push({
+        param: "minBuyScore", oldValue, newValue: adjusted.minBuyScore,
+        reason: `win rate ${(winRate * 100).toFixed(0)}% < 40% → minBuyScore ${adjusted.minBuyScore}`,
+      });
     }
   }
 
   // Rule 2: Good results but limited data → cautious aggression (min 3 trades)
   if (totalTrades >= 3 && totalTrades < 20 && winRate > 0.65) {
     if (adjusted.rsiOversoldThreshold < 35) {
+      const oldValue = adjusted.rsiOversoldThreshold;
       adjusted.rsiOversoldThreshold += 2;
-      insights.push(`good win rate (${(winRate * 100).toFixed(0)}%) → more opportunities, RSI threshold ${adjusted.rsiOversoldThreshold}`);
+      changes.push({
+        param: "rsiOversoldThreshold", oldValue, newValue: adjusted.rsiOversoldThreshold,
+        reason: `good win rate (${(winRate * 100).toFixed(0)}%) → more opportunities, RSI threshold ${adjusted.rsiOversoldThreshold}`,
+      });
     }
   }
 
   // Rule 3: Losses too big relative to wins (min 3 trades)
   if (totalTrades >= 3 && avgLoss !== 0 && avgWin !== 0 && Math.abs(avgLoss) > Math.abs(avgWin) * 1.5) {
     if (adjusted.volatilityCap > 3) {
+      const oldValue = adjusted.volatilityCap;
       adjusted.volatilityCap = Math.max(3, adjusted.volatilityCap - 0.5);
-      insights.push(`avg loss > avg win → lower volatility cap to ${adjusted.volatilityCap}%`);
+      changes.push({
+        param: "volatilityCap", oldValue, newValue: adjusted.volatilityCap,
+        reason: `avg loss > avg win → lower volatility cap to ${adjusted.volatilityCap}%`,
+      });
     }
   }
 
   // Rule 4: High drawdown → tighter risk (min 3 trades)
   if (totalTrades >= 3 && maxDrawdown > 15) {
     if (adjusted.rsiOverboughtThreshold < 75) {
+      const oldValue = adjusted.rsiOverboughtThreshold;
       adjusted.rsiOverboughtThreshold += 2;
-      insights.push(`drawdown ${maxDrawdown.toFixed(0)}% > 15% → exit sooner, RSI overbought ${adjusted.rsiOverboughtThreshold}`);
+      changes.push({
+        param: "rsiOverboughtThreshold", oldValue, newValue: adjusted.rsiOverboughtThreshold,
+        reason: `drawdown ${maxDrawdown.toFixed(0)}% > 15% → exit sooner, RSI overbought ${adjusted.rsiOverboughtThreshold}`,
+      });
     }
   }
 
   // Record and persist insights
-  if (insights.length > 0) {
-    for (const reason of insights) {
-      _insights.push({
-        param: "minBuyScore" as keyof StrategyParams,
-        oldValue: params.minBuyScore,
-        newValue: adjusted.minBuyScore,
-        reason,
-        round: _round,
-      });
+  if (changes.length > 0) {
+    for (const change of changes) {
+      _insights.push({ ...change, round: _round });
     }
     persistInsights();
   }

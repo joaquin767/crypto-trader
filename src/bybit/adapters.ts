@@ -4,6 +4,7 @@ import type { MarketSnapshot } from "../market.ts";
 import type { TradeResult } from "../executor.ts";
 import type { Position } from "../portfolio.ts";
 import type { BybitTicker, BybitOrderResponse, BybitPosition, BybitWalletBalance } from "./types.ts";
+import { BybitFillUncertainError } from "./types.ts";
 
 /**
  * Convert a Bybit ticker to the app's MarketSnapshot.
@@ -26,11 +27,19 @@ export function tickerToMarketSnapshot(
   const parsedVolume = ticker.volume24h ? Number.parseFloat(ticker.volume24h) : NaN;
   const volume24h = !Number.isNaN(parsedVolume) ? parsedVolume : previous?.volume24h ?? 0;
 
+  const parsedHigh = ticker.highPrice24h ? Number.parseFloat(ticker.highPrice24h) : NaN;
+  const high24h = !Number.isNaN(parsedHigh) ? parsedHigh : previous?.high24h;
+
+  const parsedLow = ticker.lowPrice24h ? Number.parseFloat(ticker.lowPrice24h) : NaN;
+  const low24h = !Number.isNaN(parsedLow) ? parsedLow : previous?.low24h;
+
   return {
     symbol,
     price,
     change24h,
     volume24h,
+    high24h,
+    low24h,
     timestamp: Date.now(),
   };
 }
@@ -38,6 +47,13 @@ export function tickerToMarketSnapshot(
 /**
  * Convert a Bybit order response to the app's TradeResult.
  * Only for filled orders; partial fills are handled separately.
+ *
+ * Throws BybitFillUncertainError if the fields we need don't parse to real
+ * numbers (e.g. a market order whose execution report hasn't landed yet).
+ * Previously this silently returned NaN, which — once applied via
+ * portfolio.update() — corrupted cashUsd into NaN for the rest of the session.
+ * Callers must not synthesize a trade from an unparseable response; they should
+ * poll for the real fill instead (see BybitConnector.placeOrder).
  */
 export function orderResponseToTradeResult(order: BybitOrderResponse): TradeResult {
   const quantity = Number.parseFloat(order.cumExecQty);
@@ -47,13 +63,22 @@ export function orderResponseToTradeResult(order: BybitOrderResponse): TradeResu
     : Number.parseFloat(order.price);
   const fee = Number.parseFloat(order.cumExecFee);
 
+  if (Number.isNaN(quantity) || Number.isNaN(price) || Number.isNaN(fee)) {
+    throw new BybitFillUncertainError(
+      `Order ${order.orderId || "?"} (${order.symbol}) returned an unparseable fill ` +
+      `(qty="${order.cumExecQty}", price="${order.avgPrice ?? order.price}", fee="${order.cumExecFee}").`,
+    );
+  }
+
+  const timestamp = Number.parseInt(order.createdTime, 10);
+
   return {
     symbol: bybitSymbolToApp(order.symbol),
     side,
     quantity,
     price,
     fee,
-    timestamp: Number.parseInt(order.createdTime),
+    timestamp: Number.isNaN(timestamp) ? Date.now() : timestamp,
   };
 }
 
