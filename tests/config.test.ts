@@ -166,6 +166,38 @@ test("loadConfig throws ConfigError on missing exchange", () => {
   }
 });
 
+// Regression coverage for a real bug: loadConfig built its Config object from a
+// hand-picked list of raw JSON fields that didn't include "autoSelectSymbols" — the
+// field was silently dropped (always undefined) no matter what config.json said, with
+// no error and no warning. This test round-trips every field declared on the Config
+// interface through loadConfig and deep-equals the result, so a future field that's
+// added to the interface but not wired into the parser's field list fails loudly here
+// instead of silently doing nothing. When adding a field to Config, add it here too —
+// that's the point: the test forces a conscious decision, not an accidental omission.
+test("loadConfig round-trips every Config field (regression: a field can silently be dropped)", () => {
+  const path = tmp("roundtrip");
+  const raw = {
+    exchange: "bybit",
+    apiKey: "sentinel-key",
+    apiSecret: "sentinel-secret",
+    symbols: ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+    maxCapitalUsd: 12345,
+    maxPositionSizeUsd: 6789,
+    maxDailyTrades: 42,
+    stopLossPercent: 7.5,
+    takeProfitPercent: 12.5,
+    refreshIntervalMs: 9000,
+    autoSelectSymbols: true,
+  };
+  writeFileSync(path, JSON.stringify(raw));
+  try {
+    const result = loadConfig(path);
+    assert.deepEqual(result, raw);
+  } finally {
+    if (existsSync(path)) unlinkSync(path);
+  }
+});
+
 test("loadConfig throws ConfigError on missing apiKey", () => {
   const path = tmp("noapikey");
   writeFileSync(path, JSON.stringify({
