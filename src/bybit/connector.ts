@@ -120,6 +120,7 @@ export class BybitConnector {
     this.wsPrivate.disconnect();
     this._connected = false;
     this._state.connected = false;
+    this._state.error = null;
     this.notifyConnection();
   }
 

@@ -148,17 +148,21 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
               statusMessage = `Bybit insufficient balance — falling back to paper mode. Fund your testnet wallet.`;
               logger.warn("Bybit insufficient balance — falling back to paper mode");
               useBybit = false;
+              bybitFallenBack = true;
               bybit.disconnect();
               dashboardState.bybitConnected = false;
-              dashboardState.bybitError = "Insufficient balance — fund your testnet wallet";
+              dashboardState.bybitError = null;
+              dashboardState.bybitMode = "paper";
               result = await execute(tradeSignal, config, portfolio.cashUsd);
             } else if (bybitErr instanceof BybitInvalidQtyError) {
               statusMessage = `Bybit rejected order (qty too small) — falling back to paper mode.`;
               logger.warn("Bybit rejected order (qty too small) — falling back to paper mode");
               useBybit = false;
+              bybitFallenBack = true;
               bybit.disconnect();
               dashboardState.bybitConnected = false;
-              dashboardState.bybitError = "Order qty below minimum — falling back to paper";
+              dashboardState.bybitError = null;
+              dashboardState.bybitMode = "paper";
               result = await execute(tradeSignal, config, portfolio.cashUsd);
             } else {
               throw bybitErr;
@@ -289,8 +293,8 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
     // Connection state → dashboard
     bybit.onConnection((state: BybitConnectorState) => {
-      // If we've already fallen back to paper mode, ignore Bybit connection events
-      if (bybitFallenBack) return;
+      // If we've already fallen back to paper mode, ignore all Bybit events
+      if (bybitFallenBack || !useBybit) return;
       dashboardState.bybitConnected = state.connected;
       dashboardState.bybitLatencyMs = state.latencyMs;
       dashboardState.bybitMode = state.mode;
