@@ -68,6 +68,13 @@ export interface Config {
    *  rule (RSI/Bollinger-based) may close it. Stop-loss and take-profit are
    *  NEVER subject to this. Default 30000 (30s). */
   minHoldBeforeExpertExitMs?: number;
+  /** Estimated round-trip (entry + exit) taker-fee cost, as a percent of
+   *  notional, used only to gate entries whose plausible move can't
+   *  plausibly clear costs (specs/strategy-signal-quality.md §5). Default
+   *  0.22 (matches this session's live-observed ~0.11% per side on Bybit
+   *  testnet). Not used for actual fee accounting — real fees always come
+   *  from the exchange fill / the paper executor's own rate. */
+  estimatedRoundTripFeePercent?: number;
 }
 
 export class ConfigError extends Error {
@@ -115,6 +122,7 @@ export function loadConfig(path: string): Config {
     maxCorrelation: raw["maxCorrelation"] as number | false | undefined,
     signalConfirmationTicks: raw["signalConfirmationTicks"] as number | undefined,
     minHoldBeforeExpertExitMs: raw["minHoldBeforeExpertExitMs"] as number | undefined,
+    estimatedRoundTripFeePercent: raw["estimatedRoundTripFeePercent"] as number | undefined,
   };
 
   // Validation
@@ -213,6 +221,12 @@ export function loadConfig(path: string): Config {
     (typeof config.minHoldBeforeExpertExitMs !== "number" || config.minHoldBeforeExpertExitMs < 0)
   ) {
     throw new ConfigError("config.minHoldBeforeExpertExitMs must be a non-negative number if set");
+  }
+  if (
+    config.estimatedRoundTripFeePercent !== undefined &&
+    (typeof config.estimatedRoundTripFeePercent !== "number" || config.estimatedRoundTripFeePercent <= 0)
+  ) {
+    throw new ConfigError("config.estimatedRoundTripFeePercent must be a positive number if set");
   }
 
   return config as Config;

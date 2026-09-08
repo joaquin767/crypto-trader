@@ -3,6 +3,7 @@ import {
   updateRsi, updateMacd, initialRsiState, initialMacdState,
   type MACDResult, type BollingerResult, type RsiState, type MacdState,
 } from "./indicators.ts";
+import { hasPlausibleEdge } from "./risk.ts";
 import type { MarketSnapshot } from "../market.ts";
 import type { Config } from "../config.ts";
 import type { Portfolio } from "../portfolio.ts";
@@ -227,6 +228,23 @@ export function analyze(
     return {
       type: "hold", symbol: snapshot.symbol, confidence: 0.2,
       reason: "insufficient cash for position",
+      indicators: { rsi, macd, bollinger, momentum, atr },
+    };
+  }
+
+  // Cost-aware entry gate (specs/strategy-signal-quality.md §5, resolves
+  // F4): a setup that would otherwise cross the entry threshold is refused
+  // if the ATR-implied plausible move can't plausibly clear round-trip
+  // cost — F3 showed this is exactly how 21/21 closed trades in a live
+  // session lost money, almost all of them by nearly the fee alone. Checked
+  // before the signal-confirmation gate below on purpose: there's no reason
+  // to accumulate a confirmation streak for a setup that can never be
+  // cost-effective at the current volatility, and if volatility later rises
+  // enough to pass, confirmation correctly restarts from that point.
+  if ((buyScore >= 4 || sellScore >= 4) && !hasPlausibleEdge(atr, snapshot.price, config)) {
+    return {
+      type: "hold", symbol: snapshot.symbol, confidence: 0.2,
+      reason: "insufficient plausible edge vs. round-trip cost",
       indicators: { rsi, macd, bollinger, momentum, atr },
     };
   }

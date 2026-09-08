@@ -6,9 +6,10 @@
 > re-scored by a third round — see git history / the fixes noted inline in §1.1 if auditing this
 > further. Ready to hand to implementation; no code has been written against it yet.
 
-Status: **Phase 1 implemented and tested (317/317 passing). Phase 2 (cost-aware entry gate +
-backtesting harness) not yet started — no further real capital or strategy-tuning trust until it
-ships, per the Phased rollout plan's gate.**
+Status: **Phases 1-2 implemented and tested (321/321 passing). Phase 2's own real-data run is
+inconclusive (zero completed round-trips on a 3-day/1-symbol sample — see Phase 2 notes below) —
+a longer/multi-symbol backtest is needed before the expectancy bar can be called cleared either
+way. Phase 3 (P2/P3 hardening) not started.**
 Owner: crypto-trader strategy engine (`src/strategy/indicators.ts`, `src/strategy/signals.ts`,
 `src/strategy/risk.ts`)
 Purpose: `specs/live-trading-readiness.md` made the *execution* layer safe (leverage pinned,
@@ -467,11 +468,29 @@ reduction rule — and a reconciled position adopted from the exchange genuinely
 open time. `portfolio.update()`'s "buy" branch always populates it correctly for every position
 this codebase itself opens going forward, which is what the gate actually needs.
 
-### Phase 2 (P1) — required before trusting any further tuning of this strategy, or scaling capital
-- [ ] §5 cost-aware entry gate (`hasPlausibleEdge`, wired into new-entry evaluation)
-- [ ] §6 backtesting harness (`src/strategy/backtest.ts`), run at least once against real
-  historical candles for the currently-configured/auto-selected symbols, showing non-negative
-  expectancy net of fees
+### Phase 2 (P1) — required before trusting any further tuning of this strategy, or scaling capital — code done; the expectancy bar itself is not yet conclusively cleared (see below)
+- [x] §5 cost-aware entry gate (`hasPlausibleEdge` in `risk.ts`, wired into `signals.ts`'s
+  new-entry evaluation, checked before the signal-confirmation gate — see the code comment there
+  for why that order matters). Regression tests confirm a high fee estimate blocks an
+  otherwise-qualifying entry and a low one doesn't, on the same real fixture.
+- [x] §6 backtesting harness (`src/strategy/backtest.ts`) — an async `runBacktest()` (deviates
+  from this spec's originally-sketched synchronous signature: `execute()` is itself `async`, so
+  reusing its real paper-fill fee logic rather than duplicating it makes this async too) that
+  replays the real `analyze()`/`execute()` engine against candles, reusing
+  `calcWinRate`/`calcProfitFactor`/`calcMaxDrawdown` from `risk.ts`. 321/321 tests passing,
+  `tsc --noEmit` clean.
+- [x] Run at least once against real historical candles — done, against real APT/USDT 15m candles
+  fetched from Bybit's public `GET /v5/market/kline` (300 candles, ~3 days, 2026-09-08, cached at
+  `tests/fixtures/aptusdt-klines-15m.json`). **Result is inconclusive, not a clean pass:**
+  `closedTrades: 0` — the hardened strategy (Phase 1's confirmation-tick + min-hold gates, this
+  phase's cost-aware gate) opened exactly one position across the whole 3-day window and it was
+  still open at the fixture's end, so `totalFees: 0.02` with no matching realized `pnl`, making
+  `totalPnl - totalFees` slightly *negative* (`-0.02`) purely from that one unclosed entry's fee —
+  not from any losing trade. This is a **dramatically different result from the pre-Phase-1
+  baseline** (21/21 closed trades, all losing, on live APT/USDT — see F1-F3) — the strategy is no
+  longer over-trading on noise — but zero completed round-trips on one 3-day sample of one symbol
+  is too small a sample to call the expectancy bar cleared either way. **Before treating Phase 2 as
+  fully satisfying its own gate, run a longer and/or multi-symbol backtest** (see Open questions #4).
 
 ### Phase 3 (P2/P3) — hardening, not blocking
 - [ ] §F6's MACD signal-line fix is actually §3's `updateMacd` — no separate work item; listed here
@@ -484,10 +503,15 @@ this codebase itself opens going forward, which is what the gate actually needs.
 
 **No further real capital should be committed to this strategy, and no future indicator/threshold
 change should be trusted, before Phase 1 and Phase 2 are both complete and at least one backtest
-run (§6) shows non-negative expectancy net of realistic fees on real historical data.** The
-current strategy, as measured live this session (§1.1-1.3), has a demonstrated near-100% fee-bleed
-pattern across 21 closed trades — this is not a small-scale-acceptable risk, it is a guaranteed
-loss mechanism that Phase 1 alone directly addresses.
+run (§6) shows non-negative expectancy net of realistic fees on real historical data.** Phase 1 and
+Phase 2 are both now implemented and tested, which directly closes the guaranteed loss mechanism
+this spec was triggered by (21/21 closed trades lost money live, pre-Phase-1 — §1.1-1.3). **The
+expectancy-bar half of this gate is not yet cleared**, though: the one real backtest run so far
+(Phase 2 notes above) produced zero completed round-trips on a 3-day, single-symbol sample — too
+small to call non-negative expectancy proven, even though it's also not a demonstrated failure.
+Treat this as: the guaranteed-loss mechanism is fixed, but "this strategy has positive expectancy"
+is still an open question pending a longer/multi-symbol backtest (Open questions #4) — proceed
+with that in mind rather than reading Phase 2's checkmarks as a clean pass on the strategy itself.
 
 ---
 
@@ -539,3 +563,13 @@ loss mechanism that Phase 1 alone directly addresses.
    larger project than hardening the existing consensus-of-indicators approach, and §6's
    backtesting harness is a prerequisite for evaluating either path fairly. Revisit once Phase 2's
    harness exists and has a few real backtest runs to compare against.
+4. **The one real backtest run done so far (300 candles, ~3 days, APT/USDT only) produced zero
+   completed round-trips**, so it neither confirms nor refutes non-negative expectancy — it only
+   confirms the strategy is no longer over-trading on noise (a dramatic change from the pre-Phase-1
+   baseline of 21/21 losing trades). Needed before treating the expectancy-bar half of the Phase
+   1+2 gate as cleared: a longer window (more candles / a longer interval) and/or multiple symbols,
+   so the harness actually has closed trades to compute `winRate`/`profitFactor`/`totalPnl` from.
+   Whether "zero trades over 3 days" is itself a sign the entry threshold is now *too* conservative
+   (the opposite failure mode from F1-F3) is exactly the kind of question §6 exists to let someone
+   answer with evidence instead of a guess — worth checking once a longer run exists, not assumed
+   either way from a single 3-day sample.

@@ -39,6 +39,23 @@ export function calcPositionSize(
 }
 
 /**
+ * True if the ATR-implied plausible move at least clears round-trip cost by
+ * `minEdgeToFeeRatio`x — resolves F4 (specs/strategy-signal-quality.md §5).
+ * A signal that fails this is a coin-flip on direction with a fee that's
+ * already larger than the expected move: F3 showed 21/21 closed trades in a
+ * live session lost money, 20 of them by almost exactly the round-trip fee,
+ * because entries fired on setups whose plausible move never had a chance
+ * of clearing costs in the first place.
+ */
+export function hasPlausibleEdge(
+  atr: number, price: number, config: Config, minEdgeToFeeRatio = 2,
+): boolean {
+  const atrPercent = price > 0 ? (atr / price) * 100 : 0;
+  const roundTripFeePercent = config.estimatedRoundTripFeePercent ?? 0.22;
+  return atrPercent >= roundTripFeePercent * minEdgeToFeeRatio;
+}
+
+/**
  * Calculate max drawdown from a series of portfolio values.
  */
 export function calcMaxDrawdown(values: number[]): number {

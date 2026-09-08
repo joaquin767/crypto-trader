@@ -321,3 +321,33 @@ test("stop-loss still fires immediately on a position 1ms old — minHoldBeforeE
   assert.equal(signal.type, "sell");
   assert(signal.reason.includes("stop-loss"));
 });
+
+// ── Regression coverage for specs/strategy-signal-quality.md §5 (F4) ──────
+// An otherwise-qualifying entry is refused when the ATR-implied plausible
+// move can't plausibly clear round-trip cost — this fixture's real ATR is
+// ~1.1% of price, so a high fee estimate blocks it and a low one doesn't.
+
+test("a high estimated round-trip fee blocks an otherwise-qualifying entry (insufficient plausible edge)", () => {
+  clearHistory();
+  const { prices, snapshot } = seedConfirmedBuySetup();
+  setHistory("BTC/USDT", {
+    prices, highs: prices.map(p => p + 100), lows: prices.map(p => p - 300),
+    timestamps: prices.map((_, i) => Date.now() + i * 1000),
+  });
+  const portfolio = empty();
+  const signal = analyze(snapshot, portfolio, { ...configNoDailyLimit, estimatedRoundTripFeePercent: 1.0 });
+  assert.equal(signal.type, "hold");
+  assert.equal(signal.reason, "insufficient plausible edge vs. round-trip cost");
+});
+
+test("a low estimated round-trip fee does not block the same otherwise-qualifying entry", () => {
+  clearHistory();
+  const { prices, snapshot } = seedConfirmedBuySetup();
+  setHistory("BTC/USDT", {
+    prices, highs: prices.map(p => p + 100), lows: prices.map(p => p - 300),
+    timestamps: prices.map((_, i) => Date.now() + i * 1000),
+  });
+  const portfolio = empty();
+  const signal = analyze(snapshot, portfolio, { ...configNoDailyLimit, estimatedRoundTripFeePercent: 0.1 });
+  assert.notEqual(signal.reason, "insufficient plausible edge vs. round-trip cost");
+});
