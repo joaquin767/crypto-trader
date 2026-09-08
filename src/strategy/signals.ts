@@ -84,10 +84,15 @@ function modelHorizonMsFor(config: Config): number | null {
   if (!config.useModelGate) return null;
   const model = getModel();
   if (model === null) return null;
-  const intervalMinutes = Number.parseFloat(model.trainedOn.interval);
   const bars = model.trainedOn.horizonBars;
-  if (!Number.isFinite(intervalMinutes) || !Number.isFinite(bars) || intervalMinutes <= 0 || bars <= 0) return null;
-  return bars * intervalMinutes * 60_000;
+  if (!Number.isFinite(bars) || bars <= 0) return null;
+  // Dollar bars have no fixed interval, so the trainer records the median
+  // observed bar duration. Fall back to the nominal interval for a
+  // time-bar model.
+  const barMs = model.trainedOn.avgBarMs
+    ?? Number.parseFloat(model.trainedOn.interval) * 60_000;
+  if (!Number.isFinite(barMs) || barMs <= 0) return null;
+  return bars * barMs;
 }
 
 /** Get or initialize price history for a symbol. */

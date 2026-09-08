@@ -26,6 +26,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { extractFeatures, FEATURE_NAMES } from "../src/strategy/features.ts";
+import { toDollarBars, suggestDollarThreshold } from "../src/strategy/bars.ts";
 import type { ModelWeights } from "../src/strategy/model.ts";
 import type { Candle } from "../src/strategy/backtest.ts";
 
@@ -33,6 +34,8 @@ interface Args {
   dataDir: string; out: string;
   tp: number; sl: number; horizon: number;
   epochs: number; lr: number; l2: number; testFraction: number;
+  /** Sample by traded value instead of by clock. 0 = keep time bars. */
+  dollarBars: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -47,10 +50,25 @@ function parseArgs(argv: string[]): Args {
     lr: Number.parseFloat(get("--lr", "0.1")),
     l2: Number.parseFloat(get("--l2", "0.001")),
     testFraction: Number.parseFloat(get("--test-fraction", "0.25")),
+    dollarBars: Number.parseInt(get("--dollar-bars", "0"), 10),
   };
 }
 
 interface Sample { x: number[]; y: number; t: number; symbol: string }
+
+/** Median gap between consecutive bars — the honest "how long is a bar?"
+ *  for dollar bars, which have no fixed interval. */
+function medianBarMs(times: number[]): number {
+  const gaps: number[] = [];
+  for (let i = 1; i < times.length; i++) gaps.push(times[i]! - times[i - 1]!);
+  if (gaps.length === 0) return 0;
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)]!;
+}
+
+let observedRatioNum = 0;   // total time bars consumed
+let observedRatioDen = 0;   // total dollar bars produced
+let observedBarMs = 0;
 
 /**
  * Which barrier does a long entered at `candles[i].close` hit first?
@@ -86,7 +104,16 @@ function buildSamples(dataDir: string, a: Args): Sample[] {
   const samples: Sample[] = [];
   for (const file of files) {
     const parsed = JSON.parse(readFileSync(`${dataDir}/${file}`, "utf-8")) as { symbol: string; candles: Candle[] };
-    const candles = parsed.candles;
+    let candles = parsed.candles;
+    if (a.dollarBars > 0) {
+      const threshold = suggestDollarThreshold(candles, a.dollarBars);
+      const before = candles.length;
+      candles = toDollarBars(candles, threshold);
+      observedRatioNum += before;
+      observedRatioDen += candles.length;
+      observedBarMs = medianBarMs(candles.map(c => c.openTime));
+      console.log(`  ${parsed.symbol}: ${before} time bars -> ${candles.length} dollar bars (threshold $${threshold.toFixed(0)}, median ${(observedBarMs / 60000).toFixed(1)} min/bar)`);
+    }
     let kept = 0;
     for (let i = 0; i < candles.length; i++) {
       const y = labelTripleBarrier(candles, i, a.tp, a.sl, a.horizon);
@@ -204,6 +231,9 @@ async function main(): Promise<void> {
       takeProfitPercent: a.tp,
       stopLossPercent: a.sl,
       horizonBars: a.horizon,
+      timeBarsPerDollarBar: a.dollarBars > 0 && observedRatioDen > 0
+        ? observedRatioNum / observedRatioDen : 0,
+      avgBarMs: a.dollarBars > 0 ? observedBarMs : 5 * 60_000,
     },
     metrics: {
       trainAccuracy: trainEval.accuracy,

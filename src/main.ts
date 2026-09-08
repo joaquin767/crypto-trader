@@ -840,7 +840,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           const appSymbol = bybitSymbolToApp(bybitSymbol);
           try {
             const intervalMinutes = String(DEFAULT_INTERVAL_MS / 60000);
-            const kl = await bybit.rest.getKline("linear", bybitSymbol, intervalMinutes, undefined, undefined, 100);
+            const kl = await bybit.rest.getKline("linear", bybitSymbol, intervalMinutes, undefined, undefined, 1000);
             // Bybit returns newest-first; the model expects chronological.
             const candles = (kl.list ?? []).map(k => ({
               openTime: Number.parseInt(k[0]!, 10),

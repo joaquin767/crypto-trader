@@ -20,6 +20,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { extractFeatures, FEATURE_NAMES, MIN_CANDLES } from "./features.ts";
+import { toDollarBars, suggestDollarThreshold } from "./bars.ts";
 import type { Candle } from "./backtest.ts";
 
 export interface ModelWeights {
@@ -41,6 +42,21 @@ export interface ModelWeights {
     takeProfitPercent: number;
     stopLossPercent: number;
     horizonBars: number;
+    /** How many TIME bars, on average, went into one training dollar bar.
+     *  0 means the model was trained on plain time bars.
+     *
+     *  Stored as a ratio rather than an absolute dollar threshold on
+     *  purpose: dollar volume differs enormously between symbols (SOL's
+     *  threshold was 49x APT's), so a single stored figure fits whichever
+     *  symbol happened to be processed last and starves all the others —
+     *  it produced 1 dollar bar instead of 30, silently disabling the
+     *  model. Each symbol now derives its own threshold to hit this same
+     *  compression, exactly as training did per symbol. */
+    timeBarsPerDollarBar?: number;
+    /** Median wall-clock duration of one training bar, in ms. Dollar bars
+     *  have no fixed interval, so the horizon exit needs this to convert
+     *  "N bars" into a real elapsed time. */
+    avgBarMs?: number;
   };
   /** Held-out performance — the honest read on whether it learned anything. */
   metrics: {
@@ -102,7 +118,20 @@ export function scoreFeatures(model: ModelWeights, features: number[]): number {
  * opinion" and fall back to their own logic, not as a zero probability.
  */
 export function scoreCandles(model: ModelWeights, candles: Candle[]): number | null {
-  const features = extractFeatures(candles);
+  // Rebuild bars the way this model was TRAINED, not the way the live loop
+  // happens to store them. A model fit on dollar bars scored against 5m
+  // time bars is exactly the train/serve skew that makes these models fail
+  // silently — the features would be computed over a different sampling of
+  // the same market and the probabilities would be confident nonsense.
+  const ratio = model.trainedOn.timeBarsPerDollarBar ?? 0;
+  let bars = candles;
+  if (ratio > 1) {
+    // Derive THIS symbol's threshold from its own recent activity so the
+    // resulting bars have the same information density as training.
+    const target = Math.floor(candles.length / ratio);
+    bars = target > 0 ? toDollarBars(candles, suggestDollarThreshold(candles, target)) : [];
+  }
+  const features = extractFeatures(bars);
   return features === null ? null : scoreFeatures(model, features);
 }
 

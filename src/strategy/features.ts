@@ -21,6 +21,24 @@ export const FEATURE_NAMES = [
   "rsi", "macdHist", "bbPos", "bbWidth",
   "volRatio", "bodyRatio", "upperWick", "lowerWick",
   "atrPct", "distSma", "hourSin", "hourCos",
+  // ── Order-flow proxies ────────────────────────────────────────────
+  // Everything above is a lagging transformation of past PRICE. The
+  // literature on short-horizon prediction is consistent that order flow —
+  // who is actually hitting the bid vs lifting the offer — carries the
+  // signal that price-derived indicators do not (see the research notes in
+  // the project discussion: OFI has a near-linear relationship with
+  // short-horizon returns and is "superior to lagging technical
+  // indicators because it directly captures real-time market pressure").
+  //
+  // True OFI needs tick/L2 data, which historical klines do not carry. So
+  // these are the honest OHLCV-computable PROXIES for buying vs selling
+  // pressure — weaker than real order flow, but a genuinely different
+  // information class from the price-shape features above.
+  "clv",          // close location within the bar's range: +1 closed on the high, -1 on the low
+  "clvVol",       // that, weighted by relative volume — pressure with conviction behind it
+  "clvMean6",     // persistence of that pressure over 6 bars
+  "volShock",     // volume vs its own recent norm, in log terms
+  "rangeRatio",   // this bar's range vs recent average range — expansion or contraction
 ] as const;
 
 export type FeatureName = typeof FEATURE_NAMES[number];
@@ -78,6 +96,23 @@ export function extractFeatures(candles: Candle[]): number[] | null {
   const hour = new Date(last.openTime).getUTCHours();
   const hourAngle = (hour / 24) * 2 * Math.PI;
 
+  // ── Order-flow proxies ──────────────────────────────────────────────
+  // Close Location Value: where in the bar's range did it settle? Closing
+  // near the high means buyers absorbed the bar; near the low, sellers did.
+  // This is the standard OHLC stand-in for signed volume when tick data
+  // isn't available.
+  const clvOf = (c: Candle): number => {
+    const r = c.high - c.low;
+    return r === 0 ? 0 : ((c.close - c.low) - (c.high - c.close)) / r;
+  };
+  const clv = clvOf(last);
+  const recent6 = candles.slice(-6);
+  const clvMean6 = recent6.reduce((a, c) => a + clvOf(c), 0) / recent6.length;
+  // Named relVol, not volNorm — volNorm above is the VOLATILITY normaliser
+  // (ATR-based) used by the return features; this is relative VOLUME.
+  const relVol = safeDiv(last.volume, meanVol, 1) || 1;
+  const meanRange = candles.slice(-20).reduce((a, c) => a + (c.high - c.low), 0) / Math.min(20, candles.length);
+
   const features: number[] = [
     retOver(1),
     retOver(3),
@@ -95,6 +130,11 @@ export function extractFeatures(candles: Candle[]): number[] | null {
     clamp(safeDiv(price - sma20, atr), -10, 10),
     Math.sin(hourAngle),
     Math.cos(hourAngle),
+    clamp(clv, -1, 1),
+    clamp(clv * clamp(relVol, 0, 5), -5, 5),
+    clamp(clvMean6, -1, 1),
+    clamp(Math.log(relVol), -5, 5),
+    clamp(safeDiv(range, meanRange, 1), 0, 10),
   ];
 
   return features.every(Number.isFinite) ? features : null;

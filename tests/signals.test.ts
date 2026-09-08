@@ -403,18 +403,18 @@ function positionAged(ms: number, entryPrice = 0.634) {
 
 test("a model-gated position is closed once the forecast horizon elapses", () => {
   clearHistory();
-  // 24 bars x 5m = 7200s. A position older than that has outlived the
-  // prediction it was opened on — the training labels count exactly this
-  // case as an outcome, so the strategy must act on it too.
-  const signal = analyze(snap(0.634), positionAged(7_300_000), modelConfig);
+  // Deliberately far past ANY plausible trained horizon (24h), so this test
+  // does not break every time the model is retrained with different bars or
+  // a different horizon — it asserts the behaviour, not one configuration.
+  const signal = analyze(snap(0.634), positionAged(86_400_000), modelConfig);
   assert.equal(signal.type, "sell");
   assert(signal.reason.includes("horizon elapsed"), `expected a horizon exit, got: ${signal.reason}`);
 });
 
 test("a model-gated position younger than the horizon is not closed by the expert-exit rule", () => {
   clearHistory();
-  // 236s — the observed live median. Previously the expert exit could fire
-  // here (30s min-hold); now the horizon governs and it must hold.
+  // 236s — the observed live median before the horizon fix. Comfortably
+  // inside any trained horizon, so it must NOT be exited here.
   const signal = analyze(snap(0.634), positionAged(236_000), modelConfig);
   assert.notEqual(signal.type, "sell");
 });
@@ -431,6 +431,6 @@ test("stop-loss still fires inside the horizon — the model's own barrier is ne
 
 test("without the model gate, exit behaviour is unchanged (no horizon exit)", () => {
   clearHistory();
-  const signal = analyze(snap(0.634), positionAged(7_300_000), { ...configNoDailyLimit, stopLossPercent: 1, takeProfitPercent: 1 });
+  const signal = analyze(snap(0.634), positionAged(86_400_000), { ...configNoDailyLimit, stopLossPercent: 1, takeProfitPercent: 1 });
   assert(!signal.reason.includes("horizon elapsed"), "horizon exit must not apply when the model isn't driving entries");
 });

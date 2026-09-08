@@ -23,7 +23,9 @@ interface SymbolState {
   lastConsumedOpenTime: number;
 }
 
-const MAX_RETAINED = 200; // plenty for a 30-candle feature window, bounded memory
+// A dollar-bar model compresses several time bars into one, so the window
+// must hold enough TIME bars to still yield >= MIN_CANDLES dollar bars.
+const MAX_RETAINED = 1200;
 
 const state = new Map<string, SymbolState>();
 

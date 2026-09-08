@@ -105,7 +105,11 @@ export async function runBacktest(
     // an identical window here and in production. Bounded slice keeps this
     // O(window) per step rather than O(n^2) across a long replay; candles
     // up to and including `i` are complete at the moment we act on i's close.
-    seedCandles(symbol, candles.slice(Math.max(0, i - 199), i + 1));
+    // Window must be long enough that a DOLLAR-bar model can still form
+    // MIN_CANDLES bars from it. At ~7 time bars per dollar bar, a 200-bar
+    // slice yields ~29 dollar bars — one short of the minimum — so
+    // scoreCandles() returned null and the gate silently passed everything.
+    seedCandles(symbol, candles.slice(Math.max(0, i - 999), i + 1));
 
     // Mark the position to this candle's close before evaluating a new
     // signal, exactly like a live no-trade tick would (reuses
