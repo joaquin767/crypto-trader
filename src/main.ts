@@ -3,6 +3,7 @@ import { watch, type MarketSnapshot } from "./market.ts";
 import { analyze, type TradeSignal, clearHistory, getHistory as getPriceHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
 import { checkConcurrentPositionsLimit, checkCorrelationLimit } from "./strategy/concentration.ts";
+import { recordTick, seedCandles, DEFAULT_INTERVAL_MS } from "./strategy/candles.ts";
 import { create, update, canAfford, deploymentRatio, markToMarket, type Portfolio, type Position } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
@@ -706,6 +707,11 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       // Merge updates so we keep all symbols on the dashboard
       for (const [sym, snap] of snapshots) {
         latestMarketData.set(sym, snap);
+        // Fold every tick into the 5m candle series the entry model scores
+        // against. Without this the model's candle window stays empty
+        // forever, scoreCandles() returns null, and the gate is silently
+        // inert — it would look enabled and do nothing.
+        recordTick(sym, snap.price, snap.volume24h, snap.timestamp);
       }
 
       // Push to dashboard immediately (tickers stream at 100ms)
@@ -740,6 +746,38 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       await bybit.connect();
       statusMessage = `Bybit ${bybit.state.mode.toUpperCase()} — ${config.symbols.length} symbols`;
       logger.info(`Bybit connected. Mode: ${bybit.state.mode}`);
+
+      // Backfill the entry model's candle window from REST klines. Built
+      // from live ticks alone it would take ~2.5h (30 x 5m bars) before the
+      // model could score anything, so an enabled gate would quietly do
+      // nothing for the first couple of hours of every run. Best-effort: a
+      // failure here just means the gate stays inert until ticks fill the
+      // window, which is the same behaviour as before, so it warns rather
+      // than halting.
+      if (config.useModelGate) {
+        for (const bybitSymbol of bybitConfig.symbols) {
+          const appSymbol = bybitSymbolToApp(bybitSymbol);
+          try {
+            const intervalMinutes = String(DEFAULT_INTERVAL_MS / 60000);
+            const kl = await bybit.rest.getKline("linear", bybitSymbol, intervalMinutes, undefined, undefined, 100);
+            // Bybit returns newest-first; the model expects chronological.
+            const candles = (kl.list ?? []).map(k => ({
+              openTime: Number.parseInt(k[0]!, 10),
+              open: Number.parseFloat(k[1]!),
+              high: Number.parseFloat(k[2]!),
+              low: Number.parseFloat(k[3]!),
+              close: Number.parseFloat(k[4]!),
+              volume: Number.parseFloat(k[5]!),
+            })).filter(c => Number.isFinite(c.close)).sort((a, b) => a.openTime - b.openTime);
+            if (candles.length > 0) {
+              seedCandles(appSymbol, candles);
+              logger.info(`[model] Backfilled ${candles.length} x ${intervalMinutes}m candles for ${appSymbol} — the entry gate can score immediately instead of waiting ~2.5h for live ticks to fill its window.`);
+            }
+          } catch (err) {
+            logger.warn(`[model] Could not backfill candles for ${appSymbol} (${(err as Error).message}) — the entry gate stays inert for this symbol until live ticks fill its window.`);
+          }
+        }
+      }
 
       // Pin leverage to 1x + isolated margin, verified — see spec §3.1. This is
       // what makes the cash guardrail's "notional = capital at risk" assumption
