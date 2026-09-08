@@ -550,18 +550,32 @@ export class BybitConnector {
     // Didn't fill in the window. Cancel and report nothing executed. Cancel
     // is best-effort but its failure is logged loudly rather than swallowed:
     // a still-resting order the bot has forgotten about is a real exposure.
+    let cancelError: Error | null = null;
     try {
       await this.rest.cancelOrder("linear", symbol, orderId);
-      logger.info(`[bybit] Post-only ${side} ${appSymbol} did not fill within ${timeoutMs}ms — cancelled, nothing executed.`);
     } catch (err) {
-      logger.error(`[bybit] Post-only ${side} ${appSymbol} did not fill AND could not be cancelled (${(err as Error).message}) — order ${orderId} may still be resting on the exchange. Check Bybit manually.`);
+      cancelError = err as Error;
     }
 
-    // The cancel may have raced a fill; ask the exchange rather than assume.
+    // Always reconcile against the exchange before reporting anything: a
+    // cancel routinely races a fill, and Bybit's "order not exists or too
+    // late to cancel" (110001) means the order is GONE — usually because it
+    // just filled — not that it's still resting. Logging the cancel failure
+    // before checking produced a scary "may still be resting, check Bybit
+    // manually" error that the very next line then contradicted with the
+    // real fill. Ask first, then log once, correctly.
     const afterCancel = await this.pollForFill(symbol, orderId, 1);
     if (afterCancel && afterCancel.side !== "hold" && afterCancel.quantity > 0) {
-      logger.warn(`[bybit] Post-only ${appSymbol} filled ${afterCancel.quantity} just as it was being cancelled — journaling the real fill.`);
+      logger.info(`[bybit] Post-only ${side} ${appSymbol} filled ${afterCancel.quantity} @ ${afterCancel.price} (maker) as the cancel was being sent — journaling the real fill, nothing is left resting.`);
       return afterCancel;
+    }
+
+    if (cancelError === null) {
+      logger.info(`[bybit] Post-only ${side} ${appSymbol} did not fill within ${timeoutMs}ms — cancelled, nothing executed.`);
+    } else {
+      // Cancel failed AND no fill came back. Now it's genuinely ambiguous
+      // and worth a human looking, which is what ERROR is for.
+      logger.error(`[bybit] Post-only ${side} ${appSymbol} did not fill, the cancel failed (${cancelError.message}), and no fill could be confirmed afterwards — order ${orderId} may still be resting on the exchange. Check Bybit manually.`);
     }
     return noop();
   }
