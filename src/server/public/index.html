@@ -184,13 +184,9 @@ footer{text-align:center;color:var(--faint);font-size:11px;margin-top:12px}
     </div>
   </div>
   <div>
-    <div class="card" style="margin-bottom:10px">
-      <h3>Learning Insights</h3>
-      <div id="insights" class="scroll" style="max-height:150px"><div class="empty">The system learns as trades accumulate.</div></div>
-    </div>
     <div class="card">
-      <h3>Strategy Parameters</h3>
-      <div id="params"><div class="empty">Loading…</div></div>
+      <h3>Active Strategy</h3>
+      <div id="strategy"><div class="empty">Loading…</div></div>
     </div>
   </div>
 </div>
@@ -241,8 +237,7 @@ function render(d) {
   if (d.portfolio) renderPositions(d.portfolio, d.marketData || {}, d);
   renderRisk(d);
   if (d.tradeHistory) renderTrades(d.tradeHistory);
-  if (d.learningInsights) renderInsights(d.learningInsights);
-  if (d.strategyParams) renderParams(d.strategyParams);
+  renderStrategy(d);
   if (d.statusMessage) $('status').textContent = d.statusMessage;
 }
 
@@ -335,7 +330,6 @@ function renderPerformance(r) {
 function renderPositions(p, market, d) {
   const el = $('positions');
   if (!p.positions.length) { el.innerHTML = '<div class="empty">No open positions.</div>'; return; }
-  const sl = d.strategyParams && d.strategyParams.stopLossPercent;
   el.innerHTML = p.positions.map(pos => {
     const snap = market[pos.symbol];
     const mark = snap ? snap.price : pos.currentPrice;
@@ -436,17 +430,35 @@ function renderTrades(trades) {
   }).join('');
 }
 
-function renderInsights(ins) {
-  const el = $('insights');
-  if (!ins || !ins.length) { el.innerHTML = '<div class="empty">The system learns as trades accumulate.</div>'; return; }
-  el.innerHTML = ins.slice(-12).reverse()
-    .map(i => `<div class="kv"><span>${esc(i.reason)}</span></div>`).join('');
-}
-
-function renderParams(p) {
-  const rows = Object.entries(p).map(([k, v]) =>
-    `<div class="kv"><span class="dim">${esc(k.replace(/([A-Z])/g, ' $1').toLowerCase())}</span><span class="mono">${esc(String(v))}</span></div>`);
-  $('params').innerHTML = rows.join('') || '<div class="empty">No parameters.</div>';
+/* What is ACTUALLY driving decisions right now.
+   This replaced two panels that misled: a "Learning Insights" feed and a
+   "Strategy Parameters" table, both fed by an optimizer whose tuned values
+   nothing ever read — analyze() takes (snapshot, portfolio, config) and
+   never received them, and signals.ts hardcodes its score threshold. So the
+   dashboard reported adjustments like "win rate 20% < 40% -> minBuyScore 5"
+   that changed nothing. These rows are read from the state that genuinely
+   governs entries and exits. */
+function renderStrategy(d) {
+  const el = document.getElementById('strategy');
+  if (!el) return;
+  const rows = [];
+  const add = (k, v, c) => rows.push(`<div class="kv"><span class="dim">${k}</span><span class="mono ${c || ''}">${v}</span></div>`);
+  const symbols = Object.keys(d.marketData || {});
+  if (symbols.length) add('Symbols', symbols.map(esc).join(', '), 'dim');
+  if (d.slPercent !== undefined) add('Stop / target', `${d.slPercent}% / ${d.tpPercent}%`, 'dim');
+  if (d.mode) add('Mode', esc(String(d.mode).toUpperCase()), d.mode === 'live' ? 'down' : 'dim');
+  add('Decision cadence', 'on 5m bar close', 'dim');
+  if (d.model && d.model.enabled) {
+    add('Entry model', `p &ge; ${d.model.minProbability}`, 'dim');
+    // The held-out AUC is the honest measure of whether the model knows
+    // anything: 0.50 is a coin flip. Shown next to the threshold so the
+    // gate is never mistaken for more certainty than it has.
+    add('Model test AUC', d.model.testAuc.toFixed(3), d.model.testAuc >= 0.55 ? 'up' : 'warn');
+    add('Trained to predict', `+${d.model.tp}% before -${d.model.sl}% in ${d.model.horizonBars} x ${esc(d.model.interval)}m`, 'dim');
+  } else {
+    add('Entry model', 'off', 'dim');
+  }
+  el.innerHTML = rows.join('') || '<div class="empty">No strategy state yet.</div>';
 }
 
 function drawEquity(values) {

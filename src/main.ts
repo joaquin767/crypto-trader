@@ -4,12 +4,12 @@ import { analyze, checkImmediateExit, type TradeSignal, clearHistory, getHistory
 import { calcPositionSize } from "./strategy/risk.ts";
 import { checkConcurrentPositionsLimit, checkCorrelationLimit } from "./strategy/concentration.ts";
 import { recordTick, seedCandles, takeCompletedCandle, DEFAULT_INTERVAL_MS } from "./strategy/candles.ts";
+import { loadModel } from "./strategy/model.ts";
 import { create, update, canAfford, deploymentRatio, markToMarket, type Portfolio, type Position } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
 import { recordEntry, recordExit, getClosedTrades, getHistory, clearJournal, reconstructPortfolio, type TradeRecord, type TradeVenue } from "./learning/journal.ts";
 import { analyze as analyzePerformance, type PerformanceReport } from "./learning/analyzer.ts";
-import { defaultParams, optimize, getInsights, type StrategyParams, type LearningInsight } from "./learning/optimizer.ts";
 import { createServer, broadcast, type DashboardState } from "./server/index.ts";
 import { BybitConnector, type BybitConnectorState } from "./bybit/connector.ts";
 import { BybitInsufficientBalanceError, BybitInvalidQtyError, BybitFatalError, BybitFillUncertainError, BybitAuthError } from "./bybit/types.ts";
@@ -111,14 +111,24 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // changes cashUsd.
   let walletMonitorState = createWalletMonitorState();
 
+  // Snapshot of the entry model actually in force, for the dashboard.
+  const loadedModel = config.useModelGate ? loadModel() : null;
+  const modelInfo = loadedModel === null ? null : {
+    enabled: true,
+    minProbability: config.modelMinProbability ?? 0.5,
+    testAuc: loadedModel.metrics.testAuc,
+    horizonBars: loadedModel.trainedOn.horizonBars,
+    interval: loadedModel.trainedOn.interval,
+    tp: loadedModel.trainedOn.takeProfitPercent,
+    sl: loadedModel.trainedOn.stopLossPercent,
+  };
+
   let lastSignal: TradeSignal | null = null;
   // Latest decision per symbol, for the dashboard's "why isn't it trading?"
   // panel. Plain object (not a Map) because it is serialised straight to SSE.
   const signalsBySymbol: Record<string, { type: string; confidence: number; reason: string; at: number }> = {};
   let statusMessage = "starting...";
-  let strategyParams: StrategyParams = defaultParams();
   let performanceReport: PerformanceReport | null = null;
-  const learningInsights: LearningInsight[] = [];
 
   // Shared market data (updated by WebSocket or simulated watch)
   let latestMarketData = new Map<string, MarketSnapshot>();
@@ -136,8 +146,6 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     mode,
     tradeHistory: [],
     performanceReport: null,
-    learningInsights: [],
-    strategyParams,
     bybitConnected: false,
     bybitLatencyMs: 0,
     bybitMode: "paper",
@@ -446,8 +454,6 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         broadcast("trade", {
           tradeHistory: getHistory(venue),
           performanceReport,
-          learningInsights: [],
-          strategyParams,
         });
       } else {
         statusMessage = `${mode.toUpperCase()} | ${tradeSignal.reason || "no signal"}`;
@@ -465,6 +471,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       // not an alert — the dashboard uses this to stop shouting about it.
       active: config.symbols.includes(sym),
     }));
+    dashboardState.model = modelInfo;
     dashboardState.slPercent = config.stopLossPercent;
     dashboardState.tpPercent = config.takeProfitPercent;
     dashboardState.marketData = latestMarketData;
@@ -473,8 +480,6 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     dashboardState.statusMessage = statusMessage;
     dashboardState.tradeHistory = getHistory(venue);
     dashboardState.performanceReport = performanceReport;
-    dashboardState.learningInsights = learningInsights;
-    dashboardState.strategyParams = strategyParams;
     dashboardState.deploymentRatio = deploymentRatio(portfolio);
     dashboardState.operatingCapitalUsd = portfolio.maxCapitalUsd;
     dashboardState.circuitBreakerTripped = circuitBreakerTripped;
@@ -503,6 +508,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       walletShortfallWarning: dashboardState.walletShortfallWarning,
       signalsBySymbol: dashboardState.signalsBySymbol,
       haltedSymbols: dashboardState.haltedSymbols,
+      model: dashboardState.model,
       slPercent: dashboardState.slPercent,
       tpPercent: dashboardState.tpPercent,
     });
@@ -552,31 +558,9 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
     performanceReport = analyzePerformance(initialCash, venue);
 
-    strategyParams = optimize(
-      strategyParams,
-      performanceReport.winRate,
-      closedTrades.length,
-      performanceReport.avgWin,
-      Math.abs(performanceReport.avgLoss),
-      performanceReport.maxDrawdown,
-      closedTrades.slice(-10).map(t => t.pnl ?? 0),
-    );
+    logger.info(`Performance: win rate ${(performanceReport.winRate * 100).toFixed(1)}% | closed trades: ${closedTrades.length}`);
 
-    const newInsights = getInsights().filter(
-      i => !learningInsights.find(e => e.round === i.round)
-    );
-    learningInsights.push(...newInsights);
-
-    logger.info(`Learning: win rate ${(performanceReport.winRate * 100).toFixed(1)}% | Trades: ${closedTrades.length}`);
-    if (newInsights.length > 0) {
-      logger.info(`Learning: adjustments: ${newInsights.map(i => i.reason).join("; ")}`);
-    }
-
-    broadcast("learning", {
-      insights: newInsights,
-      params: strategyParams,
-      report: performanceReport,
-    });
+    broadcast("learning", { report: performanceReport });
   }
 
   // ── Main timer loop ────────────────────────────────────────────────

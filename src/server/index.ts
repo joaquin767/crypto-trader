@@ -4,7 +4,6 @@ import type { MarketSnapshot } from "../market.ts";
 import type { Portfolio } from "../portfolio.ts";
 import type { TradeSignal } from "../strategy/signals.ts";
 import type { TradeRecord } from "../learning/journal.ts";
-import type { LearningInsight, StrategyParams } from "../learning/optimizer.ts";
 import type { PerformanceReport } from "../learning/analyzer.ts";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -33,8 +32,6 @@ export interface DashboardState {
   mode: "paper" | "live" | "testnet";
   tradeHistory: TradeRecord[];
   performanceReport: PerformanceReport | null;
-  learningInsights: LearningInsight[];
-  strategyParams: StrategyParams;
   bybitConnected?: boolean;         // 🔌 Bybit WebSocket connection status
   bybitLatencyMs?: number;          // ⏱ Bybit WebSocket latency
   bybitMode?: "paper" | "testnet" | "live";  // 🏷 Current bybit mode
@@ -71,6 +68,11 @@ export interface DashboardState {
   // defaults that may not match this config.
   slPercent?: number;
   tpPercent?: number;
+  // 🧠 The trained entry model actually in force, if any — threshold, the
+  // held-out AUC it was measured at, and the barriers/horizon it was
+  // trained to predict. Surfaced so the dashboard states what genuinely
+  // drives entries, rather than parameters nothing reads.
+  model?: { enabled: boolean; minProbability: number; testAuc: number; horizonBars: number; interval: string; tp: number; sl: number } | null;
 }
 
 /**
@@ -167,8 +169,6 @@ function serializeState(state: DashboardState) {
     mode: state.mode,
     tradeHistory: state.tradeHistory.slice(-50),
     performanceReport: state.performanceReport,
-    learningInsights: state.learningInsights,
-    strategyParams: state.strategyParams,
     bybitConnected: state.bybitConnected,
     bybitLatencyMs: state.bybitLatencyMs,
     bybitMode: state.bybitMode,
@@ -183,5 +183,6 @@ function serializeState(state: DashboardState) {
     haltedSymbols: state.haltedSymbols,
     slPercent: state.slPercent,
     tpPercent: state.tpPercent,
+    model: state.model,
   };
 }
