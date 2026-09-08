@@ -1,0 +1,350 @@
+{
+  "generatedAt": "2026-09-08T18:07:24.556Z",
+  "kind": "barrier-sweep",
+  "protocol": {
+    "note": "Candidates pre-registered in scripts/barrier-sweep.ts before any was run. All are reported, including losers. Winning here does not clear Gate 0 and does not authorise adoption; see §10 and A-4.",
+    "candidatesEvaluated": 10,
+    "cap": 10,
+    "adoptionMarginPpPerDay": 0.01,
+    "symbols": [
+      "APTUSDT",
+      "ARBUSDT",
+      "LINKUSDT",
+      "OPUSDT",
+      "SOLUSDT"
+    ],
+    "trainDays": 30,
+    "testDays": 7,
+    "stepDays": 7
+  },
+  "candidates": [
+    {
+      "label": "baseline-1.5/1.5-h7",
+      "hypothesis": "Incumbent. Everything else is measured against this.",
+      "tp": 1.5,
+      "sl": 1.5,
+      "horizon": 7,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.16982709042412772,
+      "meanDailyReturnPercent": -0.247655010314825,
+      "positiveFolds": 16,
+      "totalFolds": 47,
+      "totalClosedTrades": 1792,
+      "medianAuc": 0.5463799230085875,
+      "signTestPValue": 0.9906880817125929,
+      "maxDrawdownPercent": 85.99559199265411,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.35770089285714285,
+        "stopLoss": 0.44921875,
+        "horizon": 0.19308035714285715
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -16.754987762204813,
+        "ARBUSDT": -10.99247673438457,
+        "LINKUSDT": -13.054344412206376,
+        "OPUSDT": -25.967737167413336,
+        "SOLUSDT": -14.708952317368347
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1698 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "no-model-gate",
+      "hypothesis": "DIAGNOSTIC: is the model helping or hurting? Gate 0 reports median fold AUC 0.5464 (above chance) yet negative GROSS expectancy. Those are only consistent if the top-5% tail the gate actually trades is unreliable even though the overall ranking is not. If removing the gate improves things, the model is destroying value, not adding it.",
+      "tp": 1.5,
+      "sl": 1.5,
+      "horizon": 7,
+      "overrides": {
+        "useModelGate": false
+      },
+      "medianDailyReturnPercent": -0.2787300918201107,
+      "meanDailyReturnPercent": -0.40911649092989716,
+      "positiveFolds": 12,
+      "totalFolds": 47,
+      "totalClosedTrades": 3084,
+      "medianAuc": 0.5463799230085875,
+      "signTestPValue": 0.9998269994501037,
+      "maxDrawdownPercent": 136.68822217677493,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.3712710765239948,
+        "stopLoss": 0.5103761348897535,
+        "horizon": 0
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -33.497238517168654,
+        "ARBUSDT": -24.61376425550157,
+        "LINKUSDT": -19.415932479637178,
+        "OPUSDT": -38.19966142541821,
+        "SOLUSDT": -18.872728838210538
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.2787 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "gate-top20pct",
+      "hypothesis": "Same tail question, weaker form: if the extreme tail is noisy but the ranking is real, a looser gate should beat a tighter one.",
+      "tp": 1.5,
+      "sl": 1.5,
+      "horizon": 7,
+      "overrides": {
+        "modelTopPercentile": 20
+      },
+      "medianDailyReturnPercent": -0.13748003389882252,
+      "meanDailyReturnPercent": -0.2641602988317481,
+      "positiveFolds": 15,
+      "totalFolds": 47,
+      "totalClosedTrades": 1876,
+      "medianAuc": 0.5463799230085875,
+      "signTestPValue": 0.996028636765453,
+      "maxDrawdownPercent": 92.32679990143197,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.35447761194029853,
+        "stopLoss": 0.44989339019189767,
+        "horizon": 0.19562899786780383
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -17.18818420664353,
+        "ARBUSDT": -13.042880914957145,
+        "LINKUSDT": -12.114897355780267,
+        "OPUSDT": -27.94829048450819,
+        "SOLUSDT": -16.61448535375597
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1375 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "gate-top50pct",
+      "hypothesis": "Near-neutral gate. Isolates the gate's contribution from the barrier geometry.",
+      "tp": 1.5,
+      "sl": 1.5,
+      "horizon": 7,
+      "overrides": {
+        "modelTopPercentile": 50
+      },
+      "medianDailyReturnPercent": -0.15118455700122344,
+      "meanDailyReturnPercent": -0.25150867089605605,
+      "positiveFolds": 13,
+      "totalFolds": 47,
+      "totalClosedTrades": 2020,
+      "medianAuc": 0.5463799230085875,
+      "signTestPValue": 0.999455730917018,
+      "maxDrawdownPercent": 89.806887871325,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.3608910891089109,
+        "stopLoss": 0.4420792079207921,
+        "horizon": 0.19702970297029704
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -17.00757765566158,
+        "ARBUSDT": -13.883523208392106,
+        "LINKUSDT": -10.46006967090081,
+        "OPUSDT": -25.806512123800395,
+        "SOLUSDT": -15.588670066047538
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1512 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "horizon-14",
+      "hypothesis": "19.3% of exits are horizon timeouts, which resolve at whatever price happens to be there — near coin-flip, and labelled as losses in training regardless of actual P&L. A longer horizon lets more paths resolve AT a barrier, where the edge (if any) lives.",
+      "tp": 1.5,
+      "sl": 1.5,
+      "horizon": 14,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.15741339285714578,
+      "meanDailyReturnPercent": -0.2546279099700896,
+      "positiveFolds": 14,
+      "totalFolds": 47,
+      "totalClosedTrades": 1707,
+      "medianAuc": 0.5119751348815388,
+      "signTestPValue": 0.9984561617894787,
+      "maxDrawdownPercent": 85.13028689110354,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.4135910954891623,
+        "stopLoss": 0.5043936731107206,
+        "horizon": 0.08201523140011717
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -22.19603332212335,
+        "ARBUSDT": -12.611842700614439,
+        "LINKUSDT": -12.754351393965152,
+        "OPUSDT": -23.722360916239523,
+        "SOLUSDT": -12.48799404721702
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1574 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "horizon-28",
+      "hypothesis": "Same as horizon-14, pushed further, to see whether the effect is monotonic.",
+      "tp": 1.5,
+      "sl": 1.5,
+      "horizon": 28,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.15741339285714578,
+      "meanDailyReturnPercent": -0.24026670077343915,
+      "positiveFolds": 16,
+      "totalFolds": 47,
+      "totalClosedTrades": 1640,
+      "medianAuc": 0.4989197530864197,
+      "signTestPValue": 0.9906880817125929,
+      "maxDrawdownPercent": 79.44649933196702,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.4445121951219512,
+        "stopLoss": 0.5353658536585366,
+        "horizon": 0.020121951219512196
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -23.574931461128337,
+        "ARBUSDT": -15.355080218493322,
+        "LINKUSDT": -9.7972427770515,
+        "OPUSDT": -23.916165220871626,
+        "SOLUSDT": -6.404324876916682
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1574 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "wide-3.0/3.0-h14",
+      "hypothesis": "Widening total barrier width halves the cost deficit (2.08pp -> 1.04pp of required skill). Horizon doubled because wider barriers need longer to be reached.",
+      "tp": 3,
+      "sl": 3,
+      "horizon": 14,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.13360136979769857,
+      "meanDailyReturnPercent": -0.3309799063339573,
+      "positiveFolds": 15,
+      "totalFolds": 47,
+      "totalClosedTrades": 1440,
+      "medianAuc": 0.5497962373695082,
+      "signTestPValue": 0.996028636765453,
+      "maxDrawdownPercent": 136.4828415376535,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.23402777777777778,
+        "stopLoss": 0.32013888888888886,
+        "horizon": 0.44583333333333336
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -22.455246370724957,
+        "ARBUSDT": -8.006085178700912,
+        "LINKUSDT": -24.353795910156325,
+        "OPUSDT": -36.082978493000766,
+        "SOLUSDT": -17.994283231288925
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1336 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "wide-4.0/4.0-h28",
+      "hypothesis": "Widest sensible barrier: deficit falls to 0.78pp. Horizon scaled with width.",
+      "tp": 4,
+      "sl": 4,
+      "horizon": 28,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.2754110089999699,
+      "meanDailyReturnPercent": -0.4874031763359,
+      "positiveFolds": 19,
+      "totalFolds": 47,
+      "totalClosedTrades": 1028,
+      "medianAuc": 0.5726905208612526,
+      "signTestPValue": 0.9280674557985986,
+      "maxDrawdownPercent": 172.48650133362034,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.21108949416342412,
+        "stopLoss": 0.35019455252918286,
+        "horizon": 0.438715953307393
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -44.82587882039121,
+        "ARBUSDT": -17.90716033268183,
+        "LINKUSDT": -31.865558071684607,
+        "OPUSDT": -36.172301404011726,
+        "SOLUSDT": -29.584746385741663
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.2754 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "narrow-0.75/0.75-h7",
+      "hypothesis": "FALSIFICATION TEST: the deficit formula predicts narrow barriers are WORSE (4.17pp of required skill). If this comes out best, the formula — and the reasoning behind the wide candidates — is wrong and the whole sweep should be distrusted.",
+      "tp": 0.75,
+      "sl": 0.75,
+      "horizon": 7,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.15314776785713186,
+      "meanDailyReturnPercent": -0.21833703105456623,
+      "positiveFolds": 11,
+      "totalFolds": 47,
+      "totalClosedTrades": 2078,
+      "medianAuc": 0.5009794696068509,
+      "signTestPValue": 0.9999507556277987,
+      "maxDrawdownPercent": 72.05992886568936,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.43118383060635224,
+        "stopLoss": 0.5384985563041386,
+        "horizon": 0.030317613089509143
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -17.166510200563803,
+        "ARBUSDT": -15.467220621850784,
+        "LINKUSDT": -7.596151523946162,
+        "OPUSDT": -20.302062574579473,
+        "SOLUSDT": -11.300938296012067
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.1531 <= 0",
+      "adopted": false
+    },
+    {
+      "label": "asym-3.0/1.0-h14",
+      "hypothesis": "Asymmetric: cut losers at 1%, let winners run to 3%. Break-even win rate drops to 26.6%. Tests whether the model's skill (such as it is) survives better at picking 'does not immediately drop 1%' than 'rises 1.5% before falling 1.5%'.",
+      "tp": 3,
+      "sl": 1,
+      "horizon": 14,
+      "overrides": {},
+      "medianDailyReturnPercent": -0.24766404712342924,
+      "meanDailyReturnPercent": -0.3146196020508132,
+      "positiveFolds": 13,
+      "totalFolds": 47,
+      "totalClosedTrades": 1898,
+      "medianAuc": 0.5252819228372196,
+      "signTestPValue": 0.999455730917018,
+      "maxDrawdownPercent": 112.68356247532338,
+      "topSymbolProfitShare": 0,
+      "exitMix": {
+        "takeProfit": 0.15015806111696522,
+        "stopLoss": 0.7165437302423604,
+        "horizon": 0.1332982086406744
+      },
+      "pnlBySymbol": {
+        "APTUSDT": -19.58378076641024,
+        "ARBUSDT": -16.245654762765408,
+        "LINKUSDT": -16.133968930494444,
+        "OPUSDT": -32.06485832489801,
+        "SOLUSDT": -19.481586290149473
+      },
+      "verdict": "no_edge",
+      "verdictReason": "step 2: medianDailyReturnPercent=-0.2477 <= 0",
+      "adopted": false
+    }
+  ],
+  "best": "wide-3.0/3.0-h14",
+  "improvementVsBaseline": 0.03622572062642915
+}

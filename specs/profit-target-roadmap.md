@@ -658,9 +658,12 @@ signal-quality problem, not an execution-cost problem.
 Recorded so the choice is explicit rather than drifted into. All of these keep real capital at zero.
 
 - **(a) Re-specify the strategy and re-run Gate 0.** The harness now exists and takes ~15 minutes,
-  so candidate configurations are cheap to test. §5.7.2 points at the barrier geometry as the
-  highest-value axis: a 41% base rate against a 52.5% break-even is a structural deficit no gate can
-  fix. **The cost-structure axis has now been tested and closed — see §5.10.**
+  so candidate configurations are cheap to test. **Both axes originally proposed here have now been
+  tested and closed:** cost structure in §5.10 (fees explain only 36% of the loss; free trading still
+  loses) and barrier geometry in §5.11 (all 10 pre-registered candidates fail). §5.11.2 identifies
+  what remains: the rule-based signal generator that defines the entry universe, which the model can
+  only prune. That is an architectural change requiring its own spec — see §5.11.3 for why it must
+  not simply be run as an eleventh candidate.
 - **(b) Keep it running on testnet as a development target** and treat the bot as an engineering
   project rather than an income source.
 - **(c) Stop.** The measured answer is that this configuration loses money; not building further on
@@ -752,6 +755,84 @@ framing needs correcting in light of this: the problem is not that a small ranki
 eaten by costs. The problem is that the strategy has **negative gross expectancy before costs**.
 That is a signal-quality problem, not an execution problem, and it will not be fixed by tuning the
 exit side.
+
+---
+
+## 5.11 — Barrier-geometry sweep: all 10 candidates fail, and why
+
+The last axis §5.8 option (a) left open. Ten candidates, **pre-registered in
+`scripts/barrier-sweep.ts` with a stated hypothesis each before any was run**, capped at 10 per §10,
+all reported including losers. Artifact: `data/validation/barrier-sweep-2026-09-08.json`.
+
+| # | Candidate | Median %/day | Trades | Median AUC | Verdict |
+|---|---|---|---|---|---|
+| 1 | wide-3.0/3.0-h14 | **−0.1336** | 1,440 | 0.550 | `no_edge` |
+| 2 | gate-top20pct | −0.1375 | 1,876 | 0.546 | `no_edge` |
+| 3 | gate-top50pct | −0.1512 | 2,020 | 0.546 | `no_edge` |
+| 4 | narrow-0.75/0.75-h7 | −0.1531 | 2,078 | 0.501 | `no_edge` |
+| 5 | horizon-14 | −0.1574 | 1,707 | 0.512 | `no_edge` |
+| 6 | horizon-28 | −0.1574 | 1,640 | 0.499 | `no_edge` |
+| 7 | **baseline-1.5/1.5-h7** | −0.1698 | 1,792 | 0.546 | `no_edge` |
+| 8 | asym-3.0/1.0-h14 | −0.2477 | 1,898 | 0.525 | `no_edge` |
+| 9 | wide-4.0/4.0-h28 | −0.2754 | 1,028 | 0.573 | `no_edge` |
+| 10 | no-model-gate | −0.2787 | 3,084 | 0.546 | `no_edge` |
+
+**Every candidate loses, and none is even ambiguous** — every sign-test p is ≥ 0.93, i.e. all are
+consistently *worse* than a coin flip across 47 folds. The best beats the incumbent by 0.0362 pp/day,
+comfortably over §10's 0.01 adoption margin, but adoption is moot: it does not clear Gate 0, so
+there is nothing to re-validate on held-out symbols and that step was correctly skipped.
+
+### 5.11.1 — What the sweep actually established
+
+**The model is helping, not hurting.** `no-model-gate` is the *worst* candidate at −0.2787 %/day
+against the baseline's −0.1698, on 3,084 trades versus 1,792. Removing the gate nearly doubles the
+loss. §5.7.2's open question — how AUC 0.5464 coexists with negative gross expectancy — is answered:
+the model does have real filtering skill; it is filtering a pool that is far worse than the filtered
+result.
+
+**The model's extreme tail is mildly unreliable.** top-20% (−0.1375) beats both top-5% (−0.1698)
+and top-50% (−0.1512), so there is an optimum near 20%. A real but small effect, and it does not
+approach profitability.
+
+**The barrier-width hypothesis is NOT supported, and the spec should say so plainly.** The
+motivating arithmetic — for a driftless random walk the cost deficit is `c/(a+b)`, shrinking as
+total barrier width grows — predicts a monotonic improvement with width. It did not happen:
+3.0/3.0 was best but 4.0/4.0 was second-*worst*, and narrow-0.75/0.75 beat the baseline when the
+formula says it should be markedly worse. The pre-registered falsification test therefore fired in
+its weak form. **The width reasoning does not explain this data, so the 3.0/3.0 result should be
+read as noise, not mechanism** — exactly what a 10-candidate search is expected to throw up by
+chance.
+
+### 5.11.2 — The structural ceiling this exposes
+
+`signals.ts` gates the model behind `if (config.useModelGate && (buyScore >= 4 || sellScore >= 4))`,
+and its own comment states the design: the model *"only ever BLOCKS an entry the rule-based logic
+already wanted — it never invents one."*
+
+So the entry universe is defined entirely by the hand-tuned RSI/MACD/Bollinger/momentum score, and
+the model can only prune it. The sweep measures both ends of that pipeline: the unfiltered pool is
+**−0.2787 %/day**, and the best filtering of it reaches **−0.1336 %/day**. A filter cannot do better
+than the best subset of what it is given, and every subset of this pool is still a loser.
+
+**That, not the barriers and not the costs, is the ceiling.** Tuning barrier geometry, horizons and
+gate percentiles are all rearrangements downstream of a signal generator with strongly negative
+expectancy.
+
+### 5.11.3 — What is deliberately NOT being done next
+
+The obvious follow-up is to let the model *generate* entries rather than only filter them. That is
+**not** an eleventh candidate and must not be run as one:
+
+- §10 caps a fold set at 10 candidates precisely to stop a search running until something looks
+  good. That budget is now spent.
+- It is an architectural change to `analyze()`, not a parameter — it changes what the strategy *is*,
+  and it would invalidate the comparison basis every number above shares.
+- A-4 applies: the sweep's fold set has now been seen ten times. A change motivated by what those
+  ten runs showed is fitted to them unless it is validated somewhere they cannot reach.
+
+If pursued, it needs its own spec, and its Gate 0 must run against the held-out universe
+(**AVAXUSDT, DOTUSDT, INJUSDT** — fetched, present in `data/klines-365/`, and never used in any
+training or tuning to date) rather than the five symbols this sweep has now exhausted.
 
 ---
 
