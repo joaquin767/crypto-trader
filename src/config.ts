@@ -95,6 +95,18 @@ export interface Config {
    *  useModelGate is on. Default 0.5. Higher = trade less, more
    *  selectively — tune against runBacktest(), not by feel. */
   modelMinProbability?: number;
+  /** Enter only when the model's score is in the top N PERCENT of the
+   *  scores it produces for that symbol over its own recent history.
+   *
+   *  Prefer this to modelMinProbability. An absolute probability does not
+   *  transfer between symbols or regimes: this model was fit on a ~26%
+   *  positive base rate so its outputs cluster near 0.26, and the observed
+   *  ceiling was 0.468 on APT but 0.284 on SOL — a "p >= 0.55" rule tuned
+   *  on a backtest window silently meant "never trade" live. A percentile
+   *  adapts to whatever distribution the model actually produces.
+   *
+   *  When set, this overrides modelMinProbability. Default unset. */
+  modelTopPercentile?: number;
 
   /** Simulated MAKER fee (% of notional) charged by the paper executor when
    *  an entry rests as post-only. Default 0.02 — Bybit standard non-VIP
@@ -187,6 +199,7 @@ export function loadConfig(path: string): Config {
     estimatedRoundTripFeePercent: raw["estimatedRoundTripFeePercent"] as number | undefined,
     useModelGate: raw["useModelGate"] as boolean | undefined,
     modelMinProbability: raw["modelMinProbability"] as number | undefined,
+    modelTopPercentile: raw["modelTopPercentile"] as number | undefined,
     simulatedMakerFeePercent: raw["simulatedMakerFeePercent"] as number | undefined,
     simulatedTakerFeePercent: raw["simulatedTakerFeePercent"] as number | undefined,
     usePostOnlyEntries: raw["usePostOnlyEntries"] as boolean | undefined,
@@ -306,6 +319,12 @@ export function loadConfig(path: string): Config {
     (typeof config.modelMinProbability !== "number" || config.modelMinProbability <= 0 || config.modelMinProbability >= 1)
   ) {
     throw new ConfigError("config.modelMinProbability must be a number between 0 and 1 (exclusive) if set");
+  }
+  if (
+    config.modelTopPercentile !== undefined &&
+    (typeof config.modelTopPercentile !== "number" || config.modelTopPercentile <= 0 || config.modelTopPercentile >= 100)
+  ) {
+    throw new ConfigError("config.modelTopPercentile must be a number between 0 and 100 (exclusive) if set");
   }
   for (const field of ["simulatedMakerFeePercent", "simulatedTakerFeePercent"] as const) {
     const v = config[field];

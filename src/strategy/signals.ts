@@ -4,11 +4,13 @@ import {
   type MACDResult, type BollingerResult, type RsiState, type MacdState,
 } from "./indicators.ts";
 import { hasPlausibleEdge } from "./risk.ts";
-import { loadModel, scoreCandles, type ModelWeights } from "./model.ts";
+import { loadModel, scoreCandles, scoreQuantile, resetThresholdCache, type ModelWeights } from "./model.ts";
+export { resetThresholdCache };
 import { getCandles } from "./candles.ts";
 import type { MarketSnapshot } from "../market.ts";
 import type { Config } from "../config.ts";
 import type { Portfolio } from "../portfolio.ts";
+import type { Candle } from "./backtest.ts";
 
 export type SignalType = "buy" | "sell" | "hold";
 
@@ -72,6 +74,35 @@ function getModel(): ModelWeights | null {
 export function resetModelCache(): void {
   _model = null;
   _modelLoadAttempted = false;
+  _percentileThresholds.clear();
+}
+
+// Per-symbol entry threshold derived from the model's OWN score
+// distribution, computed once per symbol per session. Cached because
+// scoreQuantile() scores ~200 historical windows, which is far too
+// expensive to redo on every bar.
+const _percentileThresholds = new Map<string, number>();
+
+/**
+ * The score a candidate must beat for this symbol. Percentile mode when
+ * config.modelTopPercentile is set (preferred — absolute probabilities do
+ * not transfer across symbols or regimes), otherwise the fixed
+ * modelMinProbability.
+ */
+function entryThresholdFor(
+  model: ModelWeights, symbol: string, candles: Candle[], config: Config,
+): number | null {
+  const pct = config.modelTopPercentile;
+  if (pct === undefined) return config.modelMinProbability ?? 0.5;
+
+  const cached = _percentileThresholds.get(symbol);
+  if (cached !== undefined) return cached;
+
+  const q = scoreQuantile(model, candles, symbol, pct);
+  if (q === null) return null;  // not enough history yet — no opinion
+  _percentileThresholds.set(symbol, q);
+  console.log(`[model] ${symbol}: entering on the top ${pct}% of scores => threshold ${q.toFixed(4)} (calibrated from this symbol's own recent distribution).`);
+  return q;
 }
 
 /**
@@ -414,12 +445,13 @@ export function analyze(
   if (config.useModelGate && (buyScore >= 4 || sellScore >= 4)) {
     const model = getModel();
     if (model !== null) {
-      const probability = scoreCandles(model, getCandles(snapshot.symbol));
-      const minProbability = config.modelMinProbability ?? 0.5;
-      if (probability !== null && probability < minProbability) {
+      const symbolCandles = getCandles(snapshot.symbol);
+      const probability = scoreCandles(model, symbolCandles, snapshot.symbol);
+      const threshold = entryThresholdFor(model, snapshot.symbol, symbolCandles, config);
+      if (probability !== null && threshold !== null && probability < threshold) {
         return {
           type: "hold", symbol: snapshot.symbol, confidence: 0.2,
-          reason: `model gate: p=${probability.toFixed(3)} below ${minProbability.toFixed(2)}`,
+          reason: `model gate: p=${probability.toFixed(3)} below ${threshold.toFixed(3)}`,
           indicators: { rsi, macd, bollinger, momentum, atr },
         };
       }

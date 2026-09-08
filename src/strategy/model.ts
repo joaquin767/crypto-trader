@@ -112,12 +112,60 @@ export function scoreFeatures(model: ModelWeights, features: number[]): number {
   return sigmoid(z);
 }
 
+/** Time bars used to calibrate a symbol's dollar threshold. Fixed on
+ *  purpose — see resolveDollarThreshold. Sized so that a 1000-bar backfill
+ *  leaves ~600 further positions to sample a score DISTRIBUTION from (see
+ *  scoreQuantile); 400 time bars is still ~59 dollar bars, comfortably
+ *  above MIN_CANDLES. */
+const THRESHOLD_REFERENCE_BARS = 400;
+
+/** Per-symbol dollar threshold, calibrated once. */
+const thresholdCache = new Map<string, number>();
+
+/** Drop cached thresholds (tests, or a symbol set change). */
+export function resetThresholdCache(): void {
+  thresholdCache.clear();
+}
+
+/**
+ * The dollar threshold for a symbol — calibrated ONCE from a fixed-length
+ * reference window and then reused.
+ *
+ * This was previously derived from whatever window the caller happened to
+ * pass, which made the score depend on how much history was supplied: the
+ * same bar scored 0.598 with 300 candles of context and 0.441 with 1000,
+ * because a different threshold produced different bar boundaries and
+ * therefore different features. The backtest passed 1000-bar windows while
+ * other callers passed shorter ones, so a threshold tuned on the backtest
+ * did not transfer to live at all.
+ *
+ * Fixing the reference length makes a given bar score the same regardless
+ * of how it is queried.
+ */
+function resolveDollarThreshold(symbol: string, candles: Candle[], ratio: number): number | null {
+  const cached = thresholdCache.get(symbol);
+  if (cached !== undefined) return cached;
+
+  // Wait for a full reference window before committing, so the calibration
+  // isn't taken from an unrepresentative sliver of history.
+  if (candles.length < THRESHOLD_REFERENCE_BARS) return null;
+
+  const reference = candles.slice(-THRESHOLD_REFERENCE_BARS);
+  const threshold = suggestDollarThreshold(reference, Math.floor(reference.length / ratio));
+  if (!(threshold > 0)) return null;
+  thresholdCache.set(symbol, threshold);
+  return threshold;
+}
+
 /**
  * Score a candle window directly. Returns null when there isn't enough
  * history to build a feature vector — callers must treat null as "no
  * opinion" and fall back to their own logic, not as a zero probability.
+ *
+ * `symbol` keys the per-symbol dollar-threshold calibration; a model
+ * trained on plain time bars ignores it.
  */
-export function scoreCandles(model: ModelWeights, candles: Candle[]): number | null {
+export function scoreCandles(model: ModelWeights, candles: Candle[], symbol = "default"): number | null {
   // Rebuild bars the way this model was TRAINED, not the way the live loop
   // happens to store them. A model fit on dollar bars scored against 5m
   // time bars is exactly the train/serve skew that makes these models fail
@@ -126,13 +174,38 @@ export function scoreCandles(model: ModelWeights, candles: Candle[]): number | n
   const ratio = model.trainedOn.timeBarsPerDollarBar ?? 0;
   let bars = candles;
   if (ratio > 1) {
-    // Derive THIS symbol's threshold from its own recent activity so the
-    // resulting bars have the same information density as training.
-    const target = Math.floor(candles.length / ratio);
-    bars = target > 0 ? toDollarBars(candles, suggestDollarThreshold(candles, target)) : [];
+    const threshold = resolveDollarThreshold(symbol, candles, ratio);
+    if (threshold === null) return null;   // not enough history to calibrate yet
+    bars = toDollarBars(candles, threshold);
   }
   const features = extractFeatures(bars);
   return features === null ? null : scoreFeatures(model, features);
+}
+
+/**
+ * The distribution of scores this model produces for `symbol` over its own
+ * recent history — used to set an entry threshold as a PERCENTILE rather
+ * than an absolute probability.
+ *
+ * Absolute thresholds do not transfer: this model was fit on a ~26%
+ * positive base rate, so its outputs cluster near 0.26, and the ceiling
+ * differs per symbol (APT topped out at 0.468, SOL at 0.284). A "p >= 0.55"
+ * rule tuned on one window silently means "never trade" on another.
+ */
+export function scoreQuantile(
+  model: ModelWeights, candles: Candle[], symbol: string, percentile: number, samples = 200,
+): number | null {
+  if (candles.length < THRESHOLD_REFERENCE_BARS) return null;
+  const scores: number[] = [];
+  const step = Math.max(1, Math.floor((candles.length - THRESHOLD_REFERENCE_BARS) / samples));
+  for (let end = THRESHOLD_REFERENCE_BARS; end <= candles.length; end += step) {
+    const p = scoreCandles(model, candles.slice(0, end), symbol);
+    if (p !== null) scores.push(p);
+  }
+  if (scores.length < 20) return null;
+  scores.sort((a, b) => a - b);
+  const idx = Math.min(scores.length - 1, Math.floor(scores.length * (1 - percentile / 100)));
+  return scores[idx]!;
 }
 
 export { MIN_CANDLES };

@@ -7,7 +7,8 @@
 // source (e.g. RestClient.getKline(), src/bybit/rest.ts:128) fetched once and
 // cached to a fixture, never fabricated and never fetched live inside a test.
 
-import { analyze, clearHistory } from "./signals.ts";
+import { analyze, clearHistory, resetModelCache } from "./signals.ts";
+import { resetThresholdCache } from "./model.ts";
 import { clearCandles, seedCandles } from "./candles.ts";
 import { calcPositionSize, calcWinRate, calcProfitFactor, calcMaxDrawdown } from "./risk.ts";
 import { execute } from "../executor.ts";
@@ -66,6 +67,11 @@ export async function runBacktest(
 ): Promise<BacktestReport> {
   clearHistory();
   clearCandles();
+  // Also drop the per-symbol dollar-threshold and percentile-threshold
+  // caches, or a threshold calibrated in a previous run (different config,
+  // different slice) silently carries into this one.
+  resetModelCache();
+  resetThresholdCache();
 
   let portfolio = createPortfolio(config.maxCapitalUsd);
   const pnls: number[] = [];
