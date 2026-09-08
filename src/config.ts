@@ -96,13 +96,14 @@ export interface Config {
    *  selectively — tune against runBacktest(), not by feel. */
   modelMinProbability?: number;
 
-  /** Per-side fee, as a percent of notional, used by the SIMULATED paper
-   *  executor and therefore by every backtest. Default 0.055 — Bybit's
-   *  standard non-VIP linear-perpetual taker rate, measured from real
-   *  fills. Set to 0.02 to model maker/post-only fills. Real live fills
-   *  always use the exchange's actual reported fee; this only affects
-   *  simulation. */
-  simulatedFeePercentPerSide?: number;
+  /** Simulated MAKER fee (% of notional) charged by the paper executor when
+   *  an entry rests as post-only. Default 0.02 — Bybit standard non-VIP
+   *  linear perpetual, confirmed against a real testnet fill. */
+  simulatedMakerFeePercent?: number;
+  /** Simulated TAKER fee (% of notional). Default 0.055, likewise measured.
+   *  Every close pays this, because closes always go to market — so a
+   *  post-only round trip costs maker + taker (0.075%), NOT 2x maker. */
+  simulatedTakerFeePercent?: number;
 
   // ── Maker (post-only) entries ─────────────────────────────────────────
   /** Place ENTRIES as post-only limit orders resting at the near touch
@@ -172,7 +173,8 @@ export function loadConfig(path: string): Config {
     estimatedRoundTripFeePercent: raw["estimatedRoundTripFeePercent"] as number | undefined,
     useModelGate: raw["useModelGate"] as boolean | undefined,
     modelMinProbability: raw["modelMinProbability"] as number | undefined,
-    simulatedFeePercentPerSide: raw["simulatedFeePercentPerSide"] as number | undefined,
+    simulatedMakerFeePercent: raw["simulatedMakerFeePercent"] as number | undefined,
+    simulatedTakerFeePercent: raw["simulatedTakerFeePercent"] as number | undefined,
     usePostOnlyEntries: raw["usePostOnlyEntries"] as boolean | undefined,
     postOnlyTimeoutMs: raw["postOnlyTimeoutMs"] as number | undefined,
   };
@@ -289,11 +291,11 @@ export function loadConfig(path: string): Config {
   ) {
     throw new ConfigError("config.modelMinProbability must be a number between 0 and 1 (exclusive) if set");
   }
-  if (
-    config.simulatedFeePercentPerSide !== undefined &&
-    (typeof config.simulatedFeePercentPerSide !== "number" || config.simulatedFeePercentPerSide < 0)
-  ) {
-    throw new ConfigError("config.simulatedFeePercentPerSide must be a non-negative number if set");
+  for (const field of ["simulatedMakerFeePercent", "simulatedTakerFeePercent"] as const) {
+    const v = config[field];
+    if (v !== undefined && (typeof v !== "number" || v < 0)) {
+      throw new ConfigError(`config.${field} must be a non-negative number if set`);
+    }
   }
   if (config.usePostOnlyEntries !== undefined && typeof config.usePostOnlyEntries !== "boolean") {
     throw new ConfigError("config.usePostOnlyEntries must be a boolean if set");

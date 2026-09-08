@@ -47,13 +47,19 @@ export async function execute(
   }
 
   const price = snapshot.price;
-  // Per-side simulated fee. Defaults to Bybit's standard non-VIP linear
-  // perpetual TAKER rate (0.055%), measured from real fills in
-  // tests/fixtures/apt-usdt-session-2026-09-07.json — not the 0.1% that was
-  // hardcoded here before, which overstated round-trip cost by ~2x and made
-  // every paper trade and every backtest look worse than reality. Override
-  // via config.simulatedFeePercentPerSide (e.g. 0.02 for maker/post-only).
-  const FEE_RATE = (config.simulatedFeePercentPerSide ?? 0.055) / 100;
+  // Maker and taker are charged separately, because a round trip pays BOTH:
+  // an entry can rest as post-only and earn the maker rate, but a close
+  // always goes to market and always pays taker (that's a deliberate safety
+  // invariant — see config.usePostOnlyEntries — a stop-loss must never sit
+  // unfilled). Charging one blended rate to both sides understated the real
+  // round trip by nearly half and flattered every backtest.
+  //
+  // Confirmed against real testnet fills on 2026-09-08: post-only entry
+  // 0.0200%, market exit 0.0548%, round trip 0.0749%.
+  const isMakerFill = signal.type === "buy" && (config.usePostOnlyEntries ?? false);
+  const FEE_RATE = (isMakerFill
+    ? (config.simulatedMakerFeePercent ?? 0.02)
+    : (config.simulatedTakerFeePercent ?? 0.055)) / 100;
 
   if (signal.type === "sell") {
     const existing = portfolio.positions.find(p => p.symbol === signal.symbol);

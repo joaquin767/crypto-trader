@@ -385,3 +385,52 @@ test("a low estimated round-trip fee does not block the same otherwise-qualifyin
   const signal = analyze(snapshot, portfolio, { ...configNoDailyLimit, estimatedRoundTripFeePercent: 0.1 });
   assert.notEqual(signal.reason, "insufficient plausible edge vs. round-trip cost");
 });
+// ── Exit horizon coherence ────────────────────────────────────────────────
+// Observed live 2026-09-08: five consecutive model-gated entries were closed
+// by the expert-exit rule after a median 236s, against the model's 7200s
+// (24 x 5m) forecast horizon — 3% of the window the prediction was made
+// over. None was ever given the chance to be right. The position's clock
+// must be the model's clock.
+
+const modelConfig = { ...configNoDailyLimit, useModelGate: true, stopLossPercent: 1, takeProfitPercent: 1 };
+
+function positionAged(ms: number, entryPrice = 0.634) {
+  return { ...empty(),
+    positions: [{ symbol: "BTC/USDT", quantity: 10, entryPrice, currentPrice: entryPrice, openedAt: Date.now() - ms }],
+    totalValueUsd: 100, cashUsd: 90, dailyTradeCount: 0,
+  };
+}
+
+test("a model-gated position is closed once the forecast horizon elapses", () => {
+  clearHistory();
+  // 24 bars x 5m = 7200s. A position older than that has outlived the
+  // prediction it was opened on — the training labels count exactly this
+  // case as an outcome, so the strategy must act on it too.
+  const signal = analyze(snap(0.634), positionAged(7_300_000), modelConfig);
+  assert.equal(signal.type, "sell");
+  assert(signal.reason.includes("horizon elapsed"), `expected a horizon exit, got: ${signal.reason}`);
+});
+
+test("a model-gated position younger than the horizon is not closed by the expert-exit rule", () => {
+  clearHistory();
+  // 236s — the observed live median. Previously the expert exit could fire
+  // here (30s min-hold); now the horizon governs and it must hold.
+  const signal = analyze(snap(0.634), positionAged(236_000), modelConfig);
+  assert.notEqual(signal.type, "sell");
+});
+
+test("stop-loss still fires inside the horizon — the model's own barrier is never deferred", () => {
+  clearHistory();
+  // Entry 0.634, price 0.620 = -2.2%, past the 1% stop, on a 60s-old
+  // position. The horizon defers the noise-driven expert exit, never a
+  // risk-reducing barrier.
+  const signal = analyze(snap(0.620), positionAged(60_000), modelConfig);
+  assert.equal(signal.type, "sell");
+  assert(signal.reason.includes("stop-loss"), `expected stop-loss, got: ${signal.reason}`);
+});
+
+test("without the model gate, exit behaviour is unchanged (no horizon exit)", () => {
+  clearHistory();
+  const signal = analyze(snap(0.634), positionAged(7_300_000), { ...configNoDailyLimit, stopLossPercent: 1, takeProfitPercent: 1 });
+  assert(!signal.reason.includes("horizon elapsed"), "horizon exit must not apply when the model isn't driving entries");
+});

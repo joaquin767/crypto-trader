@@ -51,7 +51,16 @@ export function hasPlausibleEdge(
   atr: number, price: number, config: Config, minEdgeToFeeRatio = 2,
 ): boolean {
   const atrPercent = price > 0 ? (atr / price) * 100 : 0;
-  const roundTripFeePercent = config.estimatedRoundTripFeePercent ?? 0.11;
+  // Derived from the same maker/taker rates the executor charges, so the
+  // gate's idea of cost can't silently drift from what trading actually
+  // pays. A post-only entry pays maker; the close ALWAYS pays taker,
+  // because closes always go to market — so the round trip is maker+taker,
+  // not 2x maker. Getting this wrong (assuming 2x maker) understated the
+  // real cost by nearly half.
+  const maker = config.simulatedMakerFeePercent ?? 0.02;
+  const taker = config.simulatedTakerFeePercent ?? 0.055;
+  const roundTripFeePercent = config.estimatedRoundTripFeePercent
+    ?? (config.usePostOnlyEntries ? maker + taker : taker * 2);
   return atrPercent >= roundTripFeePercent * minEdgeToFeeRatio;
 }
 

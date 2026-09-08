@@ -74,6 +74,22 @@ export function resetModelCache(): void {
   _modelLoadAttempted = false;
 }
 
+/**
+ * How long the loaded model's forecast is actually valid for, in ms —
+ * `horizonBars` x the bar interval it was trained on. Returns null when the
+ * model isn't driving entries or no weights are loaded, in which case the
+ * caller keeps its pre-model behaviour rather than inventing a horizon.
+ */
+function modelHorizonMsFor(config: Config): number | null {
+  if (!config.useModelGate) return null;
+  const model = getModel();
+  if (model === null) return null;
+  const intervalMinutes = Number.parseFloat(model.trainedOn.interval);
+  const bars = model.trainedOn.horizonBars;
+  if (!Number.isFinite(intervalMinutes) || !Number.isFinite(bars) || intervalMinutes <= 0 || bars <= 0) return null;
+  return bars * intervalMinutes * 60_000;
+}
+
 /** Get or initialize price history for a symbol. */
 export function getHistory(symbol: string): PriceHistory {
   let h = _history.get(symbol);
@@ -227,8 +243,38 @@ export function analyze(
     // open time (e.g. reconciled from the exchange) is treated as old
     // enough — this gate exists to damp noise on freshly-opened positions,
     // not to block managing a position whose age genuinely isn't known.
-    const minHoldMs = config.minHoldBeforeExpertExitMs ?? 30000;
+    // The model forecasts a specific question: "does price reach +TP% before
+    // -SL% within `horizonBars`?" Observed live on 2026-09-08, five
+    // consecutive trades entered on that forecast were closed by the
+    // expert-exit rule after a MEDIAN OF 236s against a 7200s horizon — 3%
+    // of the window the prediction was even made over. None of them was
+    // ever given the chance to be right. So when the model is driving
+    // entries, the position's clock is the model's clock:
+    //   - the expert exit is held off until the horizon has elapsed (by
+    //     which point the horizon exit below has already closed it, so the
+    //     rule is effectively deferred rather than fighting the thesis);
+    //   - stop-loss and take-profit are untouched above and still fire
+    //     immediately, because those ARE the model's two barriers.
+    const modelHorizonMs = modelHorizonMsFor(config);
+    const minHoldMs = config.minHoldBeforeExpertExitMs ?? modelHorizonMs ?? 30000;
     const positionAgeMs = snapshot.timestamp - (existing.openedAt ?? 0);
+
+    // Third barrier: horizon expiry. The training labels treat "horizon
+    // elapsed without reaching TP" as an outcome in its own right (a 0, not
+    // a skip), so a position that has neither hit TP nor SL by the end of
+    // the forecast window is exactly the case the model priced — and
+    // holding it past that point is trading on a prediction that has
+    // already expired. Without this the horizon was only half-implemented:
+    // entries used it, exits ignored it.
+    if (modelHorizonMs !== null && existing.openedAt !== undefined && positionAgeMs >= modelHorizonMs) {
+      return {
+        type: "sell", symbol: snapshot.symbol,
+        confidence: 0.6,
+        reason: `model horizon elapsed (${Math.round(positionAgeMs / 60000)}m) without hitting either barrier`,
+        indicators: { rsi, macd, bollinger, momentum, atr },
+      };
+    }
+
     if (rsi > 70 && snapshot.price > bollinger.upper && positionAgeMs >= minHoldMs) {
       return {
         type: "sell", symbol: snapshot.symbol,

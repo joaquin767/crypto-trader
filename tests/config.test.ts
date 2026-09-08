@@ -204,7 +204,8 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     estimatedRoundTripFeePercent: 0.18,
     useModelGate: true,
     modelMinProbability: 0.62,
-    simulatedFeePercentPerSide: 0.02,
+    simulatedMakerFeePercent: 0.02,
+    simulatedTakerFeePercent: 0.055,
     usePostOnlyEntries: true,
     postOnlyTimeoutMs: 4000,
   };
