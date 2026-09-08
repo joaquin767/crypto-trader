@@ -47,3 +47,6 @@ data/validation/crosscheck/
 
 __pycache__/
 *.pyc
+
+# Exported fold feature matrices (~large, regenerate with scripts/export-folds.ts)
+data/validation/folds/

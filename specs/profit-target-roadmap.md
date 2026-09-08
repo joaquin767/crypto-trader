@@ -908,6 +908,86 @@ support.**
 
 ---
 
+## 5.13 — AUC feasibility test: nothing on free data reaches 0.58
+
+§5.12.3's cheap go/no-go, run before committing to any tick-data infrastructure. Eight candidates,
+pre-registered in `scripts/auc_feasibility.py` with a hypothesis each, capped at 10, all reported.
+Label **held fixed** at the deployed geometry and folds identical to Gate 0's, because AUC is only
+comparable across models predicting the same label. Features come from the validated TypeScript
+`extractFeatures()` via `scripts/export-folds.ts` — not reimplemented in pandas, per the lesson the
+freqtrade cross-check taught. Artifact: `data/validation/auc-feasibility-2026-09-08.json`.
+
+Ranked by **mean** fold AUC, which is the more robust statistic across 47 noisy folds:
+
+| # | Candidate | Mean AUC | Median AUC | Features |
+|---|---|---|---|---|
+| 1 | **logistic-base (incumbent)** | **0.5467** | 0.5459 | 21 |
+| 2 | logistic-btc | 0.5453 | 0.5315 | 26 |
+| 3 | gbm-base | 0.5418 | 0.5387 | 21 |
+| 4 | logistic-all | 0.5397 | 0.5341 | 33 |
+| 5 | logistic-ctx | 0.5371 | 0.5339 | 28 |
+| 6 | rf-all | 0.5359 | 0.5472 | 33 |
+| 7 | gbm-all | 0.5358 | **0.5503** | 33 |
+| 8 | gbm-all-deep | 0.5228 | 0.5236 | 33 |
+
+**Target: 0.58. Best median: 0.5503. Nothing comes close.**
+
+**Sanity check passed:** `logistic-base` reproduces 0.5459 against Gate 0's 0.546, so the export
+pipeline and this harness agree with the production engine. Without that, none of the rest would be
+trustworthy.
+
+### 5.13.1 — What was tested, and what it means
+
+**Non-linearity does not help.** Gradient boosting on the same 21 features scores *below* logistic
+regression (0.5418 vs 0.5467 mean). The relationship the features can express is not being missed by
+a linear model — there is little interaction structure to find.
+
+**More capacity actively hurts.** `gbm-all-deep` is the worst candidate at 0.5228, the classic
+overfitting signature. The binding constraint is not model capacity.
+
+**Genuinely new information does not help either — the decisive finding.** The BTC market factor is
+real, free, and *not derivable from a symbol's own OHLC at any lookback*: whether the whole market is
+moving is exactly the kind of context that should separate an idiosyncratic move from a beta move.
+It moved mean AUC by **−0.0014**. Longer context (24/48/96-bar returns, vol regime, SMA distance,
+range position) moved it **−0.0096**.
+
+**No candidate beat the incumbent robustly.** `gbm-all` wins on median (0.5503) but is *worse than
+the incumbent on mean* (0.5358 vs 0.5467) — a divergence that marks the difference as noise, not
+signal. **The original 21-feature logistic regression ranks first by mean AUC of all eight.** Nothing
+tested here is an improvement.
+
+### 5.13.2 — Verdict: this is the stop signal
+
+The gap to the target is **+0.0333 AUC**. Everything free — a second feature family, a genuinely new
+information source, two non-linear model classes, and extra capacity — delivered **+0.0044 at best
+on median, and −0.0109 on mean.** The required improvement is roughly an order of magnitude larger
+than the sum of everything cheap.
+
+§5.12.3 pre-committed to the interpretation, and it holds: **if free data cannot reach the bar,
+tick-data infrastructure is not justified.** It is a much larger, weeks-long bet on the same
+hypothesis that just failed cheaply — and the strongest evidence against it is that adding real new
+information (BTC) did nothing. That is the signature of a label that is close to unpredictable at
+this horizon with this class of data, not of a feature set that merely needs enriching.
+
+**The held-out universe (AVAXUSDT/DOTUSDT/INJUSDT) was deliberately NOT spent.** There is nothing to
+validate — no candidate cleared — and it stays clean for any future attempt. Spending it to confirm
+a negative would have destroyed a one-time asset for no information.
+
+### 5.13.3 — What is now settled, and what is not
+
+Settled, with evidence: this strategy **and the information available to it for free** cannot support
+a profitable scalping system at 5m/dollar-bar resolution. Four axes have been tested and closed —
+execution costs (§5.10), barrier geometry (§5.11), model architecture and free information (§5.13) —
+and the binding constraint is quantified (§5.12).
+
+Not settled, and out of scope for this spec: whether a different *strategy family* (slower
+timeframes, where the same 0.0625% cost is a proportionally smaller hurdle; mean reversion; funding
+capture; cross-exchange structure) could work. The apparatus built here is strategy-agnostic and
+would evaluate any of them in ~15 minutes. That is the durable output, and it is the honest place to
+stop this line of work.
+
+---
+
 ---
 
 ## 6. Gate 1 — Attribution & portfolio safety (P0, hours)
