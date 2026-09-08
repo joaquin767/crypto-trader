@@ -132,8 +132,20 @@ export function analyze(
 
   // ── Existing position management ────────────────────────────────────
   if (existing) {
-    const lossPercent = ((existing.currentPrice - snapshot.price) / existing.currentPrice) * 100;
-    const profitPercent = ((snapshot.price - existing.currentPrice) / existing.currentPrice) * 100;
+    // Measured against entryPrice — the position's actual cost basis — NOT
+    // currentPrice. This previously used currentPrice, which silently
+    // disabled stop-loss and take-profit for any position whose
+    // currentPrice had been refreshed to the live mark price: both
+    // percentages then compute against the price they're being compared to,
+    // i.e. ~0, so a position 15% underwater reported "holding: 0.0% below
+    // entry" and never stopped out. That refresh is not hypothetical — it's
+    // exactly what reconcilePositions() does (connector.ts, merging
+    // `currentPrice` from adapters.ts's `markPrice`) on every position
+    // update pushed by Bybit's private WS stream. The reason strings below
+    // always claimed "below/above entry"; now the arithmetic actually
+    // matches that claim.
+    const lossPercent = ((existing.entryPrice - snapshot.price) / existing.entryPrice) * 100;
+    const profitPercent = ((snapshot.price - existing.entryPrice) / existing.entryPrice) * 100;
 
     // Stop-loss
     if (lossPercent >= config.stopLossPercent) {

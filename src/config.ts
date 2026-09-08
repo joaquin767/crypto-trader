@@ -70,10 +70,18 @@ export interface Config {
   minHoldBeforeExpertExitMs?: number;
   /** Estimated round-trip (entry + exit) taker-fee cost, as a percent of
    *  notional, used only to gate entries whose plausible move can't
-   *  plausibly clear costs (specs/strategy-signal-quality.md §5). Default
-   *  0.22 (matches this session's live-observed ~0.11% per side on Bybit
-   *  testnet). Not used for actual fee accounting — real fees always come
-   *  from the exchange fill / the paper executor's own rate. */
+   *  plausibly clear costs (specs/strategy-signal-quality.md §5).
+   *
+   *  Default 0.11 — measured, not guessed: real fills in
+   *  tests/fixtures/apt-usdt-session-2026-09-07.json show 0.055% per side
+   *  (Bybit's standard non-VIP linear-perpetual TAKER rate), and a closed
+   *  trade's journal `fee` field is entry+exit summed (journal.ts:172), so
+   *  0.055 x 2 = 0.11 round trip. If order placement ever moves from
+   *  market/taker to post-only/maker orders (0.02% per side on the same
+   *  tier), this should drop to ~0.04.
+   *
+   *  Not used for actual fee accounting — real fees always come from the
+   *  exchange fill / the paper executor's own rate. */
   estimatedRoundTripFeePercent?: number;
 }
 

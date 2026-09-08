@@ -322,6 +322,40 @@ test("stop-loss still fires immediately on a position 1ms old — minHoldBeforeE
   assert(signal.reason.includes("stop-loss"));
 });
 
+// ── Regression: stop-loss/take-profit measure from entryPrice, not ───────
+// currentPrice. Using currentPrice silently disabled both the moment a
+// position's currentPrice was refreshed to the live mark price — which
+// reconcilePositions() does on every WS position push (connector.ts merges
+// currentPrice from adapters.ts's markPrice). A position 15% underwater
+// reported "holding: 0.0% below entry" and never stopped out.
+
+test("stop-loss fires on a marked-to-market position (measured from entry, not current price)", () => {
+  clearHistory();
+  const portfolio = { ...empty(),
+    // entry 40000, price crashed to 34000 (-15%), and currentPrice has
+    // already been refreshed to that same mark price by reconciliation.
+    positions: [{ symbol: "BTC/USDT", quantity: 0.1, entryPrice: 40000, currentPrice: 34000, openedAt: Date.now() - 99999 }],
+    totalValueUsd: 4400, cashUsd: 1000, dailyTradeCount: 0,
+  };
+  const signal = analyze(snap(34000), portfolio, config);
+  assert.equal(signal.type, "sell", "a 15% underwater position must stop out even after mark-to-market");
+  assert(signal.reason.includes("stop-loss"));
+});
+
+test("take-profit fires on a marked-to-market position (measured from entry, not current price)", () => {
+  clearHistory();
+  const portfolio = { ...empty(),
+    positions: [{ symbol: "BTC/USDT", quantity: 0.1, entryPrice: 40000, currentPrice: 46000, openedAt: Date.now() - 99999 }],
+    totalValueUsd: 5600, cashUsd: 1000, dailyTradeCount: 0,
+  };
+  const signal = analyze(snap(46000), portfolio, config);
+  assert.equal(signal.type, "sell", "a 15% winning position must take profit even after mark-to-market");
+  assert(signal.reason.includes("take-profit"));
+});
+// An otherwise-qualifying entry is refused when the ATR-implied plausible
+// move can't plausibly clear round-trip cost — this fixture's real ATR is
+// ~1.1% of price, so a high fee estimate blocks it and a low one doesn't.
+
 // ── Regression coverage for specs/strategy-signal-quality.md §5 (F4) ──────
 // An otherwise-qualifying entry is refused when the ATR-implied plausible
 // move can't plausibly clear round-trip cost — this fixture's real ATR is

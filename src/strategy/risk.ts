@@ -51,7 +51,7 @@ export function hasPlausibleEdge(
   atr: number, price: number, config: Config, minEdgeToFeeRatio = 2,
 ): boolean {
   const atrPercent = price > 0 ? (atr / price) * 100 : 0;
-  const roundTripFeePercent = config.estimatedRoundTripFeePercent ?? 0.22;
+  const roundTripFeePercent = config.estimatedRoundTripFeePercent ?? 0.11;
   return atrPercent >= roundTripFeePercent * minEdgeToFeeRatio;
 }
 
