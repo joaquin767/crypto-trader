@@ -1,6 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recordEntry, recordExit, getHistory, getClosedTrades, clearJournal } from "../src/learning/journal.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// journal.ts resolves its file from process.cwd() AT MODULE LOAD, so this
+// suite must chdir into an isolated temp directory BEFORE importing it.
+// Without this the tests read and — via clearJournal()/recordEntry() —
+// OVERWRITE the real trade-journal.json in the project root. Proven with a
+// sentinel: a planted record was destroyed by a single test run, and the
+// journal's rotated backups were found holding this file's own BTC/USDT
+// fixtures instead of real fills. Static imports hoist above every
+// statement, so the src imports below are deliberately dynamic.
+process.chdir(mkdtempSync(join(tmpdir(), "crypto-trader-journal-")));
+
+const { recordEntry, recordExit, getHistory, getClosedTrades, clearJournal } = await import("../src/learning/journal.ts");
 import type { TradeSignal } from "../src/strategy/signals.ts";
 import type { TradeResult } from "../src/executor.ts";
 

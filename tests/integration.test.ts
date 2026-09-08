@@ -5,13 +5,25 @@ import { analyze, clearHistory } from "../src/strategy/signals.ts";
 import { empty } from "../src/portfolio.ts";
 import { calcRSI, calcSMA, calcBollinger } from "../src/strategy/indicators.ts";
 import { calcPositionSize } from "../src/strategy/risk.ts";
-import { recordEntry, recordExit, clearJournal, getHistory } from "../src/learning/journal.ts";
-import { analyze as analyzePerf } from "../src/learning/analyzer.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// journal.ts resolves its file from process.cwd() AT MODULE LOAD, so this
+// suite must chdir into an isolated temp directory BEFORE importing it.
+// Without this the tests read and — via clearJournal()/recordEntry() —
+// OVERWRITE the real trade-journal.json in the project root. Proven with a
+// sentinel: a planted record was destroyed by a single test run, and the
+// journal's rotated backups were found holding this file's own BTC/USDT
+// fixtures instead of real fills. Static imports hoist above every
+// statement, so the src imports below are deliberately dynamic.
+process.chdir(mkdtempSync(join(tmpdir(), "crypto-trader-integration-")));
+
+const { recordEntry, recordExit, clearJournal, getHistory } = await import("../src/learning/journal.ts");
+const { analyze: analyzePerf } = await import("../src/learning/analyzer.ts");
 import { execute } from "../src/executor.ts";
 import type { Config } from "../src/config.ts";
 import { existsSync, writeFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const configPath = join(tmpdir(), `crypto-trader-v2-int-test-${Date.now()}.json`);
 
