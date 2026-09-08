@@ -139,7 +139,27 @@ export function analyze(
 
   const sma50 = calcSMA(history.prices, 20);
   const bollinger = calcBollinger(history.prices, 20, 2);
-  const atr = calcATR(history.highs, history.lows, history.prices, 14);
+
+  // ATR from the 5m candle series when it's available, falling back to the
+  // tick history only before the candle window has filled.
+  //
+  // history.highs/lows are populated from snapshot.high24h/low24h — the
+  // exchange ticker's rolling 24-HOUR high and low. Feeding those to
+  // calcATR produced an "ATR" that was really the daily range: 8.76% on
+  // APT/USDT live, versus ~0.3% computed over actual 5m bars. Two things
+  // silently rode on that:
+  //   - the volatility penalty below (atrPercent > 5% adds to sellScore)
+  //     fired on literally every evaluation, a permanent bias against
+  //     entering;
+  //   - calcPositionSize() sized off max(stopLoss, atr x multiplier), so
+  //     positions came out ~4x smaller than the configured cap.
+  // It also meant live and runBacktest() were running measurably different
+  // strategies, since the backtest feeds real per-bar highs/lows — so
+  // backtested expectancy did not describe live behaviour at all.
+  const candles = getCandles(snapshot.symbol);
+  const atr = candles.length >= 15
+    ? calcATR(candles.map(c => c.high), candles.map(c => c.low), candles.map(c => c.close), 14)
+    : calcATR(history.highs, history.lows, history.prices, 14);
   const momentum = calcMomentum(history.prices, 10);
   const volumeSurge = snapshot.volume24h > 500; // simulated volume check
 
