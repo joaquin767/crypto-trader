@@ -18,6 +18,9 @@ interface SymbolState {
   completed: Candle[];
   building: Candle | null;
   bucketStart: number;
+  /** openTime of the newest completed candle the consumer has already acted
+   *  on, so takeCompletedCandle() reports each bar exactly once. */
+  lastConsumedOpenTime: number;
 }
 
 const MAX_RETAINED = 200; // plenty for a 30-candle feature window, bounded memory
@@ -44,7 +47,7 @@ export function recordTick(
 
   let s = state.get(symbol);
   if (!s) {
-    s = { completed: [], building: null, bucketStart: 0 };
+    s = { completed: [], building: null, bucketStart: 0, lastConsumedOpenTime: 0 };
     state.set(symbol, s);
   }
 
@@ -78,11 +81,33 @@ export function getCandles(symbol: string): Candle[] {
 
 /** Seed completed candles directly (backfill from REST klines, or tests). */
 export function seedCandles(symbol: string, candles: Candle[]): void {
+  const completed = candles.slice(-MAX_RETAINED);
   state.set(symbol, {
-    completed: candles.slice(-MAX_RETAINED),
+    completed,
     building: null,
     bucketStart: 0,
+    // Backfilled history is already in the past — mark it consumed so a
+    // restart doesn't immediately fire a decision on a stale bar. Only
+    // genuinely new closes should trigger an evaluation.
+    lastConsumedOpenTime: completed.length > 0 ? completed[completed.length - 1]!.openTime : 0,
   });
+}
+
+/**
+ * Return the newest completed candle for `symbol` if it hasn't been reported
+ * yet, otherwise null — i.e. "has a bar closed since you last asked?".
+ *
+ * This is what lets the live loop make its indicator-driven decisions once
+ * per bar, the same cadence runBacktest() replays at, instead of once per
+ * refreshIntervalMs tick. Each bar is handed out exactly once.
+ */
+export function takeCompletedCandle(symbol: string): Candle | null {
+  const s = state.get(symbol);
+  if (!s || s.completed.length === 0) return null;
+  const newest = s.completed[s.completed.length - 1]!;
+  if (newest.openTime <= s.lastConsumedOpenTime) return null;
+  s.lastConsumedOpenTime = newest.openTime;
+  return newest;
 }
 
 /** Clear all aggregation state (tests, and between backtest runs). */

@@ -1,9 +1,9 @@
 import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
-import { analyze, type TradeSignal, clearHistory, getHistory as getPriceHistory } from "./strategy/signals.ts";
+import { analyze, checkImmediateExit, type TradeSignal, clearHistory, getHistory as getPriceHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
 import { checkConcurrentPositionsLimit, checkCorrelationLimit } from "./strategy/concentration.ts";
-import { recordTick, seedCandles, DEFAULT_INTERVAL_MS } from "./strategy/candles.ts";
+import { recordTick, seedCandles, takeCompletedCandle, DEFAULT_INTERVAL_MS } from "./strategy/candles.ts";
 import { create, update, canAfford, deploymentRatio, markToMarket, type Portfolio, type Position } from "./portfolio.ts";
 import { execute, type TradeResult } from "./executor.ts";
 import { render, type AppState } from "./tui.ts";
@@ -207,7 +207,47 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         continue;
       }
 
-      const tradeSignal = analyze(snapshot, portfolio, config);
+      // ── Two cadences, deliberately ──────────────────────────────────
+      // Risk-reducing exits (stop-loss, take-profit, model-horizon expiry)
+      // are checked on EVERY tick: they need only the cost basis, the price
+      // and the clock, and delaying one by up to a full bar would be far
+      // more dangerous than the noise problem this split exists to fix.
+      //
+      // Everything indicator-driven — entries, the expert exit, the model
+      // gate, the confirmation-tick counter — runs ONCE PER CLOSED BAR, the
+      // same cadence runBacktest() replays at. Previously all of it ran
+      // every refreshIntervalMs (3s live vs 5m in the harness), so the two
+      // were running measurably different strategies: RSI/Bollinger over
+      // 3-second ticks rather than 5-minute closes, and
+      // signalConfirmationTicks=2 meaning 6 seconds live but 10 minutes
+      // backtested. Tuning against backtest numbers tuned a system that
+      // didn't exist.
+      //
+      // Note the split: the DECISION is made on the bar's own close (so the
+      // indicator series matches the harness bar-for-bar), but the ORDER is
+      // sized and priced off the live snapshot below, because that's the
+      // market you actually trade against.
+      let tradeSignal: TradeSignal;
+      const held = portfolio.positions.find(p => p.symbol === symbol);
+      const urgent = held ? checkImmediateExit(held, snapshot, config) : null;
+
+      if (urgent) {
+        tradeSignal = {
+          type: "sell", symbol, confidence: urgent.confidence, reason: urgent.reason,
+          indicators: lastSignal?.indicators ?? {
+            rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false },
+            bollinger: { upper: 0, middle: 0, lower: 0, width: 0 }, momentum: 0, atr: 0,
+          },
+        };
+      } else {
+        const closedBar = takeCompletedCandle(symbol);
+        if (!closedBar) continue;
+        tradeSignal = analyze({
+          symbol, price: closedBar.close, change24h: snapshot.change24h,
+          volume24h: closedBar.volume, timestamp: closedBar.openTime,
+          high24h: closedBar.high, low24h: closedBar.low,
+        }, portfolio, config);
+      }
       lastSignal = tradeSignal;
       // Recorded per symbol so the dashboard can explain why each symbol is
       // or isn't trading — with several independent entry gates, a bare

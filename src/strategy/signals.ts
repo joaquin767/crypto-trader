@@ -111,6 +111,49 @@ export function clearHistory(): void {
 }
 
 /**
+ * Risk-reducing exits that must be checked on EVERY tick, never deferred to
+ * a candle close: stop-loss, take-profit, and model-horizon expiry.
+ *
+ * These deliberately need no indicators — only the position's cost basis,
+ * the current price, and the clock — which is exactly why they can run at
+ * tick cadence while everything indicator-driven runs once per bar. Moving
+ * decisions onto candle closes (so live matches runBacktest) must never
+ * mean a stop-loss waits up to five minutes to fire; that would trade one
+ * class of bug for a far more dangerous one.
+ *
+ * Returns null when no exit is warranted.
+ */
+export function checkImmediateExit(
+  position: { symbol: string; entryPrice: number; openedAt?: number },
+  snapshot: MarketSnapshot,
+  config: Config,
+): { type: "sell"; symbol: string; confidence: number; reason: string } | null {
+  const lossPercent = ((position.entryPrice - snapshot.price) / position.entryPrice) * 100;
+  const profitPercent = ((snapshot.price - position.entryPrice) / position.entryPrice) * 100;
+
+  if (lossPercent >= config.stopLossPercent) {
+    return { type: "sell", symbol: position.symbol,
+      confidence: Math.min(0.9, 0.7 + lossPercent / 50),
+      reason: `stop-loss: ${lossPercent.toFixed(1)}% drop` };
+  }
+  if (profitPercent >= config.takeProfitPercent) {
+    return { type: "sell", symbol: position.symbol,
+      confidence: Math.min(0.9, 0.7 + profitPercent / 50),
+      reason: `take-profit: ${profitPercent.toFixed(1)}% gain` };
+  }
+
+  const horizonMs = modelHorizonMsFor(config);
+  if (horizonMs !== null && position.openedAt !== undefined) {
+    const ageMs = snapshot.timestamp - position.openedAt;
+    if (ageMs >= horizonMs) {
+      return { type: "sell", symbol: position.symbol, confidence: 0.6,
+        reason: `model horizon elapsed (${Math.round(ageMs / 60000)}m) without hitting either barrier` };
+    }
+  }
+  return null;
+}
+
+/**
  * Analyze a market snapshot against multiple technical indicators and return a
  * scored trade signal. This simulates an expert trader's decision process.
  */
