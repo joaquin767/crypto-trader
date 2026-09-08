@@ -65,7 +65,7 @@ export interface DashboardState {
   signalsBySymbol?: Record<string, { type: string; confidence: number; reason: string; at: number }>;
   // ⛔ Symbols whose ENTRIES are halted after a real exchange rejection
   // (closes always stay active — see live-trading-readiness.md §6.2).
-  haltedSymbols?: string[];
+  haltedSymbols?: { symbol: string; reason: string; active: boolean }[];
   // 📐 The configured stop-loss / take-profit percentages, so the dashboard
   // can draw a position's real distance-to-stop rather than assuming
   // defaults that may not match this config.

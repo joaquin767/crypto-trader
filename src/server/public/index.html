@@ -271,9 +271,19 @@ function renderAlerts(d) {
   }
   if (d.bybitError) out.push(`<div class="alert crit"><span>&#9888;</span><div>${esc(d.bybitError)}</div></div>`);
   if (d.walletShortfallWarning) out.push(`<div class="alert warn"><span>&#9888;</span><div>${esc(d.walletShortfallWarning)}</div></div>`);
-  if (d.haltedSymbols && d.haltedSymbols.length) {
-    out.push(`<div class="alert warn"><span>&#9888;</span><div><b>Entries halted:</b> ${d.haltedSymbols.map(esc).join(', ')}
-      <span class="faint">&mdash; after an exchange rejection. Closes remain active.</span></div></div>`);
+  // Only symbols this run actually trades get a banner. A leftover position
+  // on a symbol outside config.symbols is context, not an alert — it was
+  // previously re-rendered as a warning on every SSE frame (~every 5s),
+  // shouting a fixed condition about symbols the bot will never touch. And
+  // the cause is now the real one: five different conditions feed this list
+  // and it used to label all of them "after an exchange rejection", which
+  // was simply wrong for the leverage-drift case.
+  const halted = d.haltedSymbols || [];
+  const active = halted.filter(h => h.active);
+  if (active.length) {
+    out.push(`<div class="alert warn"><span>&#9888;</span><div><b>Entries halted:</b>
+      ${active.map(h => `${esc(h.symbol)} <span class="faint">(${esc(h.reason)})</span>`).join(', ')}
+      <span class="faint">&mdash; closes remain active.</span></div></div>`);
   }
   $('alerts').innerHTML = out.join('');
 }
@@ -352,8 +362,15 @@ function renderRisk(d) {
   const rows = [];
   const add = (k, v, c) => rows.push(`<div class="kv"><span class="dim">${k}</span><span class="mono ${c || ''}">${v}</span></div>`);
   add('Circuit breaker', d.circuitBreakerTripped ? 'TRIPPED' : 'OK', d.circuitBreakerTripped ? 'down' : 'up');
-  add('Entries halted', (d.haltedSymbols && d.haltedSymbols.length) ? d.haltedSymbols.length + ' symbol(s)' : 'none',
-      (d.haltedSymbols && d.haltedSymbols.length) ? 'warn' : 'up');
+  const halted = d.haltedSymbols || [];
+  const activeHalted = halted.filter(h => h.active);
+  add('Entries halted', activeHalted.length ? activeHalted.length + ' traded symbol(s)' : 'none',
+      activeHalted.length ? 'warn' : 'up');
+  // Leftovers live here rather than in a banner: real, worth seeing, but a
+  // standing condition on symbols outside the active set, not an incident.
+  for (const h of halted.filter(x => !x.active)) {
+    add(`&mdash; ${esc(h.symbol)}`, esc(h.reason), 'dim');
+  }
   if (d.walletTotalUsd !== undefined) add('Wallet balance', money(d.walletTotalUsd), 'dim');
   add('Wallet check', d.walletShortfallWarning ? 'shortfall' : 'OK', d.walletShortfallWarning ? 'warn' : 'up');
   if (d.operatingCapitalUsd !== undefined) add('Operating cap', money(d.operatingCapitalUsd), 'dim');

@@ -82,6 +82,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // (insufficient balance / qty too small). Closing trades for these symbols
   // are never blocked — only entries. Cleared on restart (see §6.2/§13.3).
   const haltedSymbols = new Set<string>();
+  // Why each symbol is halted. Entries land in haltedSymbols from five
+  // different conditions (exchange rejection, qty rejection, slippage,
+  // leverage drift, liquidation proximity) and the dashboard previously had
+  // no way to tell them apart — so it labelled every one "after an exchange
+  // rejection", which was wrong for the leverage-drift case and unhelpful
+  // for the rest.
+  const haltReasons = new Map<string, string>();
 
   let portfolio: Portfolio = create(config.maxCapitalUsd);
   // Recover open positions from previous session — only ever this run's venue.
@@ -345,12 +352,14 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
               // Bybit. Only new entries for this symbol are blocked; the connection,
               // WS position feed, and closes all stay fully active.
               haltedSymbols.add(tradeSignal.symbol);
+              haltReasons.set(tradeSignal.symbol, "insufficient balance on Bybit");
               statusMessage = `⚠️ Bybit insufficient balance for ${tradeSignal.symbol} — entries halted. Fund your testnet wallet.`;
               logger.warn(`Bybit insufficient balance for ${tradeSignal.symbol} — entries halted, closes still active.`);
               logger.info("To trade on Bybit: transfer USDT to your Unified Trading Account in Bybit (Assets > Transfer > Funding → Unified Trading Account)");
               continue;
             } else if (bybitErr instanceof BybitInvalidQtyError) {
               haltedSymbols.add(tradeSignal.symbol);
+              haltReasons.set(tradeSignal.symbol, "order rejected by Bybit (quantity too small)");
               statusMessage = `⚠️ Bybit rejected order for ${tradeSignal.symbol} (qty too small) — entries halted.`;
               logger.warn(`Bybit rejected order for ${tradeSignal.symbol} (qty too small) — entries halted, closes still active.`);
               continue;
@@ -424,6 +433,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           const slippageTrip = checkSlippage(circuitBreakerConfig, result.symbol, snapshot.price, result.price);
           if (slippageTrip && !haltedSymbols.has(result.symbol)) {
             haltedSymbols.add(result.symbol);
+            haltReasons.set(result.symbol, "fill price deviated too far from the signal price");
             statusMessage = `🔴 ${slippageTrip.details}`;
             logger.error(`[circuit-breaker] ${slippageTrip.details}`);
           }
@@ -448,7 +458,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // ── Dashboard + UI update ──────────────────────────────────────────
   function updateDashboardAndUI(): void {
     dashboardState.signalsBySymbol = signalsBySymbol;
-    dashboardState.haltedSymbols = [...haltedSymbols];
+    dashboardState.haltedSymbols = [...haltedSymbols].map(sym => ({
+      symbol: sym,
+      reason: haltReasons.get(sym) ?? "entries halted",
+      // A leftover position on a symbol this run doesn't trade is context,
+      // not an alert — the dashboard uses this to stop shouting about it.
+      active: config.symbols.includes(sym),
+    }));
     dashboardState.slPercent = config.stopLossPercent;
     dashboardState.tpPercent = config.takeProfitPercent;
     dashboardState.marketData = latestMarketData;
@@ -722,6 +738,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         // depends on. Escalates straight to halting entries, not just a log.
         if (pos.leverage !== "1" && !haltedSymbols.has(appSymbol)) {
           haltedSymbols.add(appSymbol);
+          haltReasons.set(appSymbol, `open position at ${pos.leverage}x leverage, not the required 1x`);
           statusMessage = `🔴 ${appSymbol} leverage drifted to ${pos.leverage}x (expected 1x) — entries halted. Closes still active.`;
           logger.error(`[leverage] ${statusMessage}`);
         }
@@ -735,6 +752,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
           const bufferPercent = (Math.abs(markPrice - liquidationPrice) / markPrice) * 100;
           if (bufferPercent <= liquidationBufferPercent && !haltedSymbols.has(appSymbol)) {
             haltedSymbols.add(appSymbol);
+            haltReasons.set(appSymbol, `within ${bufferPercent.toFixed(1)}% of liquidation`);
             statusMessage = `🔴 ${appSymbol} is ${bufferPercent.toFixed(1)}% from liquidation (buffer: ${liquidationBufferPercent}%) — entries halted. Closes still active.`;
             logger.error(`[liquidation] ${statusMessage}`);
           }
@@ -839,7 +857,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         // fatal, but new entries for them are unsafe until they're flat and
         // re-pinned. Reuses the same haltedSymbols mechanism as a rejected
         // live order (§6.2): closes stay fully active, only entries are blocked.
-        for (const s of leverageCheck.restrictedSymbols) haltedSymbols.add(s);
+        for (const s of leverageCheck.restrictedSymbols) {
+          haltedSymbols.add(s);
+          haltReasons.set(s, "open position not at the required 1x leverage");
+        }
         statusMessage = `⚠️ Entries restricted for ${leverageCheck.restrictedSymbols.join(", ")} — not at confirmed 1x leverage. Closes still active.`;
       }
 
