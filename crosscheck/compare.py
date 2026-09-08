@@ -42,29 +42,33 @@ def pair_to_symbol(pair: str) -> str:
 
 
 def load_freqtrade_trades():
-    """Read the newest freqtrade backtest export."""
+    """Read the newest freqtrade backtest export via freqtrade's own loader.
+
+    Not by parsing the export directly: freqtrade 2026.8 writes a .zip whose
+    internal layout is its business, and `.last_result.json` is only a pointer
+    to the newest one. Using load_backtest_data() means this comparison cannot
+    drift out of sync with the archive format — and an earlier hand-rolled
+    reader silently picked up the pointer file and reported "0 freqtrade
+    trades", which looks identical to a real disagreement.
+
+    Requires the venv python: crosscheck/.venv/bin/python crosscheck/compare.py
+    """
+    try:
+        from freqtrade.data.btanalysis import load_backtest_data
+    except ImportError:
+        print(
+            "freqtrade is not importable — run this with the venv python:\n"
+            "  crosscheck/.venv/bin/python crosscheck/compare.py",
+            file=sys.stderr,
+        )
+        return None
+    from pathlib import Path
+
     if not os.path.isdir(RESULTS_DIR):
         print(f"No freqtrade results at {RESULTS_DIR}", file=sys.stderr)
         return None
-    files = [
-        os.path.join(RESULTS_DIR, f)
-        for f in os.listdir(RESULTS_DIR)
-        if f.endswith(".json") and "config" not in f and not f.endswith(".meta.json")
-    ]
-    if not files:
-        print(f"No backtest export found in {RESULTS_DIR}", file=sys.stderr)
-        return None
-    newest = max(files, key=os.path.getmtime)
-    print(f"  freqtrade result: {os.path.basename(newest)}")
-    with open(newest) as f:
-        data = json.load(f)
-
-    # freqtrade nests results under strategy name
-    strat = data.get("strategy", {})
-    if strat:
-        key = next(iter(strat))
-        return strat[key]["trades"], newest
-    return data.get("trades", []), newest
+    df = load_backtest_data(Path(RESULTS_DIR))
+    return df.to_dict("records"), RESULTS_DIR
 
 
 def main() -> int:

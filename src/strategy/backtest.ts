@@ -181,6 +181,74 @@ export async function runBacktest(
       }
     }
 
+    // ── Intra-bar barrier exits ─────────────────────────────────────────
+    // A stop-loss or take-profit resting at the exchange triggers the moment
+    // price TOUCHES the level, and fills at approximately that level. It does
+    // not wait for the bar to close, and it does not fill wherever the close
+    // happens to land.
+    //
+    // Previously this replay only evaluated exits at each bar's close, via
+    // analyze(), and then filled at that close. Cross-checked against
+    // freqtrade (crosscheck/README.md), that was wrong on 40 of 60 trades:
+    // one APT stop at 0.9295 filled at the bar's close of 0.9052 for -4.08%
+    // instead of ~-1.49%, and symmetrically winners were allowed to run past
+    // take-profit to +5.19% against a +1.5% barrier. Losers overshot by a
+    // total of 16.7pp and winners by 16.2pp across one 90-day window — enough
+    // to flip the window's sign.
+    //
+    // Pessimistic on ambiguity: when a single bar's range spans BOTH
+    // barriers, the stop is taken. OHLC cannot order two touches within a
+    // bar, and assuming the profitable one happened first is exactly the
+    // flattery this project has had to correct repeatedly. This matches
+    // labelTripleBarrier() in training.ts and freqtrade's own resolution.
+    const open = portfolio.positions.find(p => p.symbol === symbol);
+    if (open && openEntry) {
+      const stopPrice = openEntry.price * (1 - config.stopLossPercent / 100);
+      const tpPrice = openEntry.price * (1 + config.takeProfitPercent / 100);
+      const barrier = candle.low <= stopPrice
+        ? { price: stopPrice, reason: "stop-loss: intra-bar touch" }
+        : candle.high >= tpPrice
+          ? { price: tpPrice, reason: "take-profit: intra-bar touch" }
+          : null;
+
+      if (barrier !== null) {
+        const exitSnapshot: MarketSnapshot = { ...snapshot, price: barrier.price };
+        const exitSignal = {
+          type: "sell" as const, symbol, confidence: 1, reason: barrier.reason,
+          // Indicators are irrelevant to a barrier exit — the trigger is the
+          // price touch, not a signal — but TradeSignal requires the shape.
+          indicators: {
+            rsi: 50,
+            macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false },
+            bollinger: { upper: 0, middle: 0, lower: 0, width: 0 },
+            momentum: 0, atr: 0,
+          },
+        };
+        const result = await execute(exitSignal, config, portfolio, exitSnapshot, 0);
+        if (result.side === "sell" && result.quantity > 0) {
+          try {
+            portfolio = updatePortfolio(portfolio, result);
+            const pnl = (result.price - openEntry.price) * result.quantity - openEntry.fee - result.fee;
+            pnls.push(pnl);
+            trades.push({
+              entryTime: openEntry.entryTime,
+              exitTime: candle.openTime,
+              entryPrice: openEntry.price,
+              exitPrice: result.price,
+              quantity: result.quantity,
+              pnl,
+              grossReturnPercent: ((result.price - openEntry.price) / openEntry.price) * 100,
+              exitReason: classifyExitReason(barrier.reason),
+            });
+            totalFees += result.fee;
+            openEntry = null;
+          } catch { /* corrupted result — skip, as elsewhere */ }
+        }
+        equityCurve.push(portfolio.totalValueUsd);
+        continue;
+      }
+    }
+
     const signal = analyze(snapshot, portfolio, config);
     const hasPosition = portfolio.positions.some(p => p.symbol === symbol);
     // Don't stack a new entry on top of one already resting.

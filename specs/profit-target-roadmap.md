@@ -2,11 +2,15 @@
 
 Status: **Revision 4 — Gate 0 has been built and run. Verdict: `no_edge`.**
 
-> **Gate 0 result (2026-09-08):** 47 folds over 364 days, 1,603 closed trades.
-> Median **−0.1840 %/day**, 14/47 folds positive, sign-test p = 0.9985, and **all five symbols lose
+> **Gate 0 result (2026-09-08):** 47 folds over 364 days, 1,792 closed trades.
+> Median **−0.1767 %/day**, 15/47 folds positive, sign-test p = 0.9960, and **all five symbols lose
 > money** over the full year. Artifact: `data/validation/walk-forward-2026-09-08.json`.
 > Per §5 G0.6, this means **no real capital**: Gates 1 and 2 do not start and §8's go-live does not
 > happen. See §5.7 for what the result actually says and §5.8 for the options.
+>
+> **The engine producing that verdict has since been independently corroborated** against freqtrade,
+> trade-for-trade (§5.9). The cross-check found a real defect in our backtester first (artifact #9);
+> after fixing it the two engines agree exactly, and the verdict is unchanged.
 
 Revision 3 restructured the plan around a short-term go-live at bounded size (revision 2 assumed a
 30-day testnet soak; §7.1 explains why that was dropped). Round 1 critique scored revision 1 at
@@ -71,7 +75,7 @@ capital is set by deposits.
 
 At the time this was written the best measured edge was +0.0836%/day, which put $200/day at
 **$239,234** of capital — against an actual $100, i.e. **200% per day**. Gate 0 has since measured
-the edge at **−0.1840%/day** (§5.7), at which no amount of capital produces $200/day in profit; it
+the edge at **−0.1767%/day** (§5.7), at which no amount of capital produces $200/day in profit; it
 produces losses proportional to size.
 
 Either way the conclusion is the same and is the reason this spec exists: judging tuning decisions
@@ -112,23 +116,27 @@ node --experimental-strip-types scripts/backtest.ts --data data/klines --config 
 
 | Quantity | Value | Source |
 |---|---|---|
-| Held-out net P&L | **−$0.734 on $100** | artifact → `totals.totalPnl` |
+| Held-out net P&L | **−$1.832 on $100** | artifact → `totals.totalPnl` |
 | Window | 2026-08-24 → 2026-09-08, **15.0 days** | artifact → `window` |
-| Closed trades | **41** | artifact → `totals.closedTrades` |
-| Win rate | **48.8%** | artifact → `totals.winRate` |
-| Daily return | **−0.0490%/day** | artifact → `totals.dailyReturnPercent` |
+| Closed trades | **55** | artifact → `totals.closedTrades` |
+| Win rate | **49.1%** | artifact → `totals.winRate` |
+| Daily return | **−0.1222%/day** | artifact → `totals.dailyReturnPercent` |
 | Model held-out AUC | **0.6443** | `data/model/scalping-model.json` → `metrics.testAuc` |
 | Model held-out samples | 3,127 | same → `metrics.testSamples` |
 | Model base rate | 37.7% | same → `metrics.testBaseRate` |
 
-**Two corrections on record for this one figure.** It was first reported as "+$0.497, 53% win,
-0.0331%/day" from an uncommitted run that could not be reproduced. The committed script then gave
-**+$1.253**. Fixing the executor timestamp bug (§2.5 item 8) — which had silently disabled the
-horizon exit in every backtest ever run — moved it to **−$0.734**. The sign of this project's
-headline number changed twice in one day, in both cases because of a defect rather than a market
-observation.
+**Three corrections on record for this one figure**, none of them a market observation:
 
-**41 trades is far too few to distinguish from a coin flip** either way.
+| Reported | Cause |
+|---|---|
+| +$0.497 | uncommitted run, never reproducible |
+| +$1.253 | first committed run |
+| −$0.734 | fixing the executor timestamp bug (§2.5 #8) — the horizon exit had never fired in any backtest |
+| **−$1.832** | fixing barrier fills (§2.5 #9), found by the freqtrade cross-check (§5.9) |
+
+The sign of this project's headline number changed twice in one day, each time because of a defect.
+
+**55 trades is far too few to distinguish from a coin flip** either way.
 `scripts/backtest.ts` prints this warning below 200 trades. This number's real role is as an
 illustration of why §5's Gate 0 exists, not as evidence of anything.
 
@@ -142,18 +150,14 @@ From the same artifact's `perSymbol` array:
 
 | Symbol | Trades | Net P&L |
 |---|---|---|
-| APTUSDT | 3 | +$0.451 |
-| ARBUSDT | 26 | +$0.385 |
-| SOLUSDT | 1 | −$0.055 |
-| OPUSDT | 5 | −$0.121 |
-| LINKUSDT | 6 | −$1.395 |
+*(per-symbol figures regenerate with the artifact; the shape below is what mattered)*
 
-ARBUSDT supplies **63% of all trades** from a single symbol, and three of five symbols produced
-≤ 6 trades in 15 days — too few for their individual figures to mean anything. The headline was
+ARBUSDT supplied the large majority of trades from a single symbol, and three of five symbols produced
+very few trades in 15 days — too few for their individual figures to mean anything. The headline was
 never five independent confirmations; it was one symbol's fortnight plus noise.
 
 **Gate 0 settled this directly.** Over the full 364 days, ARBUSDT — the symbol that carried every
-favourable version of this number — **loses $10.04**, and so does every other symbol
+favourable version of this number — **loses $12.48**, and so does every other symbol
 (§5.7). The concentration was not a signal to be isolated; it was the shape of a result that had no
 signal in it at all.
 
@@ -187,12 +191,12 @@ Deposit $200 monthly, then compound that month's trading return. Start $100.
 |---|---|---|
 | Pre-Gate-0 headline, +0.0836%/day | 13 | +$551 |
 | **Zero — edge is noise** | **15** | $0 |
-| **Gate 0 measured, −0.1840%/day (§5.7)** | **35** | **−$4,074** |
+| **Gate 0 measured, −0.1767%/day (§5.7)** | **32** | **−$3,483** |
 
 Deposits are the growth engine in every branch: even the most favourable estimate had the bot
 contributing ~17% of the final balance. What the measured edge changes is the downside — at
-−0.18%/day, reaching $3,000 takes **35 months instead of 15** and requires **$7,100 of deposits to
-end up with $3,026**, because the strategy burns **$4,074** along the way. Running this
+−0.177%/day, reaching $3,000 takes **32 months instead of 15** and requires **$6,500 of deposits to
+end up with $3,017**, because the strategy burns **$3,483** along the way. Running this
 configuration would cost more than half of everything paid in.
 
 The asymmetry that matters was never the money. It is that a negative edge left running also buys
@@ -222,9 +226,20 @@ results until corrected:
    *exit* path, invisible because it produced plausible numbers. Fixing it moved §2.1 from +$1.253
    to −$0.734 and raised the walk-forward's horizon-exit share from 0.0% to 27.1%.
 
-Every one of these eight moved results **downward** when corrected. The prior this establishes: an
-unvalidated favourable result from this codebase should be assumed inflated until a fold-level test
-says otherwise — and §5.7 is what happened when one finally was.
+9. **`runBacktest` filled barrier exits at the bar's CLOSE rather than at the barrier price.** A
+   stop-loss or take-profit resting at the exchange triggers the moment price *touches* the level
+   and fills at approximately that level; it does not wait for the bar to close. The replay only
+   evaluated exits at each bar's close and then filled there. Found by the freqtrade cross-check
+   (§5.9), which disagreed on **40 of 60 trades**: one APT stop at 0.9295 filled at that bar's close
+   of 0.9052 for **−4.08%** instead of ~−1.49%, and symmetrically winners ran past take-profit to
+   **+5.19%** against a +1.5% barrier. Losers overshot by 16.7pp in total and winners by 16.2pp
+   across one 90-day window — enough to flip that window's sign. Fixed with intra-bar barrier
+   detection, pessimistic on ambiguity (a bar spanning both barriers takes the stop).
+
+Eight of these nine moved results **downward** when corrected; #9 was the first that did not move
+them consistently in one direction. The prior this establishes: an unvalidated favourable result
+from this codebase should be assumed inflated until a fold-level test says otherwise — and §5.7 is
+what happened when one finally was.
 
 ---
 
@@ -587,20 +602,23 @@ Artifact: `data/validation/walk-forward-2026-09-08.json`. Regenerate with §13's
 | Metric | Value | G0.6 bar |
 |---|---|---|
 | Folds | **47** | ≥ 20 ✅ |
-| Closed trades | **1,603** | ≥ 200 ✅ |
-| **Median daily return** | **−0.1840 %/day** | > 0 ❌ **step 2** |
-| Mean daily return | −0.2697 %/day | — |
-| Positive folds | **14 / 47 (29.8%)** | ≥ 55% ❌ |
-| Sign-test p | **0.9985** | ≤ 0.10 ❌ |
+| Closed trades | **1,792** | ≥ 200 ✅ |
+| **Median daily return** | **−0.1767 %/day** | > 0 ❌ **step 2** |
+| Mean daily return | −0.2650 %/day | — |
+| Positive folds | **15 / 47 (31.9%)** | ≥ 55% ❌ |
+| Sign-test p | **0.9960** | ≤ 0.10 ❌ |
 | Median fold AUC | 0.5464 | — |
-| Max drawdown | 99.80% | — |
-| Exit mix | TP 33.1% / SL 39.7% / horizon 27.1% | — |
+| Max drawdown | 90.89% | — |
+| Exit mix | TP 35.8% / SL 44.9% / horizon 19.3% | — |
+
+*(Re-run after fixing artifact #9. The pre-fix run gave −0.1840 %/day over 1,603 trades — the
+verdict is unchanged by the correction, which is itself evidence that it is not an artifact.)*
 
 **Verdict: `no_edge`** — decided at step 2 (median ≤ 0), and it would independently have failed
 steps 3 and 4.
 
 **P&L by symbol over the full year — every symbol loses:**
-APTUSDT −$11.16 · ARBUSDT −$10.04 · LINKUSDT −$25.79 · OPUSDT −$26.87 · SOLUSDT −$14.88.
+APTUSDT −$18.02 · ARBUSDT −$12.48 · LINKUSDT −$13.83 · OPUSDT −$27.35 · SOLUSDT −$15.49.
 
 ### 5.7.1 — Why every earlier measurement disagreed
 
@@ -647,6 +665,45 @@ Recorded so the choice is explicit rather than drifted into. All of these keep r
 What is **not** on the list is funding the account and finding out live. §1.2's arithmetic already
 established that live trading at $100 cannot measure edge — but it can certainly realise a −0.18%/day
 one, and at that rate the §8.1 kill switch would trip inside four months.
+
+## 5.9 — Independent corroboration: the freqtrade cross-check
+
+Gate 0's verdict comes from a codebase that produced eight measurement artifacts in a day. Before
+accepting a result that decides whether real money is ever committed, the machinery itself was
+checked against [freqtrade](https://github.com/freqtrade/freqtrade) (54.2k stars, 32k commits).
+Setup, rationale and runbook: `crosscheck/README.md`.
+
+**Method.** Not a reimplementation — our entry rule is a rule-based score *and* a cost gate *and* a
+21-feature model *and* a confirmation streak, so rebuilding it in pandas would add more divergence
+risk than it removes. Instead our engine **exports its entry decisions** and a freqtrade strategy
+replays them, applying freqtrade's own fills, barriers, horizon exit, fees and P&L. That isolates
+the execution/accounting layer, which is where every one of the nine artifacts lived.
+
+**It found a real bug in our engine before it agreed with it** (artifact #9, §2.5): barrier exits
+filled at the bar's *close* rather than at the barrier price, wrong on 40 of 60 trades.
+
+**Result after the fix** — window 2025-12-09 → 2026-03-09, 5 symbols:
+
+| | Our engine | freqtrade |
+|---|---|---|
+| Trades | 68 | 68 |
+| Entry bars matched | — | **68 / 68** |
+| Exit reasons matched | — | **68 / 68** (34 SL, 29 TP, 5 horizon) |
+| Gross-return mismatches > 0.05pp | — | **0** |
+| Net P&L | −$4.274 | −$4.210 |
+
+The residual $0.06 is position sizing (ours risk-based per symbol, freqtrade a flat $25 stake),
+which is deliberately excluded from the comparison.
+
+Two alignment defects on the *freqtrade* side were also found and fixed, both of which had silently
+produced wrong output rather than an error: `custom_exit` is only called when `use_exit_signal` is
+True (so the 4h horizon never fired, and a 14h20m trade ran under a 4h horizon), and `minimal_roi`
+is measured on profit *net* of fees, so `0.015` demanded a 1.611% gross move rather than 1.5%.
+
+**What this does and does not license.** The execution and accounting layer is now independently
+validated, so Gate 0's `no_edge` rests on machinery two engines agree about. It does **not** validate
+signal generation or feature computation, which are shared rather than reimplemented — those are
+covered by `tests/walkforward.test.ts::no-lookahead`. Stating that boundary is the point.
 
 ---
 

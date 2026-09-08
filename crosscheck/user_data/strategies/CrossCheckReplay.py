@@ -45,12 +45,27 @@ class CrossCheckReplay(IStrategy):
     can_short = False
 
     # Barriers, matching the TypeScript config exactly.
-    # TP 1.5% / SL 1.5%, and a hard 4h horizon handled in custom_exit.
+    # TP 1.5% / SL 1.5% as GROSS price moves, plus a hard 4h horizon in
+    # custom_exit.
+    #
+    # stoploss is a price ratio against open_rate, so -0.015 is already a
+    # 1.5% gross move and matches directly.
     stoploss = -0.015
-    minimal_roi = {"0": 0.015}
+    #
+    # minimal_roi is NOT: it is checked against profit_ratio, which is NET of
+    # both fees. Setting it to 0.015 therefore demands a 1.611% gross move,
+    # and the cross-check showed exactly that — every take-profit exit came
+    # in 0.11pp above ours, the round-trip fee. The gross-equivalent is
+    #     (1.015 * (1 - f)) / (1 + f) - 1  =  0.013884   at f = 0.00055
+    minimal_roi = {"0": 0.013884}
 
     trailing_stop = False
-    use_exit_signal = False
+    # MUST be True, even though populate_exit_trend emits no signals:
+    # freqtrade only calls custom_exit() inside `if self.use_exit_signal:`
+    # (strategy/interface.py:1469). With it False the 4h horizon exit is never
+    # evaluated and trades run to a barrier instead — observed directly: a
+    # 14h20m trade under a 4h horizon.
+    use_exit_signal = True
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
 
@@ -77,11 +92,30 @@ class CrossCheckReplay(IStrategy):
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         pair = metadata["pair"].split(":")[0].replace("/", "_")
         wanted = set(_signals()["signals"].get(pair, []))
-        # `date` is a tz-aware timestamp; compare in epoch ms, the same unit
-        # the TypeScript side recorded.
-        epoch_ms = dataframe["date"].astype("int64") // 10**6
+
+        # Convert to epoch ms EXPLICITLY via datetime64[ms].
+        #
+        # Do not use `.astype("int64") // 10**6`. That assumes the column is
+        # datetime64[ns], which was true historically but is not here: under
+        # pandas 3 / freqtrade 2026.8 this column is already datetime64[ms,
+        # UTC], so astype("int64") yields milliseconds and the divide turns
+        # 1765088400000 into 1765088 — silently matching nothing and
+        # producing a backtest with zero trades and no error.
+        epoch_ms = dataframe["date"].astype("datetime64[ms, UTC]").astype("int64")
+
         dataframe["enter_long"] = epoch_ms.isin(wanted).astype(int)
         dataframe["enter_tag"] = "ts_replay"
+
+        # Fail loudly if the replay did not line up. A silent zero here would
+        # look exactly like "the strategy made no trades", which is the one
+        # outcome this cross-check must never confuse with a real result.
+        matched = int(dataframe["enter_long"].sum())
+        if wanted and matched != len(wanted):
+            raise ValueError(
+                f"{pair}: replayed {matched} of {len(wanted)} exported entry signals. "
+                "The signal timestamps do not align with the candle index — "
+                "refusing to produce a misleading comparison."
+            )
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:

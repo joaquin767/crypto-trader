@@ -44,3 +44,6 @@ crosscheck/user_data/data/
 crosscheck/user_data/backtest_results/
 crosscheck/entry_signals.json
 data/validation/crosscheck/
+
+__pycache__/
+*.pyc
