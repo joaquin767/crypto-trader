@@ -391,7 +391,7 @@ export class BybitConnector {
     } catch (err) {
       const msg = (err as Error).message ?? "";
       if (isNoChangeNeeded(msg)) {
-        logger.info(`[leverage] Margin mode already isolated (Bybit rejected the no-op change: "${msg}") — treating as confirmed, not a failure.`);
+        logger.info(`[leverage] OK — margin mode is isolated (was already set; Bybit's "${msg}" is its way of saying no change was needed).`);
       } else {
         details.push(`Could not confirm isolated margin mode: ${msg}`);
         fatal = true;
@@ -404,7 +404,7 @@ export class BybitConnector {
       } catch (err) {
         const msg = (err as Error).message ?? "";
         if (isNoChangeNeeded(msg)) {
-          logger.info(`[leverage] ${bybitSymbol} already at 1x (Bybit rejected the no-op change: "${msg}") — treating as confirmed, not a failure.`);
+          logger.info(`[leverage] OK — ${bybitSymbol} is pinned at 1x (was already set; Bybit's "leverage not modified" means no change was needed).`);
         } else {
           details.push(`setLeverage(${bybitSymbol}) was rejected (${msg}) — verifying actual position leverage.`);
         }

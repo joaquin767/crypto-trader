@@ -867,7 +867,7 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
                 lows: candles.map(c => c.low),
                 timestamps: candles.map(c => c.openTime),
               });
-              logger.info(`[model] Backfilled ${candles.length} x ${intervalMinutes}m candles for ${appSymbol} — the entry gate can score immediately instead of waiting ~2.5h for live ticks to fill its window.`);
+              logger.info(`[startup] OK — loaded ${candles.length} recent ${intervalMinutes}m candles for ${appSymbol}, so indicators and the model work immediately instead of needing ~2.5h of uptime first.`);
             }
           } catch (err) {
             logger.warn(`[model] Could not backfill candles for ${appSymbol} (${(err as Error).message}) — the entry gate stays inert for this symbol until live ticks fill its window.`);
