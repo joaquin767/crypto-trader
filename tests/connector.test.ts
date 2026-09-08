@@ -1053,14 +1053,14 @@ function sellSignal(symbol = "BTC/USDT") {
   return { type: "sell" as const, symbol, confidence: 0.8, reason: "test", indicators: {} as any };
 }
 
-test("post-only entry rests at the best bid as a PostOnly Limit order", async () => {
+test("post-only entry rests at the best bid and does NOT block the caller", async () => {
   const connector = new BybitConnector(makerConfig);
   let sent: any = null;
   await withMocked(connector, {
     getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
     getOrderbook: async () => ({ bids: [["40000.3", "5"]], asks: [["40001.0", "5"]], timestamp: Date.now() }),
     placeOrder: async (o: any) => { sent = o; return { orderId: "o1" }; },
-    getOrderHistory: async () => ({ list: [{ orderId: "o1", symbol: "BTCUSDT", side: "Buy", orderStatus: "Filled", cumExecQty: "0.01", avgPrice: "40000.0", cumExecFee: "0.08", createdTime: String(Date.now()) }] }),
+    getOrderHistory: async () => ({ list: [] }),
     cancelOrder: async () => {},
   }, async () => {
     const result = await connector.placeOrder(buySignal(), 0.01);
@@ -1069,7 +1069,76 @@ test("post-only entry rests at the best bid as a PostOnly Limit order", async ()
     assert.equal(sent.reduceOnly, false);
     // Best bid 40000.3 rounded DOWN to a 0.5 tick so it rests, never crosses.
     assert.equal(sent.price, "40000.0");
-    assert.equal(result.side, "buy");
+    // Placing must return immediately with nothing executed. Blocking here
+    // for postOnlyTimeoutMs would stall the whole trading cycle and delay
+    // every other symbol's stop-loss check.
+    assert.equal(result.side, "hold", "placing a resting order must not block waiting for the fill");
+    assert.deepEqual(connector.restingSymbols(), ["BTC/USDT"]);
+  });
+});
+
+test("a resting entry that fills is reported by checkRestingOrders", async () => {
+  const connector = new BybitConnector(makerConfig);
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
+    getOrderbook: async () => ({ bids: [["40000.0", "5"]], asks: [["40001.0", "5"]], timestamp: Date.now() }),
+    placeOrder: async () => ({ orderId: "o1" }),
+    getOrderHistory: async () => ({ list: [{ orderId: "o1", symbol: "BTCUSDT", side: "Buy", orderStatus: "Filled", cumExecQty: "0.01", avgPrice: "40000.0", cumExecFee: "0.08", createdTime: String(Date.now()) }] }),
+    cancelOrder: async () => {},
+  }, async () => {
+    await connector.placeOrder(buySignal(), 0.01);
+    const fills = await connector.checkRestingOrders();
+    assert.equal(fills.length, 1);
+    assert.equal(fills[0]!.symbol, "BTC/USDT");
+    assert.equal(fills[0]!.result.side, "buy");
+    assert.equal(fills[0]!.result.quantity, 0.01);
+    assert.deepEqual(connector.restingSymbols(), [], "a filled order is no longer resting");
+  });
+});
+
+test("a resting entry past its deadline is cancelled and reported as nothing executed", async () => {
+  const connector = new BybitConnector(makerConfig); // postOnlyTimeoutMs: 50
+  let cancelled: string | null = null;
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
+    getOrderbook: async () => ({ bids: [["40000.0", "5"]], asks: [["40001.0", "5"]], timestamp: Date.now() }),
+    placeOrder: async () => ({ orderId: "o3" }),
+    getOrderHistory: async () => ({ list: [{ orderId: "o3", orderStatus: "New", cumExecQty: "0" }] }),
+    cancelOrder: async (_c: string, _s: string, id: string) => { cancelled = id; },
+  }, async () => {
+    await connector.placeOrder(buySignal(), 0.01);
+    await new Promise(r => setTimeout(r, 80)); // past the 50ms deadline
+    const fills = await connector.checkRestingOrders();
+    assert.equal(fills.length, 0, "nothing executed, so nothing to journal");
+    assert.equal(cancelled, "o3", "the resting order must be cancelled, not abandoned on the book");
+    assert.deepEqual(connector.restingSymbols(), []);
+  });
+});
+
+test("a cancel that races a real fill journals the fill and does not raise a false alarm", async () => {
+  // Observed live on testnet: the timeout expired, the cancel came back with
+  // Bybit's 110001 "order not exists or too late to cancel" — which means the
+  // order is GONE, usually because it just filled — and the fill was visible
+  // immediately after. Reconcile before reporting, and never discard it.
+  const connector = new BybitConnector(makerConfig);
+  let polls = 0;
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.01" }, priceFilter: { tickSize: "0.0001" } }] }),
+    getOrderbook: async () => ({ bids: [["0.6332", "5000"]], asks: [["0.6333", "5000"]], timestamp: Date.now() }),
+    placeOrder: async () => ({ orderId: "raced" }),
+    cancelOrder: async () => { throw new Error("Bybit API error [110001]: [110001] order not exists or too late to cancel"); },
+    getOrderHistory: async () => {
+      polls += 1;
+      if (polls < 2) return { list: [{ orderId: "raced", orderStatus: "New", cumExecQty: "0" }] };
+      return { list: [{ orderId: "raced", symbol: "APTUSDT", side: "Buy", orderStatus: "Filled",
+        cumExecQty: "39.48", avgPrice: "0.6332", cumExecFee: "0.005", createdTime: String(Date.now()) }] };
+    },
+  }, async () => {
+    await connector.placeOrder(buySignal("APT/USDT"), 39.48);
+    await new Promise(r => setTimeout(r, 80));
+    const fills = await connector.checkRestingOrders();
+    assert.equal(fills.length, 1, "the raced fill is real and must be journaled, not discarded");
+    assert.equal(fills[0]!.result.quantity, 39.48);
   });
 });
 
@@ -1088,23 +1157,6 @@ test("a CLOSE is never post-only, even when post-only entries are enabled", asyn
   });
 });
 
-test("an unfilled post-only entry is cancelled and reported as a no-op", async () => {
-  const connector = new BybitConnector(makerConfig);
-  let cancelled: string | null = null;
-  await withMocked(connector, {
-    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
-    getOrderbook: async () => ({ bids: [["40000.0", "5"]], asks: [["40001.0", "5"]], timestamp: Date.now() }),
-    placeOrder: async () => ({ orderId: "o3" }),
-    getOrderHistory: async () => ({ list: [{ orderId: "o3", orderStatus: "New", cumExecQty: "0" }] }),
-    cancelOrder: async (_c: string, _s: string, id: string) => { cancelled = id; },
-  }, async () => {
-    const result = await connector.placeOrder(buySignal(), 0.01);
-    assert.equal(result.side, "hold", "nothing executed, so nothing to journal");
-    assert.equal(result.quantity, 0);
-    assert.equal(cancelled, "o3", "the resting order must be cancelled, not abandoned on the book");
-  });
-});
-
 test("a post-only entry is a no-op — never a market fallback — when the book can't be read", async () => {
   const connector = new BybitConnector(makerConfig);
   let placed = false;
@@ -1117,34 +1169,5 @@ test("a post-only entry is a no-op — never a market fallback — when the book
     const result = await connector.placeOrder(buySignal(), 0.01);
     assert.equal(result.side, "hold");
     assert.equal(placed, false, "must not silently fall back to a taker market order");
-  });
-});
-
-test("a cancel that races a real fill journals the fill and does not raise a false alarm", async () => {
-  // Observed live on testnet: the 5s timeout expired, the cancel came back
-  // with Bybit's 110001 "order not exists or too late to cancel" — which
-  // means the order is GONE, usually because it just filled — and the fill
-  // landed 0.4s later. The old ordering logged a scary "may still be
-  // resting, check Bybit manually" ERROR *before* reconciling, which the
-  // real fill then immediately contradicted. Reconcile first, log once.
-  const connector = new BybitConnector(makerConfig);
-  let polls = 0;
-  await withMocked(connector, {
-    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.01" }, priceFilter: { tickSize: "0.0001" } }] }),
-    getOrderbook: async () => ({ bids: [["0.6332", "5000"]], asks: [["0.6333", "5000"]], timestamp: Date.now() }),
-    placeOrder: async () => ({ orderId: "raced" }),
-    cancelOrder: async () => { throw new Error("Bybit API error [110001]: [110001] order not exists or too late to cancel"); },
-    getOrderHistory: async () => {
-      polls += 1;
-      // Unfilled while resting; the fill only becomes visible on the
-      // post-cancel reconciliation poll, exactly as it did live.
-      if (polls < 2) return { list: [{ orderId: "raced", orderStatus: "New", cumExecQty: "0" }] };
-      return { list: [{ orderId: "raced", symbol: "APTUSDT", side: "Buy", orderStatus: "Filled",
-        cumExecQty: "39.48", avgPrice: "0.6332", cumExecFee: "0.005", createdTime: String(Date.now()) }] };
-    },
-  }, async () => {
-    const result = await connector.placeOrder(buySignal("APT/USDT"), 39.48);
-    assert.equal(result.side, "buy", "the raced fill is real and must be journaled, not discarded as a no-op");
-    assert.equal(result.quantity, 39.48);
   });
 });

@@ -47,6 +47,13 @@ export class BybitConnector {
   private lastSnapshots = new Map<string, MarketSnapshot>();
   private lotSizeCache = new Map<string, { minQty: string; qtyStep: string }>();
   private tickSizeCache = new Map<string, number>();
+  /** Post-only entries currently resting on the book, keyed by app symbol.
+   *  Placing no longer blocks the trading cycle waiting for a fill — the
+   *  loop polls these once per cycle via checkRestingOrders() instead. A
+   *  5-minute blocking await would have delayed every other symbol's
+   *  stop-loss check by up to 5 minutes, which is not an acceptable price
+   *  for a better fill rate. */
+  private restingOrders = new Map<string, { orderId: string; bybitSymbol: string; side: "Buy" | "Sell"; price: string; qty: string; deadline: number }>();
   private _state: BybitConnectorState;
   private _connected = false;
   private manuallyDisconnected = false;
@@ -535,61 +542,68 @@ export class BybitConnector {
     }
 
     const timeoutMs = this.config.postOnlyTimeoutMs ?? 5000;
-    const deadline = Date.now() + timeoutMs;
-    // Poll cadence scales with the wait: a 5s timeout polls every 500ms
-    // (10 checks), a 5-minute one every 5s (60 checks). The fixed 500ms
-    // this used to have would have fired 600 REST calls for a single 300s
-    // order and run straight into the rate limiter.
-    const pollEveryMs = Math.min(5000, Math.max(500, Math.floor(timeoutMs / 60)));
-    // NOTE: this await blocks the whole trading cycle until it resolves, so
-    // with a long timeout no OTHER symbol is evaluated meanwhile — including
-    // its stop-loss. That is safe as configured today (entries only rest
-    // when flat, and only one symbol is traded), but it is a real hazard if
-    // more symbols are added: an order resting 5 minutes on symbol A would
-    // delay risk checks on symbol B. Making the rest non-blocking is the
-    // proper fix and is not done here.
-    logger.info(`[bybit] Post-only ${side} ${formattedQty} ${appSymbol} resting at ${price} (maker fee), waiting up to ${(timeoutMs / 1000).toFixed(0)}s for a fill, polling every ${(pollEveryMs / 1000).toFixed(1)}s.`);
+    this.restingOrders.set(appSymbol, {
+      orderId, bybitSymbol: symbol, side, price, qty: formattedQty,
+      deadline: Date.now() + timeoutMs,
+    });
+    logger.info(`[bybit] Post-only ${side} ${formattedQty} ${appSymbol} resting at ${price} (maker fee) for up to ${(timeoutMs / 1000).toFixed(0)}s — the trading loop continues; the fill is picked up on a later cycle.`);
+    // Returns "nothing executed yet" rather than blocking. checkRestingOrders()
+    // resolves it on a subsequent cycle, so other symbols keep being evaluated
+    // — including their stop-losses — while this rests.
+    return noop();
+  }
 
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, Math.min(pollEveryMs, Math.max(50, deadline - Date.now()))));
-      const filled = await this.pollForFill(symbol, orderId, 1);
-      if (filled && filled.side !== "hold" && filled.quantity > 0) {
-        logger.info(`[bybit] Post-only ${side} ${appSymbol} filled ${filled.quantity} @ ${filled.price} (maker).`);
-        return filled;
+  /**
+   * Resolve any post-only entries currently resting on the book: one cheap
+   * poll each, filling or cancelling as appropriate. Called once per trading
+   * cycle so a resting order never blocks evaluation of other symbols.
+   *
+   * Returns the fills that landed, for the caller to journal.
+   */
+  async checkRestingOrders(): Promise<{ symbol: string; result: TradeResult }[]> {
+    const filled: { symbol: string; result: TradeResult }[] = [];
+
+    for (const [appSymbol, order] of [...this.restingOrders]) {
+      const hit = await this.pollForFill(order.bybitSymbol, order.orderId, 1);
+      if (hit && hit.side !== "hold" && hit.quantity > 0) {
+        this.restingOrders.delete(appSymbol);
+        logger.info(`[bybit] Post-only ${order.side} ${appSymbol} filled ${hit.quantity} @ ${hit.price} (maker).`);
+        filled.push({ symbol: appSymbol, result: hit });
+        continue;
+      }
+
+      if (Date.now() < order.deadline) continue; // still resting, still in time
+
+      this.restingOrders.delete(appSymbol);
+      let cancelError: Error | null = null;
+      try {
+        await this.rest.cancelOrder("linear", order.bybitSymbol, order.orderId);
+      } catch (err) {
+        cancelError = err as Error;
+      }
+
+      // A cancel routinely races a fill, and Bybit's 110001 ("order not
+      // exists or too late to cancel") means the order is GONE, usually
+      // because it just filled. Always reconcile before reporting.
+      const afterCancel = await this.pollForFill(order.bybitSymbol, order.orderId, 1);
+      if (afterCancel && afterCancel.side !== "hold" && afterCancel.quantity > 0) {
+        logger.info(`[bybit] Post-only ${order.side} ${appSymbol} filled ${afterCancel.quantity} @ ${afterCancel.price} (maker) as the cancel was being sent — journaling the real fill, nothing is left resting.`);
+        filled.push({ symbol: appSymbol, result: afterCancel });
+        continue;
+      }
+
+      if (cancelError === null) {
+        logger.info(`[bybit] Post-only ${order.side} ${appSymbol} did not fill within its window — cancelled, nothing executed.`);
+      } else {
+        logger.error(`[bybit] Post-only ${order.side} ${appSymbol} did not fill, the cancel failed (${cancelError.message}), and no fill could be confirmed afterwards — order ${order.orderId} may still be resting on the exchange. Check Bybit manually.`);
       }
     }
+    return filled;
+  }
 
-    // Didn't fill in the window. Cancel and report nothing executed. Cancel
-    // is best-effort but its failure is logged loudly rather than swallowed:
-    // a still-resting order the bot has forgotten about is a real exposure.
-    let cancelError: Error | null = null;
-    try {
-      await this.rest.cancelOrder("linear", symbol, orderId);
-    } catch (err) {
-      cancelError = err as Error;
-    }
-
-    // Always reconcile against the exchange before reporting anything: a
-    // cancel routinely races a fill, and Bybit's "order not exists or too
-    // late to cancel" (110001) means the order is GONE — usually because it
-    // just filled — not that it's still resting. Logging the cancel failure
-    // before checking produced a scary "may still be resting, check Bybit
-    // manually" error that the very next line then contradicted with the
-    // real fill. Ask first, then log once, correctly.
-    const afterCancel = await this.pollForFill(symbol, orderId, 1);
-    if (afterCancel && afterCancel.side !== "hold" && afterCancel.quantity > 0) {
-      logger.info(`[bybit] Post-only ${side} ${appSymbol} filled ${afterCancel.quantity} @ ${afterCancel.price} (maker) as the cancel was being sent — journaling the real fill, nothing is left resting.`);
-      return afterCancel;
-    }
-
-    if (cancelError === null) {
-      logger.info(`[bybit] Post-only ${side} ${appSymbol} did not fill within ${timeoutMs}ms — cancelled, nothing executed.`);
-    } else {
-      // Cancel failed AND no fill came back. Now it's genuinely ambiguous
-      // and worth a human looking, which is what ERROR is for.
-      logger.error(`[bybit] Post-only ${side} ${appSymbol} did not fill, the cancel failed (${cancelError.message}), and no fill could be confirmed afterwards — order ${orderId} may still be resting on the exchange. Check Bybit manually.`);
-    }
-    return noop();
+  /** Symbols with a post-only entry currently resting (no new entry for these). */
+  restingSymbols(): string[] {
+    return [...this.restingOrders.keys()];
   }
 
   /**

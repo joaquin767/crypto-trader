@@ -216,6 +216,41 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       }
     }
 
+    // Resolve any post-only entries resting on the book first. Placing one
+    // no longer blocks the cycle (that would have delayed every other
+    // symbol's stop-loss by up to postOnlyTimeoutMs), so fills are picked
+    // up here, one cheap poll per resting order.
+    if (useBybit && bybit?.state.connected) {
+      try {
+        for (const { symbol: filledSymbol, result } of await bybit.checkRestingOrders()) {
+          try {
+            portfolio = update(portfolio, result);
+          } catch (err) {
+            logger.error(`Refusing corrupted resting fill for ${filledSymbol}: ${(err as Error).message}`);
+            continue;
+          }
+          logger.trade(`${result.side} ${result.symbol}`, `qty=${result.quantity.toFixed(4)}`, `price=$${result.price.toFixed(2)}`, `fee=$${result.fee.toFixed(4)}`);
+          if (result.side === "buy") {
+            const restingSignal = signalsBySymbol[filledSymbol];
+            recordEntry({
+              type: "buy", symbol: filledSymbol,
+              confidence: restingSignal?.confidence ?? 0.5,
+              reason: restingSignal?.reason ?? "post-only entry filled",
+              indicators: lastSignal?.indicators ?? {
+                rsi: 50, macd: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false },
+                bollinger: { upper: 0, middle: 0, lower: 0, width: 0 }, momentum: 0, atr: 0,
+              },
+            }, result, venue);
+          }
+          performanceReport = analyzePerformance(initialCash, venue);
+        }
+      } catch (err) {
+        logger.error(`[bybit] Failed to check resting orders: ${(err as Error).message}`);
+      }
+    }
+
+    const resting = useBybit && bybit ? new Set(bybit.restingSymbols()) : new Set<string>();
+
     for (const [symbol, snapshot] of latestMarketData) {
       if (config.maxDailyTrades > 0 && portfolio.dailyTradeCount >= config.maxDailyTrades) {
         statusMessage = `daily trade limit reached (${config.maxDailyTrades})`;
@@ -289,6 +324,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
         // blocked (see §5/§6.2).
         if (tradeSignal.type === "buy" && circuitBreakerTripped) {
           statusMessage = `🔴 Entries halted — circuit breaker tripped (${circuitBreakerTripped.trigger}). Closes still active.`;
+          continue;
+        }
+        if (tradeSignal.type === "buy" && resting.has(tradeSignal.symbol)) {
+          statusMessage = `${mode.toUpperCase()} | ${tradeSignal.symbol} already has a post-only entry resting`;
           continue;
         }
         if (tradeSignal.type === "buy" && haltedSymbols.has(tradeSignal.symbol)) {
