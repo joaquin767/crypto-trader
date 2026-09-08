@@ -1,10 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { analyze } from "../src/learning/analyzer.ts";
-import { recordEntry, recordExit, clearJournal } from "../src/learning/journal.ts";
-import { defaultParams, optimize, getInsights, clearInsights } from "../src/learning/optimizer.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { TradeSignal } from "../src/strategy/signals.ts";
 import type { TradeResult } from "../src/executor.ts";
+
+// journal.ts resolves its file from process.cwd() AT MODULE LOAD, so these
+// tests must chdir into an isolated temp directory BEFORE importing it —
+// otherwise they read (and clearJournal() would overwrite) the real
+// trade-journal.json in the project root. That made this file's first test
+// intermittently fail depending on whether a live bot happened to be
+// running and writing trades at the time, and made clearJournal() capable
+// of destroying a real session's records. Static imports hoist above every
+// statement, so the imports below are deliberately dynamic and awaited
+// after the chdir.
+process.chdir(mkdtempSync(join(tmpdir(), "crypto-trader-learning-")));
+
+const { analyze } = await import("../src/learning/analyzer.ts");
+const { recordEntry, recordExit, clearJournal } = await import("../src/learning/journal.ts");
+const { defaultParams, optimize, getInsights, clearInsights } = await import("../src/learning/optimizer.ts");
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {

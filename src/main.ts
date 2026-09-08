@@ -104,6 +104,9 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   let walletMonitorState = createWalletMonitorState();
 
   let lastSignal: TradeSignal | null = null;
+  // Latest decision per symbol, for the dashboard's "why isn't it trading?"
+  // panel. Plain object (not a Map) because it is serialised straight to SSE.
+  const signalsBySymbol: Record<string, { type: string; confidence: number; reason: string; at: number }> = {};
   let statusMessage = "starting...";
   let strategyParams: StrategyParams = defaultParams();
   let performanceReport: PerformanceReport | null = null;
@@ -205,6 +208,15 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
       const tradeSignal = analyze(snapshot, portfolio, config);
       lastSignal = tradeSignal;
+      // Recorded per symbol so the dashboard can explain why each symbol is
+      // or isn't trading — with several independent entry gates, a bare
+      // "no trades" tells the user nothing about which one declined.
+      signalsBySymbol[symbol] = {
+        type: tradeSignal.type,
+        confidence: tradeSignal.confidence,
+        reason: tradeSignal.reason,
+        at: Date.now(),
+      };
 
       if (tradeSignal.type === "buy" || tradeSignal.type === "sell") {
         // Skip sell signals if we don't have an open position in that symbol
@@ -394,6 +406,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
   // ── Dashboard + UI update ──────────────────────────────────────────
   function updateDashboardAndUI(): void {
+    dashboardState.signalsBySymbol = signalsBySymbol;
+    dashboardState.haltedSymbols = [...haltedSymbols];
+    dashboardState.slPercent = config.stopLossPercent;
+    dashboardState.tpPercent = config.takeProfitPercent;
     dashboardState.marketData = latestMarketData;
     dashboardState.portfolio = portfolio;
     dashboardState.lastSignal = lastSignal;
@@ -428,6 +444,10 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       fundingPnlUsd: dashboardState.fundingPnlUsd,
       circuitBreakerTripped: dashboardState.circuitBreakerTripped,
       walletShortfallWarning: dashboardState.walletShortfallWarning,
+      signalsBySymbol: dashboardState.signalsBySymbol,
+      haltedSymbols: dashboardState.haltedSymbols,
+      slPercent: dashboardState.slPercent,
+      tpPercent: dashboardState.tpPercent,
     });
   }
 

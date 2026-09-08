@@ -57,6 +57,20 @@ export interface DashboardState {
   // believes its cash is (spec §8.3) — informational only, never changes
   // cashUsd. null/undefined = no shortfall detected.
   walletShortfallWarning?: string | null;
+  // 🔍 The most recent decision per symbol, so the dashboard can show WHY
+  // the bot is or isn't trading each one. With entries now behind several
+  // independent gates (signal confirmation, cost-vs-fee, min-hold, the
+  // optional model), "no trades" is ambiguous without this — it could be
+  // no signal, or a signal that four different gates each declined.
+  signalsBySymbol?: Record<string, { type: string; confidence: number; reason: string; at: number }>;
+  // ⛔ Symbols whose ENTRIES are halted after a real exchange rejection
+  // (closes always stay active — see live-trading-readiness.md §6.2).
+  haltedSymbols?: string[];
+  // 📐 The configured stop-loss / take-profit percentages, so the dashboard
+  // can draw a position's real distance-to-stop rather than assuming
+  // defaults that may not match this config.
+  slPercent?: number;
+  tpPercent?: number;
 }
 
 /**
@@ -165,5 +179,9 @@ function serializeState(state: DashboardState) {
     fundingPnlUsd: state.fundingPnlUsd,
     circuitBreakerTripped: state.circuitBreakerTripped,
     walletShortfallWarning: state.walletShortfallWarning,
+    signalsBySymbol: state.signalsBySymbol,
+    haltedSymbols: state.haltedSymbols,
+    slPercent: state.slPercent,
+    tpPercent: state.tpPercent,
   };
 }
