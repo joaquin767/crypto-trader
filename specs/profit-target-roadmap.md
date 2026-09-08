@@ -644,19 +644,23 @@ consistent enough sign that it is not a near-miss.
 
 **Does not say:** that no edge exists in crypto scalping, or that this codebase cannot find one.
 Median fold AUC 0.5464 means the model retains *some* out-of-sample ranking skill — it is above
-0.50 in most folds. The skill is simply far too small to survive the 0.075% round-trip cost at a
-1.5%/1.5% barrier whose unconditional base rate is only ~41% favourable. **The cost structure, not
-the absence of any signal, is what makes this configuration lose.**
+0.50 in most folds.
+
+**Correction (§5.10).** This section originally concluded "the cost structure, not the absence of
+any signal, is what makes this configuration lose." That was wrong, and testing it is what showed
+so: at **zero fees** the strategy still loses 0.1123 %/day. Costs account for only 36% of the
+deficit. Whatever ranking skill the AUC reflects, it does not translate into positive **gross**
+expectancy at a 1.5%/1.5% barrier whose unconditional base rate is only ~41% favourable. This is a
+signal-quality problem, not an execution-cost problem.
 
 ## 5.8 — Options from here (the user's decision, not this spec's)
 
 Recorded so the choice is explicit rather than drifted into. All of these keep real capital at zero.
 
 - **(a) Re-specify the strategy and re-run Gate 0.** The harness now exists and takes ~15 minutes,
-  so candidate configurations are cheap to test. §5.7.2 points at the highest-value axes: the
-  barrier geometry (a 41% base rate against a 52.5% break-even is a structural deficit no gate can
-  fix) and the cost structure (maker-only exits would cut the round trip from 0.075% to 0.04%,
-  changing the break-even win rate from 52.5% to 51.3%).
+  so candidate configurations are cheap to test. §5.7.2 points at the barrier geometry as the
+  highest-value axis: a 41% base rate against a 52.5% break-even is a structural deficit no gate can
+  fix. **The cost-structure axis has now been tested and closed — see §5.10.**
 - **(b) Keep it running on testnet as a development target** and treat the bot as an engineering
   project rather than an income source.
 - **(c) Stop.** The measured answer is that this configuration loses money; not building further on
@@ -704,6 +708,52 @@ is measured on profit *net* of fees, so `0.015` demanded a 1.611% gross move rat
 validated, so Gate 0's `no_edge` rests on machinery two engines agree about. It does **not** validate
 signal generation or feature computation, which are shared rather than reimplemented — those are
 covered by `tests/walkforward.test.ts::no-lookahead`. Stating that boundary is the point.
+
+## 5.10 — Cost-structure experiments: fees are not the problem
+
+§5.8 option (a) proposed cutting trading costs as one of two candidate axes. It has been tested to
+its **upper bound** and the axis is closed.
+
+Take-profit exits were made post-only (`config.usePostOnlyTakeProfitExits`), earning maker
+(0.02%) instead of taker (0.055%) on the winning leg. This is the natural shape of a take-profit —
+a resting limit sell above the market is a maker order by construction — so it costs nothing in
+realism. **It applies to take-profits only:** stop-loss and horizon exits stay taker
+unconditionally, because a stop resting unfilled while price runs against the position is the exact
+failure mode risk management exists to prevent, and a horizon exit is a forced close whose whole
+purpose is happening on time. That invariant is enforced in `executor.ts` and covered by four tests
+in `tests/executor.test.ts`, including one asserting an *unrecognised* exit reason falls through to
+taker rather than into the cheaper bucket.
+
+Rather than testing fee variants one at a time, a **zero-fee run** bounds all of them at once:
+
+| Configuration | Median | vs baseline | Verdict |
+|---|---|---|---|
+| Baseline (maker entry, taker exits — 0.075% round trip) | −0.1767 %/day | — | `no_edge` |
+| Maker take-profit exits (0.0625% blended round trip) | **−0.1698 %/day** | **+0.0069 pp** | `no_edge` |
+| **Zero fees — the theoretical ceiling** | **−0.1123 %/day** | **+0.0644 pp** | `no_edge` |
+
+Artifacts: `data/validation/walk-forward-maker-exits-2026-09-08.json`,
+`data/validation/walk-forward-zerofee-2026-09-08.json`. The zero-fee run is a **measurement device,
+not a candidate** — it can never clear a gate, and `--maker-fee/--taker-fee` exist solely for it.
+
+**The conclusion: fees explain only 36% of the loss.** Strip out every fee the strategy will ever
+pay — trade completely free, forever — and it still loses **0.1123 %/day**, with all five symbols
+still negative and the sign test still at p = 0.96. The remaining deficit is pure gross price
+movement: the entry selection picks losing trades faster than any cost structure can compensate for.
+
+So no fee improvement, exchange tier, rebate, or execution refinement can make this configuration
+profitable. Maker take-profit exits capture just 10.7% of the total available fee headroom and, at
++0.0069 pp/day, fall **below §10's 0.01 pp adoption margin** — the guard that exists to stop
+noise-level gains being adopted as improvements. The feature is kept (it is strictly correct and
+costs nothing) but it is **not** an answer to the Gate 0 verdict.
+
+**What this leaves.** Of §5.8 option (a)'s two axes, only barrier geometry remains, and §5.7.2's
+framing needs correcting in light of this: the problem is not that a small ranking skill is being
+eaten by costs. The problem is that the strategy has **negative gross expectancy before costs**.
+That is a signal-quality problem, not an execution problem, and it will not be fixed by tuning the
+exit side.
+
+---
 
 ---
 

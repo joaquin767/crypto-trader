@@ -27,7 +27,29 @@ async function main(): Promise<void> {
   }
 
   const configPath = get(argv, "--config", "./config.json");
-  const config = loadConfig(configPath);
+  const base = loadConfig(configPath);
+  // Strategy-variant overrides, so a candidate can be measured without
+  // editing config.json (which holds live credentials and drives the bot).
+  let config = argv.includes("--post-only-tp-exits")
+    ? { ...base, usePostOnlyTakeProfitExits: true }
+    : base;
+  // Fee overrides exist for ONE purpose: measuring the upper bound on what
+  // cost reduction can achieve. Setting both to 0 answers "would this
+  // strategy make money if trading were free?" — which bounds every possible
+  // fee-structure improvement at once, instead of testing them one at a time.
+  // A zero-fee run is NOT a candidate strategy and can never clear a gate.
+  const feeOverride = (flag: string) => {
+    const i = argv.indexOf(flag);
+    return i >= 0 && argv[i + 1] ? Number.parseFloat(argv[i + 1]!) : null;
+  };
+  const mk = feeOverride("--maker-fee"), tk = feeOverride("--taker-fee");
+  if (mk !== null || tk !== null) {
+    config = {
+      ...config,
+      simulatedMakerFeePercent: mk ?? config.simulatedMakerFeePercent ?? 0.02,
+      simulatedTakerFeePercent: tk ?? config.simulatedTakerFeePercent ?? 0.055,
+    };
+  }
 
   // Barriers and bar geometry default to whatever the DEPLOYED model was
   // trained with, so Gate 0 measures the system as it actually stands rather
@@ -50,7 +72,10 @@ async function main(): Promise<void> {
   console.log(`  geometry  train ${trainDays}d / test ${testDays}d / step ${stepDays}d`);
   console.log(`  barriers  TP ${tp}% / SL ${sl}% / horizon ${horizon} bars`);
   console.log(`  bars      ${ratio > 1 ? `dollar, ${ratio.toFixed(2)} time bars per bar` : "time (5m)"}`);
-  console.log(`  capital   $${config.maxCapitalUsd}  |  epochs ${epochs}\n`);
+  console.log(`  capital   $${config.maxCapitalUsd}  |  epochs ${epochs}`);
+  console.log(`  fees      entry ${config.usePostOnlyEntries ? "maker (post-only)" : "taker"}, ` +
+    `take-profit exit ${config.usePostOnlyTakeProfitExits ? "MAKER (post-only)" : "taker"}, ` +
+    `stop/horizon exit taker (invariant)\n`);
 
   const started = Date.now();
   const report = await runWalkForward({

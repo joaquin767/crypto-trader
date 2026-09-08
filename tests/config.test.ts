@@ -208,6 +208,7 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     simulatedMakerFeePercent: 0.02,
     simulatedTakerFeePercent: 0.055,
     usePostOnlyEntries: true,
+    usePostOnlyTakeProfitExits: true,
     postOnlyTimeoutMs: 4000,
     postOnlyRestBars: 2,
     postOnlyHalfSpreadPercent: 0.015,

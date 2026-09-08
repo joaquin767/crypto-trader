@@ -132,6 +132,28 @@ export interface Config {
    *  that sits unfilled while price runs against the position is precisely
    *  the failure mode the risk logic exists to prevent. Default false. */
   usePostOnlyEntries?: boolean;
+  /** Exit TAKE-PROFITS as post-only limit orders, earning the maker rate
+   *  (0.02%/side) instead of taker (0.055%). Default false.
+   *
+   *  This is the natural shape of a take-profit: a resting limit sell ABOVE
+   *  the market is a maker order by construction, so it costs nothing in
+   *  realism to model it as one. With it on, a round trip that ends in
+   *  take-profit costs 0.04% instead of 0.075%, which moves the break-even
+   *  win rate at symmetric 1.5% barriers from 52.5% to 51.3%.
+   *
+   *  APPLIES TO TAKE-PROFIT EXITS ONLY. Stop-loss and horizon exits are
+   *  always taker, regardless of this setting, and that is not a tunable:
+   *  a stop-loss resting unfilled while price runs against the position is
+   *  precisely the failure mode the risk logic exists to prevent (the same
+   *  invariant documented on usePostOnlyEntries), and a horizon exit is a
+   *  forced close whose entire purpose is that it happens on time.
+   *
+   *  Modelling caveat, stated rather than hidden: the backtest fills a
+   *  resting take-profit whenever a bar's HIGH reaches the level. A real
+   *  limit order at the touch may not fill, because OHLC cannot model queue
+   *  position — so this is an upper bound on the benefit, biased in favour
+   *  of the feature. The same caveat applies to the post-only entry model. */
+  usePostOnlyTakeProfitExits?: boolean;
   /** How long to let an unfilled post-only entry rest before cancelling it.
    *  Default 5000ms. */
   postOnlyTimeoutMs?: number;
@@ -203,6 +225,7 @@ export function loadConfig(path: string): Config {
     simulatedMakerFeePercent: raw["simulatedMakerFeePercent"] as number | undefined,
     simulatedTakerFeePercent: raw["simulatedTakerFeePercent"] as number | undefined,
     usePostOnlyEntries: raw["usePostOnlyEntries"] as boolean | undefined,
+    usePostOnlyTakeProfitExits: raw["usePostOnlyTakeProfitExits"] as boolean | undefined,
     postOnlyTimeoutMs: raw["postOnlyTimeoutMs"] as number | undefined,
     postOnlyRestBars: raw["postOnlyRestBars"] as number | undefined,
     postOnlyHalfSpreadPercent: raw["postOnlyHalfSpreadPercent"] as number | undefined,
@@ -331,6 +354,9 @@ export function loadConfig(path: string): Config {
     if (v !== undefined && (typeof v !== "number" || v < 0)) {
       throw new ConfigError(`config.${field} must be a non-negative number if set`);
     }
+  }
+  if (config.usePostOnlyTakeProfitExits !== undefined && typeof config.usePostOnlyTakeProfitExits !== "boolean") {
+    throw new ConfigError("config.usePostOnlyTakeProfitExits must be a boolean if set");
   }
   if (config.usePostOnlyEntries !== undefined && typeof config.usePostOnlyEntries !== "boolean") {
     throw new ConfigError("config.usePostOnlyEntries must be a boolean if set");

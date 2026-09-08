@@ -69,3 +69,72 @@ test("execute 'sell' with no held position returns hold instead of fabricating a
   assert.equal(result.side, "hold");
   assert.equal(result.quantity, 0);
 });
+
+// ── Post-only take-profit exits (specs/profit-target-roadmap.md §5.8 option a)
+//
+// The safety invariant these guard: ONLY a take-profit may earn the maker
+// rate. A stop-loss resting unfilled while price runs against the position is
+// the exact failure mode the risk logic exists to prevent, and a horizon exit
+// is a forced close whose whole purpose is happening on time. If either could
+// be quietly reclassified as maker, the backtest would under-count the cost of
+// precisely the exits that hurt.
+
+const makerConfig: Config = {
+  ...config,
+  usePostOnlyTakeProfitExits: true,
+  simulatedMakerFeePercent: 0.02,
+  simulatedTakerFeePercent: 0.055,
+};
+
+function sellSignal(reason: string): TradeSignal {
+  return { type: "sell", symbol: "SOL/USDT", confidence: 1, reason, indicators };
+}
+
+function heldPortfolio(): Portfolio {
+  return makePortfolio({
+    positions: [{ symbol: "SOL/USDT", quantity: 2, entryPrice: 100, currentPrice: 150 }],
+  });
+}
+
+test("post-only TP exits: a take-profit sell is charged the MAKER rate", async () => {
+  const result = await execute(
+    sellSignal("take-profit: 1.5% gain"), makerConfig, heldPortfolio(), makeSnapshot("SOL/USDT", 150), 0,
+  );
+  assert.equal(result.side, "sell");
+  // 2 units x $150 x 0.02%
+  assert.ok(Math.abs(result.fee - (2 * 150 * 0.0002)) < 1e-9, `expected maker fee, got ${result.fee}`);
+});
+
+test("post-only TP exits: a STOP-LOSS sell is still charged the TAKER rate", async () => {
+  const result = await execute(
+    sellSignal("stop-loss: 1.5% drop"), makerConfig, heldPortfolio(), makeSnapshot("SOL/USDT", 150), 0,
+  );
+  assert.ok(Math.abs(result.fee - (2 * 150 * 0.00055)) < 1e-9, `stop-loss must pay taker, got ${result.fee}`);
+});
+
+test("post-only TP exits: a HORIZON sell is still charged the TAKER rate", async () => {
+  const result = await execute(
+    sellSignal("model horizon elapsed (240m) without hitting either barrier"),
+    makerConfig, heldPortfolio(), makeSnapshot("SOL/USDT", 150), 0,
+  );
+  assert.ok(Math.abs(result.fee - (2 * 150 * 0.00055)) < 1e-9, `horizon exit must pay taker, got ${result.fee}`);
+});
+
+test("post-only TP exits: an UNRECOGNISED exit reason is charged the TAKER rate", async () => {
+  // classifyExitReason() maps anything unknown to "reconciled", never
+  // "take_profit" — so an unattributed close cannot sneak into the cheap bucket.
+  const result = await execute(
+    sellSignal("expert exit: RSI 78.0 (overbought), price above upper band"),
+    makerConfig, heldPortfolio(), makeSnapshot("SOL/USDT", 150), 0,
+  );
+  assert.ok(Math.abs(result.fee - (2 * 150 * 0.00055)) < 1e-9, `unknown exit must pay taker, got ${result.fee}`);
+});
+
+test("post-only TP exits: with the flag OFF a take-profit still pays taker", async () => {
+  const result = await execute(
+    sellSignal("take-profit: 1.5% gain"),
+    { ...makerConfig, usePostOnlyTakeProfitExits: false },
+    heldPortfolio(), makeSnapshot("SOL/USDT", 150), 0,
+  );
+  assert.ok(Math.abs(result.fee - (2 * 150 * 0.00055)) < 1e-9, `flag off must pay taker, got ${result.fee}`);
+});

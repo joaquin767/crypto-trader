@@ -2,6 +2,7 @@ import type { TradeSignal } from "./strategy/signals.ts";
 import type { Config } from "./config.ts";
 import type { Portfolio } from "./portfolio.ts";
 import type { MarketSnapshot } from "./market.ts";
+import { classifyExitReason } from "./strategy/exit-reason.ts";
 
 export interface TradeResult {
   symbol: string;
@@ -56,16 +57,26 @@ export async function execute(
   }
 
   const price = snapshot.price;
-  // Maker and taker are charged separately, because a round trip pays BOTH:
-  // an entry can rest as post-only and earn the maker rate, but a close
-  // always goes to market and always pays taker (that's a deliberate safety
-  // invariant — see config.usePostOnlyEntries — a stop-loss must never sit
-  // unfilled). Charging one blended rate to both sides understated the real
-  // round trip by nearly half and flattered every backtest.
+  // Maker and taker are charged separately, per leg. Charging one blended
+  // rate to both sides understated the real round trip by nearly half and
+  // flattered every backtest.
   //
   // Confirmed against real testnet fills on 2026-09-08: post-only entry
   // 0.0200%, market exit 0.0548%, round trip 0.0749%.
-  const isMakerFill = signal.type === "buy" && (config.usePostOnlyEntries ?? false);
+  //
+  // A sell earns the maker rate only when it is a TAKE-PROFIT and post-only
+  // take-profit exits are enabled. A resting limit sell above the market is a
+  // maker order by construction, so this costs nothing in realism. Stop-loss
+  // and horizon exits stay taker unconditionally — see
+  // config.usePostOnlyTakeProfitExits for why that is an invariant and not a
+  // tunable. classifyExitReason() falls back to "reconciled" for anything it
+  // does not recognise, so an unattributed close can never sneak into the
+  // cheaper bucket.
+  const isMakerFill =
+    (signal.type === "buy" && (config.usePostOnlyEntries ?? false)) ||
+    (signal.type === "sell"
+      && (config.usePostOnlyTakeProfitExits ?? false)
+      && classifyExitReason(signal.reason) === "take_profit");
   const FEE_RATE = (isMakerFill
     ? (config.simulatedMakerFeePercent ?? 0.02)
     : (config.simulatedTakerFeePercent ?? 0.055)) / 100;

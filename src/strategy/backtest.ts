@@ -9,7 +9,7 @@
 
 import { analyze, clearHistory, resetModelCache, setModel } from "./signals.ts";
 import { resetThresholdCache, type ModelWeights } from "./model.ts";
-import { classifyExitReason, type ExitReason } from "../learning/journal.ts";
+import { classifyExitReason, type ExitReason } from "./exit-reason.ts";
 import { clearCandles, seedCandles } from "./candles.ts";
 import { calcPositionSize, calcWinRate, calcProfitFactor, calcMaxDrawdown } from "./risk.ts";
 import { execute } from "../executor.ts";
