@@ -565,6 +565,8 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       wsPingIntervalMs: 20000,
       maxRetries: 5,
       restPollIntervalMs: config.refreshIntervalMs,
+      usePostOnlyEntries: config.usePostOnlyEntries,
+      postOnlyTimeoutMs: config.postOnlyTimeoutMs,
     };
 
     bybit = new BybitConnector(bybitConfig);

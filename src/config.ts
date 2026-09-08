@@ -103,6 +103,25 @@ export interface Config {
    *  always use the exchange's actual reported fee; this only affects
    *  simulation. */
   simulatedFeePercentPerSide?: number;
+
+  // ── Maker (post-only) entries ─────────────────────────────────────────
+  /** Place ENTRIES as post-only limit orders resting at the near touch
+   *  instead of market orders. On Bybit's standard tier this pays the maker
+   *  fee (0.02%/side) rather than taker (0.055%/side) — a ~2.75x cut in
+   *  round-trip cost, which measurably dominates this strategy's edge.
+   *
+   *  The tradeoff is fill certainty: a post-only order that would cross the
+   *  spread is rejected by the exchange, and one that rests may never fill
+   *  if price walks away. Unfilled orders are cancelled after
+   *  postOnlyTimeoutMs and reported as a no-op.
+   *
+   *  CLOSES ARE NEVER POST-ONLY, regardless of this setting — a stop-loss
+   *  that sits unfilled while price runs against the position is precisely
+   *  the failure mode the risk logic exists to prevent. Default false. */
+  usePostOnlyEntries?: boolean;
+  /** How long to let an unfilled post-only entry rest before cancelling it.
+   *  Default 5000ms. */
+  postOnlyTimeoutMs?: number;
 }
 
 export class ConfigError extends Error {
@@ -154,6 +173,8 @@ export function loadConfig(path: string): Config {
     useModelGate: raw["useModelGate"] as boolean | undefined,
     modelMinProbability: raw["modelMinProbability"] as number | undefined,
     simulatedFeePercentPerSide: raw["simulatedFeePercentPerSide"] as number | undefined,
+    usePostOnlyEntries: raw["usePostOnlyEntries"] as boolean | undefined,
+    postOnlyTimeoutMs: raw["postOnlyTimeoutMs"] as number | undefined,
   };
 
   // Validation
@@ -273,6 +294,15 @@ export function loadConfig(path: string): Config {
     (typeof config.simulatedFeePercentPerSide !== "number" || config.simulatedFeePercentPerSide < 0)
   ) {
     throw new ConfigError("config.simulatedFeePercentPerSide must be a non-negative number if set");
+  }
+  if (config.usePostOnlyEntries !== undefined && typeof config.usePostOnlyEntries !== "boolean") {
+    throw new ConfigError("config.usePostOnlyEntries must be a boolean if set");
+  }
+  if (
+    config.postOnlyTimeoutMs !== undefined &&
+    (typeof config.postOnlyTimeoutMs !== "number" || config.postOnlyTimeoutMs <= 0)
+  ) {
+    throw new ConfigError("config.postOnlyTimeoutMs must be a positive number if set");
   }
 
   return config as Config;

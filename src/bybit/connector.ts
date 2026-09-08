@@ -46,6 +46,7 @@ export class BybitConnector {
   private connectionHandlers = new Set<ConnectionHandler>();
   private lastSnapshots = new Map<string, MarketSnapshot>();
   private lotSizeCache = new Map<string, { minQty: string; qtyStep: string }>();
+  private tickSizeCache = new Map<string, number>();
   private _state: BybitConnectorState;
   private _connected = false;
   private manuallyDisconnected = false;
@@ -474,6 +475,125 @@ export class BybitConnector {
   }
 
   /**
+   * Place a post-only (maker) entry resting at the near touch, wait for it
+   * to fill, and cancel it if it doesn't within the configured window.
+   *
+   * Why the near touch and not something more aggressive: a post-only order
+   * that would immediately cross the spread is rejected outright by Bybit
+   * (that's what "post only" means), so the price has to sit at or behind
+   * the best price on our own side of the book. Buy rests at the best bid,
+   * rounded DOWN to a tick; sell at the best ask, rounded UP.
+   *
+   * An unfilled order is cancelled and reported as a clean no-op (side
+   * "hold", qty 0) — the same shape a rejected market order returns — so
+   * the caller's books stay consistent with reality: nothing executed,
+   * nothing to journal. Partial fills are journaled for exactly the
+   * quantity that filled, then the remainder is cancelled.
+   */
+  private async placePostOnlyEntry(
+    symbol: string, side: "Buy" | "Sell", formattedQty: string,
+    orderLinkId: string, appSymbol: string,
+  ): Promise<TradeResult> {
+    const noop = (): TradeResult => ({ symbol: appSymbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() });
+
+    let book: { bids: [string, string][]; asks: [string, string][] };
+    try {
+      book = await this.rest.getOrderbook("linear", symbol, 1);
+    } catch (err) {
+      logger.warn(`[bybit] Post-only entry for ${appSymbol} skipped — could not read the order book to price it (${(err as Error).message}). Not falling back to a market order: that would silently pay the taker fee the maker path exists to avoid.`);
+      return noop();
+    }
+
+    const touch = side === "Buy" ? book.bids?.[0]?.[0] : book.asks?.[0]?.[0];
+    const touchPrice = Number.parseFloat(touch ?? "");
+    if (!Number.isFinite(touchPrice) || touchPrice <= 0) {
+      logger.warn(`[bybit] Post-only entry for ${appSymbol} skipped — no ${side === "Buy" ? "bid" : "ask"} on the book to rest against.`);
+      return noop();
+    }
+
+    const tick = await this.getTickSize(appSymbol);
+    const decimals = Math.max(0, Math.ceil(-Math.log10(tick)));
+    // Round away from the spread so the order rests instead of crossing.
+    const resting = side === "Buy"
+      ? Math.floor(touchPrice / tick) * tick
+      : Math.ceil(touchPrice / tick) * tick;
+    const price = resting.toFixed(decimals);
+
+    let orderId: string;
+    try {
+      const order = await this.rest.placeOrder({
+        category: "linear", symbol, side,
+        orderType: "Limit", qty: formattedQty, price,
+        timeInForce: "PostOnly", reduceOnly: false, orderLinkId,
+      });
+      orderId = (order as any).orderId as string;
+    } catch (err) {
+      // A PostOnly rejection means the book moved and the price would have
+      // crossed — normal, not an error worth halting the symbol over.
+      logger.warn(`[bybit] Post-only entry for ${appSymbol} at ${price} was not accepted (${(err as Error).message}) — treating as a no-op; the next cycle can try again at a fresh price.`);
+      return noop();
+    }
+
+    const timeoutMs = this.config.postOnlyTimeoutMs ?? 5000;
+    const deadline = Date.now() + timeoutMs;
+    logger.info(`[bybit] Post-only ${side} ${formattedQty} ${appSymbol} resting at ${price} (maker fee), waiting up to ${timeoutMs}ms for a fill.`);
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, Math.min(500, Math.max(50, deadline - Date.now()))));
+      const filled = await this.pollForFill(symbol, orderId, 1);
+      if (filled && filled.side !== "hold" && filled.quantity > 0) {
+        logger.info(`[bybit] Post-only ${side} ${appSymbol} filled ${filled.quantity} @ ${filled.price} (maker).`);
+        return filled;
+      }
+    }
+
+    // Didn't fill in the window. Cancel and report nothing executed. Cancel
+    // is best-effort but its failure is logged loudly rather than swallowed:
+    // a still-resting order the bot has forgotten about is a real exposure.
+    try {
+      await this.rest.cancelOrder("linear", symbol, orderId);
+      logger.info(`[bybit] Post-only ${side} ${appSymbol} did not fill within ${timeoutMs}ms — cancelled, nothing executed.`);
+    } catch (err) {
+      logger.error(`[bybit] Post-only ${side} ${appSymbol} did not fill AND could not be cancelled (${(err as Error).message}) — order ${orderId} may still be resting on the exchange. Check Bybit manually.`);
+    }
+
+    // The cancel may have raced a fill; ask the exchange rather than assume.
+    const afterCancel = await this.pollForFill(symbol, orderId, 1);
+    if (afterCancel && afterCancel.side !== "hold" && afterCancel.quantity > 0) {
+      logger.warn(`[bybit] Post-only ${appSymbol} filled ${afterCancel.quantity} just as it was being cancelled — journaling the real fill.`);
+      return afterCancel;
+    }
+    return noop();
+  }
+
+  /**
+   * Price tick size for a symbol, needed to round a limit price to a value
+   * the exchange will accept. Cached like lot size; falls back to a
+   * conservative 0.0001 only if the instrument lookup fails, in which case
+   * the caller's rounding is merely coarse, never invalid.
+   */
+  async getTickSize(symbol: string): Promise<number> {
+    const bybitSymbol = symbol.replace("/", "");
+    const cached = this.tickSizeCache.get(bybitSymbol);
+    if (cached !== undefined) return cached;
+    try {
+      const result = await this.rest.getInstruments("linear", bybitSymbol);
+      const list = (result as any).list;
+      const tick = list?.[0]?.priceFilter?.tickSize;
+      if (tick) {
+        const parsed = Number.parseFloat(tick);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          this.tickSizeCache.set(bybitSymbol, parsed);
+          return parsed;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[bybit] Failed to fetch tick size for ${bybitSymbol}: ${(err as Error).message}`);
+    }
+    return 0.0001;
+  }
+
+  /**
    * Validate and round quantity to meet lot size rules.
    *
    * `side` controls rounding direction — this matters for safety, not just
@@ -568,6 +688,19 @@ export class BybitConnector {
     const orderLinkId = randomUUID();
     recordPendingOrder({ orderLinkId, symbol, intent: signal.type === "buy" ? "buy" : "sell", expectedQty: actualQty, timestamp: Date.now() });
 
+    // Post-only (maker) entries — see config.usePostOnlyEntries. Applies to
+    // ENTRIES ONLY: `reduceOnly` marks a close, and a close must never rest
+    // unfilled while price runs against the position, which is the exact
+    // failure the stop-loss exists to prevent. Closes always go to market.
+    if (this.config.usePostOnlyEntries && !reduceOnly) {
+      try {
+        const maker = await this.placePostOnlyEntry(symbol, side, formattedQty, orderLinkId, signal.symbol);
+        return maker;
+      } finally {
+        clearPendingOrder(orderLinkId);
+      }
+    }
+
     try {
       const order = await this.rest.placeOrder({
         category: "linear",
@@ -608,11 +741,13 @@ export class BybitConnector {
    * which would create duplicate Position rows (portfolio.ts has no
    * same-symbol merge logic for repeated "buy" updates).
    */
-  private async pollForFill(symbol: string, orderId: string): Promise<TradeResult | null> {
+  private async pollForFill(symbol: string, orderId: string, maxAttempts = 4): Promise<TradeResult | null> {
     let lastPartial: TradeResult | null = null;
     let lastLeavesQty: string | null = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      await sleep(400 * (attempt + 1));
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // The post-only path polls in a tight loop it paces itself, so it asks
+      // for a single immediate check rather than this backoff.
+      if (maxAttempts > 1) await sleep(400 * (attempt + 1));
       try {
         const history = await this.rest.getOrderHistory("linear", symbol, 10);
         const match = (history.list as any[]).find(o => o.orderId === orderId);

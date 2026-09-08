@@ -1036,3 +1036,86 @@ test("checkPendingOrders returns nothing when there are no pending orders", () =
   const warnings = await connector.checkPendingOrders();
   assert.deepEqual(warnings, []);
 }));
+
+// ── Post-only (maker) entries ─────────────────────────────────────────
+// The fee term dominates this strategy's measured edge (maker 0.02%/side vs
+// taker 0.055%), so entries can rest as post-only limit orders. The safety
+// invariant these cover: a CLOSE must never be post-only — an unfilled
+// stop-loss sitting on the book while price runs against the position is
+// the exact failure the risk logic exists to prevent.
+
+const makerConfig = { ...mockConfig, usePostOnlyEntries: true, postOnlyTimeoutMs: 50 };
+
+function buySignal(symbol = "BTC/USDT") {
+  return { type: "buy" as const, symbol, confidence: 0.8, reason: "test", indicators: {} as any };
+}
+function sellSignal(symbol = "BTC/USDT") {
+  return { type: "sell" as const, symbol, confidence: 0.8, reason: "test", indicators: {} as any };
+}
+
+test("post-only entry rests at the best bid as a PostOnly Limit order", async () => {
+  const connector = new BybitConnector(makerConfig);
+  let sent: any = null;
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
+    getOrderbook: async () => ({ bids: [["40000.3", "5"]], asks: [["40001.0", "5"]], timestamp: Date.now() }),
+    placeOrder: async (o: any) => { sent = o; return { orderId: "o1" }; },
+    getOrderHistory: async () => ({ list: [{ orderId: "o1", symbol: "BTCUSDT", side: "Buy", orderStatus: "Filled", cumExecQty: "0.01", avgPrice: "40000.0", cumExecFee: "0.08", createdTime: String(Date.now()) }] }),
+    cancelOrder: async () => {},
+  }, async () => {
+    const result = await connector.placeOrder(buySignal(), 0.01);
+    assert.equal(sent.orderType, "Limit");
+    assert.equal(sent.timeInForce, "PostOnly");
+    assert.equal(sent.reduceOnly, false);
+    // Best bid 40000.3 rounded DOWN to a 0.5 tick so it rests, never crosses.
+    assert.equal(sent.price, "40000.0");
+    assert.equal(result.side, "buy");
+  });
+});
+
+test("a CLOSE is never post-only, even when post-only entries are enabled", async () => {
+  const connector = new BybitConnector(makerConfig);
+  let sent: any = null;
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
+    getOrderbook: async () => { throw new Error("orderbook must not be consulted for a close"); },
+    placeOrder: async (o: any) => { sent = o; return { orderId: "o2", cumExecQty: "0.01", avgPrice: "40000", cumExecFee: "0.08" }; },
+    getOrderHistory: async () => ({ list: [] }),
+  }, async () => {
+    await connector.placeOrder(sellSignal(), 0.01);
+    assert.equal(sent.orderType, "Market", "a stop-loss/take-profit close must go to market, never rest as post-only");
+    assert.equal(sent.reduceOnly, true);
+  });
+});
+
+test("an unfilled post-only entry is cancelled and reported as a no-op", async () => {
+  const connector = new BybitConnector(makerConfig);
+  let cancelled: string | null = null;
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
+    getOrderbook: async () => ({ bids: [["40000.0", "5"]], asks: [["40001.0", "5"]], timestamp: Date.now() }),
+    placeOrder: async () => ({ orderId: "o3" }),
+    getOrderHistory: async () => ({ list: [{ orderId: "o3", orderStatus: "New", cumExecQty: "0" }] }),
+    cancelOrder: async (_c: string, _s: string, id: string) => { cancelled = id; },
+  }, async () => {
+    const result = await connector.placeOrder(buySignal(), 0.01);
+    assert.equal(result.side, "hold", "nothing executed, so nothing to journal");
+    assert.equal(result.quantity, 0);
+    assert.equal(cancelled, "o3", "the resting order must be cancelled, not abandoned on the book");
+  });
+});
+
+test("a post-only entry is a no-op — never a market fallback — when the book can't be read", async () => {
+  const connector = new BybitConnector(makerConfig);
+  let placed = false;
+  await withMocked(connector, {
+    getInstruments: async () => ({ list: [{ lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001" }, priceFilter: { tickSize: "0.5" } }] }),
+    getOrderbook: async () => { throw new Error("book unavailable"); },
+    placeOrder: async () => { placed = true; return { orderId: "o4" }; },
+    getOrderHistory: async () => ({ list: [] }),
+  }, async () => {
+    const result = await connector.placeOrder(buySignal(), 0.01);
+    assert.equal(result.side, "hold");
+    assert.equal(placed, false, "must not silently fall back to a taker market order");
+  });
+});

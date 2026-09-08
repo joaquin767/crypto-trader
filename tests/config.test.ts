@@ -205,6 +205,8 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     useModelGate: true,
     modelMinProbability: 0.62,
     simulatedFeePercentPerSide: 0.02,
+    usePostOnlyEntries: true,
+    postOnlyTimeoutMs: 4000,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {

@@ -13,6 +13,12 @@ export interface BybitConfig {
   /** How often (ms) to poll REST tickers when the WebSocket has exhausted its
    *  reconnect attempts. Defaults to 3000ms. See BybitConnector's REST fallback. */
   restPollIntervalMs?: number;
+  /** Place ENTRIES as post-only limit orders (maker fee) instead of market
+   *  orders. Closes are never post-only — see config.usePostOnlyEntries. */
+  usePostOnlyEntries?: boolean;
+  /** How long an unfilled post-only entry may rest before being cancelled.
+   *  Defaults to 5000ms. */
+  postOnlyTimeoutMs?: number;
 }
 
 // ── REST Endpoints ───────────────────────────────────────────────────
