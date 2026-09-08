@@ -15,6 +15,39 @@ import type { Portfolio } from "../portfolio.ts";
  */
 export type TradeVenue = "bybit-live" | "bybit-testnet" | "paper";
 
+/**
+ * Why a position closed. Recorded at close so a losing streak can be
+ * attributed — before this existed, a closed trade kept only its ENTRY reason,
+ * so "stops are too tight" and "the horizon is too short" and "the model gate
+ * stopped working" were indistinguishable after the fact.
+ * See specs/profit-target-roadmap.md F2 / G1.1.
+ */
+export type ExitReason =
+  | "take_profit" | "stop_loss" | "horizon"
+  | "manual" | "circuit_breaker" | "reconciled";
+
+/** Aggregate bucket for records written before exit attribution existed.
+ *  Deliberately NOT a member of ExitReason: no NEW trade may be written as
+ *  "unknown" — an unattributable close is "reconciled", and logs a warning. */
+export type ExitReasonBucket = ExitReason | "unknown";
+
+/**
+ * Classify a close from the sell signal's reason text.
+ *
+ * The reason strings are generated in exactly three places in signals.ts
+ * (`stop-loss: …`, `take-profit: …`, `model horizon elapsed …`), so matching
+ * their stable prefixes is reliable. Anything unrecognised falls through to
+ * "reconciled" rather than being guessed into a bucket — an unattributed close
+ * must never be silently counted as a take-profit.
+ */
+export function classifyExitReason(reason: string): ExitReason {
+  if (reason.startsWith("stop-loss:")) return "stop_loss";
+  if (reason.startsWith("take-profit:")) return "take_profit";
+  if (reason.startsWith("model horizon elapsed")) return "horizon";
+  if (reason.startsWith("circuit breaker")) return "circuit_breaker";
+  return "reconciled";
+}
+
 export interface TradeRecord {
   id: number;
   symbol: string;

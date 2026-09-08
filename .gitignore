@@ -27,3 +27,12 @@ logs/
 
 # Model training data (large, regenerable via scripts/fetch-klines.ts)
 data/klines/
+
+# Extended kline history for walk-forward validation (~80MB, refetchable via
+# scripts/fetch-klines.ts --days 365). Validation REPORTS in data/validation/
+# are committed; the raw candles they were computed from are not.
+data/klines-365/
+
+# 🔒 Config backups also carry API keys — config.*.json doesn't match these.
+config.json.bak*
+config.json.bak-*

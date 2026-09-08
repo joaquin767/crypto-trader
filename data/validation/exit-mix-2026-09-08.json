@@ -1,0 +1,62 @@
+{
+  "generatedAt": "2026-09-08T16:45:57.946Z",
+  "kind": "exit-mix",
+  "caveat": "UNCONDITIONAL exit mix: every bar is treated as a hypothetical entry, not only the bars the model gate would enter on. Sample count is therefore much larger than a backtest's trade count, and the mix a gated strategy realises may differ. Ties (a bar spanning both barriers) are resolved as stop_loss.",
+  "command": "node --experimental-strip-types scripts/exit-mix.ts --data data/klines --held-out 0.25 --tp 1.5 --sl 1.5 --horizon 7",
+  "barriers": {
+    "takeProfitPercent": 1.5,
+    "stopLossPercent": 1.5,
+    "horizonBars": 7
+  },
+  "bars": {
+    "kind": "dollar",
+    "timeBarsPerDollarBar": 6.81119432400473
+  },
+  "heldOutFraction": 0.25,
+  "totals": {
+    "samples": 2518,
+    "takeProfit": 1062,
+    "stopLoss": 1014,
+    "horizon": 442,
+    "takeProfitShare": 0.4217633042096902,
+    "stopLossShare": 0.40270055599682286,
+    "horizonShare": 0.1755361397934869,
+    "holdMinutes": {
+      "median": 115,
+      "p25": 45,
+      "p75": 250
+    }
+  },
+  "perSymbol": {
+    "APTUSDT": {
+      "samples": 506,
+      "take_profit": 217,
+      "stop_loss": 233,
+      "horizon": 56
+    },
+    "ARBUSDT": {
+      "samples": 474,
+      "take_profit": 246,
+      "stop_loss": 228,
+      "horizon": 0
+    },
+    "LINKUSDT": {
+      "samples": 513,
+      "take_profit": 193,
+      "stop_loss": 152,
+      "horizon": 168
+    },
+    "OPUSDT": {
+      "samples": 507,
+      "take_profit": 230,
+      "stop_loss": 253,
+      "horizon": 24
+    },
+    "SOLUSDT": {
+      "samples": 518,
+      "take_profit": 176,
+      "stop_loss": 148,
+      "horizon": 194
+    }
+  }
+}

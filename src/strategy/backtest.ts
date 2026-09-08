@@ -7,8 +7,9 @@
 // source (e.g. RestClient.getKline(), src/bybit/rest.ts:128) fetched once and
 // cached to a fixture, never fabricated and never fetched live inside a test.
 
-import { analyze, clearHistory, resetModelCache } from "./signals.ts";
-import { resetThresholdCache } from "./model.ts";
+import { analyze, clearHistory, resetModelCache, setModel } from "./signals.ts";
+import { resetThresholdCache, type ModelWeights } from "./model.ts";
+import { classifyExitReason, type ExitReason } from "../learning/journal.ts";
 import { clearCandles, seedCandles } from "./candles.ts";
 import { calcPositionSize, calcWinRate, calcProfitFactor, calcMaxDrawdown } from "./risk.ts";
 import { execute } from "../executor.ts";
@@ -39,6 +40,21 @@ export interface BacktestReport {
   totalFees: number;
   profitFactor: number;
   maxDrawdownPercent: number;
+  /** Portfolio value after each bar. Already computed internally to derive
+   *  maxDrawdownPercent; exposed so the walk-forward harness can splice
+   *  per-fold curves into one equity series. */
+  equityCurve: number[];
+  /** One entry per CLOSED trade, in exit order. Lets the harness compute an
+   *  exit mix and a cross-fold drawdown, neither of which is recoverable
+   *  from the aggregates alone. */
+  trades: ClosedTrade[];
+}
+
+export interface ClosedTrade {
+  entryTime: number;
+  exitTime: number;
+  pnl: number;
+  exitReason: ExitReason;
 }
 
 /**
@@ -64,20 +80,32 @@ export async function runBacktest(
   candles: Candle[],
   symbol: string,
   config: Config,
+  /**
+   * Score against THIS model instead of whatever is on disk.
+   *
+   * Omitted reproduces the previous behaviour exactly (lazy loadModel of
+   * DEFAULT_MODEL_PATH), so existing callers and tests are unaffected. The
+   * walk-forward harness always passes it explicitly: a fold must never be
+   * scored by a model fit on data outside its own training window, and
+   * silently falling back to the on-disk model would be precisely that
+   * look-ahead leak, invisible in the results.
+   */
+  model?: ModelWeights,
 ): Promise<BacktestReport> {
   clearHistory();
   clearCandles();
   // Also drop the per-symbol dollar-threshold and percentile-threshold
   // caches, or a threshold calibrated in a previous run (different config,
   // different slice) silently carries into this one.
-  resetModelCache();
+  if (model === undefined) resetModelCache(); else setModel(model);
   resetThresholdCache();
 
   let portfolio = createPortfolio(config.maxCapitalUsd);
   const pnls: number[] = [];
   const equityCurve: number[] = [portfolio.totalValueUsd];
   let totalFees = 0;
-  let openEntry: { price: number; quantity: number; fee: number } | null = null;
+  let openEntry: { price: number; quantity: number; fee: number; entryTime: number } | null = null;
+  const trades: ClosedTrade[] = [];
 
   // ── Post-only fill model ────────────────────────────────────────────
   // Previously every post-only entry was assumed to fill at the decision
@@ -134,7 +162,7 @@ export async function runBacktest(
         if (result.side === "buy" && result.quantity > 0) {
           try {
             portfolio = updatePortfolio(portfolio, result);
-            openEntry = { price: result.price, quantity: result.quantity, fee: result.fee };
+            openEntry = { price: result.price, quantity: result.quantity, fee: result.fee, entryTime: candle.openTime };
             totalFees += result.fee;
             restingFilled += 1;
           } catch { /* corrupted result — skip, as elsewhere */ }
@@ -179,11 +207,17 @@ export async function runBacktest(
         try {
           portfolio = updatePortfolio(portfolio, result);
           if (result.side === "buy" && result.quantity > 0) {
-            openEntry = { price: result.price, quantity: result.quantity, fee: result.fee };
+            openEntry = { price: result.price, quantity: result.quantity, fee: result.fee, entryTime: candle.openTime };
             totalFees += result.fee;
           } else if (result.side === "sell" && result.quantity > 0 && openEntry) {
             const pnl = (result.price - openEntry.price) * result.quantity - openEntry.fee - result.fee;
             pnls.push(pnl);
+            trades.push({
+              entryTime: openEntry.entryTime,
+              exitTime: candle.openTime,
+              pnl,
+              exitReason: classifyExitReason(signal.reason),
+            });
             totalFees += result.fee;
             openEntry = null;
           }
@@ -209,5 +243,7 @@ export async function runBacktest(
     totalFees,
     profitFactor: calcProfitFactor(pnls),
     maxDrawdownPercent: calcMaxDrawdown(equityCurve),
+    equityCurve,
+    trades,
   };
 }

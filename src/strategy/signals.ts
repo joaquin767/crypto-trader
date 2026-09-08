@@ -70,6 +70,23 @@ function getModel(): ModelWeights | null {
   return _model;
 }
 
+/**
+ * Inject a specific model, bypassing the lazy disk load.
+ *
+ * Exists for the walk-forward harness (specs/profit-target-roadmap.md G0.3):
+ * each fold must be scored by the model fit on THAT fold's training window,
+ * never by whatever happens to be on disk. Passing null forces "no model".
+ *
+ * Clears the percentile-threshold cache too, since those thresholds are
+ * derived from the model's own score distribution and are meaningless across
+ * a model swap.
+ */
+export function setModel(model: ModelWeights | null): void {
+  _model = model;
+  _modelLoadAttempted = true;
+  _percentileThresholds.clear();
+}
+
 /** Reset the cached model (tests only). */
 export function resetModelCache(): void {
   _model = null;

@@ -35,6 +35,15 @@ export async function execute(
   snapshot: MarketSnapshot,
   positionUsd: number,
 ): Promise<TradeResult> {
+  // Stamp trades with the time of the SNAPSHOT being acted on, not the wall
+  // clock. Live these are the same thing. In a backtest replaying historical
+  // candles they are ~a year apart, and using Date.now() set every position's
+  // openedAt to "today" while snapshot.timestamp stayed in the past — so
+  // `ageMs = snapshot.timestamp - position.openedAt` was NEGATIVE and the
+  // model's horizon exit (signals.ts modelHorizonMsFor) could never fire.
+  // The result: no backtest this project has ever run modelled the horizon
+  // exit at all, while live did. See specs/profit-target-roadmap.md §2.5.
+  const tradeTime = snapshot.timestamp;
   if (signal.type === "hold") {
     return {
       symbol: signal.symbol,
@@ -42,7 +51,7 @@ export async function execute(
       quantity: 0,
       price: 0,
       fee: 0,
-      timestamp: Date.now(),
+      timestamp: tradeTime,
     };
   }
 
@@ -65,10 +74,10 @@ export async function execute(
     const existing = portfolio.positions.find(p => p.symbol === signal.symbol);
     const quantity = existing?.quantity ?? 0;
     if (quantity <= 0) {
-      return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() };
+      return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: tradeTime };
     }
     const fee = quantity * price * FEE_RATE;
-    return { symbol: signal.symbol, side: "sell", quantity, price, fee, timestamp: Date.now() };
+    return { symbol: signal.symbol, side: "sell", quantity, price, fee, timestamp: tradeTime };
   }
 
   // "buy"
@@ -80,11 +89,11 @@ export async function execute(
     // Not enough cash for the full sized position — buy what's affordable instead.
     const affordableQty = Math.max((portfolio.cashUsd * 0.99) / price, 0);
     if (affordableQty <= 0.000001) {
-      return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: Date.now() };
+      return { symbol: signal.symbol, side: "hold", quantity: 0, price: 0, fee: 0, timestamp: tradeTime };
     }
     const affordableFee = affordableQty * price * FEE_RATE;
-    return { symbol: signal.symbol, side: "buy", quantity: affordableQty, price, fee: affordableFee, timestamp: Date.now() };
+    return { symbol: signal.symbol, side: "buy", quantity: affordableQty, price, fee: affordableFee, timestamp: tradeTime };
   }
 
-  return { symbol: signal.symbol, side: "buy", quantity: rawQty, price, fee, timestamp: Date.now() };
+  return { symbol: signal.symbol, side: "buy", quantity: rawQty, price, fee, timestamp: tradeTime };
 }
