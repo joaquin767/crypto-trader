@@ -536,10 +536,22 @@ export class BybitConnector {
 
     const timeoutMs = this.config.postOnlyTimeoutMs ?? 5000;
     const deadline = Date.now() + timeoutMs;
-    logger.info(`[bybit] Post-only ${side} ${formattedQty} ${appSymbol} resting at ${price} (maker fee), waiting up to ${timeoutMs}ms for a fill.`);
+    // Poll cadence scales with the wait: a 5s timeout polls every 500ms
+    // (10 checks), a 5-minute one every 5s (60 checks). The fixed 500ms
+    // this used to have would have fired 600 REST calls for a single 300s
+    // order and run straight into the rate limiter.
+    const pollEveryMs = Math.min(5000, Math.max(500, Math.floor(timeoutMs / 60)));
+    // NOTE: this await blocks the whole trading cycle until it resolves, so
+    // with a long timeout no OTHER symbol is evaluated meanwhile — including
+    // its stop-loss. That is safe as configured today (entries only rest
+    // when flat, and only one symbol is traded), but it is a real hazard if
+    // more symbols are added: an order resting 5 minutes on symbol A would
+    // delay risk checks on symbol B. Making the rest non-blocking is the
+    // proper fix and is not done here.
+    logger.info(`[bybit] Post-only ${side} ${formattedQty} ${appSymbol} resting at ${price} (maker fee), waiting up to ${(timeoutMs / 1000).toFixed(0)}s for a fill, polling every ${(pollEveryMs / 1000).toFixed(1)}s.`);
 
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, Math.min(500, Math.max(50, deadline - Date.now()))));
+      await new Promise(r => setTimeout(r, Math.min(pollEveryMs, Math.max(50, deadline - Date.now()))));
       const filled = await this.pollForFill(symbol, orderId, 1);
       if (filled && filled.side !== "hold" && filled.quantity > 0) {
         logger.info(`[bybit] Post-only ${side} ${appSymbol} filled ${filled.quantity} @ ${filled.price} (maker).`);
