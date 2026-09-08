@@ -24,3 +24,6 @@ learning-insights.json
 # Session logs
 logs/
 *.log
+
+# Model training data (large, regenerable via scripts/fetch-klines.ts)
+data/klines/

@@ -4,6 +4,8 @@ import {
   type MACDResult, type BollingerResult, type RsiState, type MacdState,
 } from "./indicators.ts";
 import { hasPlausibleEdge } from "./risk.ts";
+import { loadModel, scoreCandles, type ModelWeights } from "./model.ts";
+import { getCandles } from "./candles.ts";
 import type { MarketSnapshot } from "../market.ts";
 import type { Config } from "../config.ts";
 import type { Portfolio } from "../portfolio.ts";
@@ -44,6 +46,33 @@ export interface PriceHistory {
 
 // In-memory price history per symbol (for indicator calculation)
 const _history = new Map<string, PriceHistory>();
+
+// Lazily-loaded entry model. Cached because loadModel() reads and validates
+// a file — doing that per tick would be wasteful, and re-reading mid-session
+// would let the strategy silently change behavior underneath a running
+// position. `attempted` makes a missing model warn exactly once.
+let _model: ModelWeights | null = null;
+let _modelLoadAttempted = false;
+
+function getModel(): ModelWeights | null {
+  if (!_modelLoadAttempted) {
+    _modelLoadAttempted = true;
+    _model = loadModel();
+    if (_model === null) {
+      console.warn("[model] useModelGate is on but no usable weights file was loaded — entries will NOT be model-gated. Train one with scripts/train-model.ts.");
+    } else {
+      const m = _model.metrics;
+      console.log(`[model] Loaded entry model (test AUC ${m.testAuc.toFixed(3)}, ${m.testSamples} held-out samples, trained on ${_model.trainedOn.symbols.join("/")} ${_model.trainedOn.interval}m, TP ${_model.trainedOn.takeProfitPercent}% / SL ${_model.trainedOn.stopLossPercent}% / ${_model.trainedOn.horizonBars} bars).`);
+    }
+  }
+  return _model;
+}
+
+/** Reset the cached model (tests only). */
+export function resetModelCache(): void {
+  _model = null;
+  _modelLoadAttempted = false;
+}
 
 /** Get or initialize price history for a symbol. */
 export function getHistory(symbol: string): PriceHistory {
@@ -259,6 +288,28 @@ export function analyze(
       reason: "insufficient plausible edge vs. round-trip cost",
       indicators: { rsi, macd, bollinger, momentum, atr },
     };
+  }
+
+  // Learned-model entry gate (src/strategy/model.ts). Opt-in via
+  // config.useModelGate. Only ever BLOCKS an entry the rule-based logic
+  // already wanted — it never invents one — so the model can subtract bad
+  // trades but can't add trades the strategy didn't independently justify.
+  // A null score (not enough candle history yet, or no weights file) means
+  // "no opinion" and falls through to the existing logic rather than
+  // blocking, so a cold start doesn't silently freeze all trading.
+  if (config.useModelGate && (buyScore >= 4 || sellScore >= 4)) {
+    const model = getModel();
+    if (model !== null) {
+      const probability = scoreCandles(model, getCandles(snapshot.symbol));
+      const minProbability = config.modelMinProbability ?? 0.5;
+      if (probability !== null && probability < minProbability) {
+        return {
+          type: "hold", symbol: snapshot.symbol, confidence: 0.2,
+          reason: `model gate: p=${probability.toFixed(3)} below ${minProbability.toFixed(2)}`,
+          indicators: { rsi, macd, bollinger, momentum, atr },
+        };
+      }
+    }
   }
 
   // Final decision (raw — before the signal-confirmation gate below)

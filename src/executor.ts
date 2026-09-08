@@ -47,7 +47,13 @@ export async function execute(
   }
 
   const price = snapshot.price;
-  const FEE_RATE = 0.001;
+  // Per-side simulated fee. Defaults to Bybit's standard non-VIP linear
+  // perpetual TAKER rate (0.055%), measured from real fills in
+  // tests/fixtures/apt-usdt-session-2026-09-07.json — not the 0.1% that was
+  // hardcoded here before, which overstated round-trip cost by ~2x and made
+  // every paper trade and every backtest look worse than reality. Override
+  // via config.simulatedFeePercentPerSide (e.g. 0.02 for maker/post-only).
+  const FEE_RATE = (config.simulatedFeePercentPerSide ?? 0.055) / 100;
 
   if (signal.type === "sell") {
     const existing = portfolio.positions.find(p => p.symbol === signal.symbol);

@@ -202,6 +202,9 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     signalConfirmationTicks: 3,
     minHoldBeforeExpertExitMs: 45000,
     estimatedRoundTripFeePercent: 0.18,
+    useModelGate: true,
+    modelMinProbability: 0.62,
+    simulatedFeePercentPerSide: 0.02,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {

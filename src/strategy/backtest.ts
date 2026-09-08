@@ -8,6 +8,7 @@
 // cached to a fixture, never fabricated and never fetched live inside a test.
 
 import { analyze, clearHistory } from "./signals.ts";
+import { clearCandles, seedCandles } from "./candles.ts";
 import { calcPositionSize, calcWinRate, calcProfitFactor, calcMaxDrawdown } from "./risk.ts";
 import { execute } from "../executor.ts";
 import { create as createPortfolio, update as updatePortfolio } from "../portfolio.ts";
@@ -57,6 +58,7 @@ export async function runBacktest(
   config: Config,
 ): Promise<BacktestReport> {
   clearHistory();
+  clearCandles();
 
   let portfolio = createPortfolio(config.maxCapitalUsd);
   const pnls: number[] = [];
@@ -64,11 +66,18 @@ export async function runBacktest(
   let totalFees = 0;
   let openEntry: { price: number; quantity: number; fee: number } | null = null;
 
-  for (const candle of candles) {
+  for (let i = 0; i < candles.length; i++) {
+    const candle = candles[i]!;
     const snapshot: MarketSnapshot = {
       symbol, price: candle.close, change24h: 0, volume24h: candle.volume,
       timestamp: candle.openTime, high24h: candle.high, low24h: candle.low,
     };
+
+    // Feed the same candle store the live path feeds, so a model gate sees
+    // an identical window here and in production. Bounded slice keeps this
+    // O(window) per step rather than O(n^2) across a long replay; candles
+    // up to and including `i` are complete at the moment we act on i's close.
+    seedCandles(symbol, candles.slice(Math.max(0, i - 199), i + 1));
 
     // Mark the position to this candle's close before evaluating a new
     // signal, exactly like a live no-trade tick would (reuses

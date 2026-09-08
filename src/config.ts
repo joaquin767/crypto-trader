@@ -83,6 +83,26 @@ export interface Config {
    *  Not used for actual fee accounting — real fees always come from the
    *  exchange fill / the paper executor's own rate. */
   estimatedRoundTripFeePercent?: number;
+
+  // ── Learned entry model (src/strategy/model.ts) ───────────────────────
+  /** Gate new entries on the trained model's probability. Default false —
+   *  the model is opt-in, and with it off the strategy behaves exactly as
+   *  it did before the model existed. Requires a weights file (train with
+   *  scripts/train-model.ts); if none loads, this has no effect and a
+   *  warning is logged once rather than silently gating nothing. */
+  useModelGate?: boolean;
+  /** Minimum model probability required to open a position when
+   *  useModelGate is on. Default 0.5. Higher = trade less, more
+   *  selectively — tune against runBacktest(), not by feel. */
+  modelMinProbability?: number;
+
+  /** Per-side fee, as a percent of notional, used by the SIMULATED paper
+   *  executor and therefore by every backtest. Default 0.055 — Bybit's
+   *  standard non-VIP linear-perpetual taker rate, measured from real
+   *  fills. Set to 0.02 to model maker/post-only fills. Real live fills
+   *  always use the exchange's actual reported fee; this only affects
+   *  simulation. */
+  simulatedFeePercentPerSide?: number;
 }
 
 export class ConfigError extends Error {
@@ -131,6 +151,9 @@ export function loadConfig(path: string): Config {
     signalConfirmationTicks: raw["signalConfirmationTicks"] as number | undefined,
     minHoldBeforeExpertExitMs: raw["minHoldBeforeExpertExitMs"] as number | undefined,
     estimatedRoundTripFeePercent: raw["estimatedRoundTripFeePercent"] as number | undefined,
+    useModelGate: raw["useModelGate"] as boolean | undefined,
+    modelMinProbability: raw["modelMinProbability"] as number | undefined,
+    simulatedFeePercentPerSide: raw["simulatedFeePercentPerSide"] as number | undefined,
   };
 
   // Validation
@@ -235,6 +258,21 @@ export function loadConfig(path: string): Config {
     (typeof config.estimatedRoundTripFeePercent !== "number" || config.estimatedRoundTripFeePercent <= 0)
   ) {
     throw new ConfigError("config.estimatedRoundTripFeePercent must be a positive number if set");
+  }
+  if (config.useModelGate !== undefined && typeof config.useModelGate !== "boolean") {
+    throw new ConfigError("config.useModelGate must be a boolean if set");
+  }
+  if (
+    config.modelMinProbability !== undefined &&
+    (typeof config.modelMinProbability !== "number" || config.modelMinProbability <= 0 || config.modelMinProbability >= 1)
+  ) {
+    throw new ConfigError("config.modelMinProbability must be a number between 0 and 1 (exclusive) if set");
+  }
+  if (
+    config.simulatedFeePercentPerSide !== undefined &&
+    (typeof config.simulatedFeePercentPerSide !== "number" || config.simulatedFeePercentPerSide < 0)
+  ) {
+    throw new ConfigError("config.simulatedFeePercentPerSide must be a non-negative number if set");
   }
 
   return config as Config;
