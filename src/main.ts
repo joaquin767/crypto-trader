@@ -1,6 +1,6 @@
 import { loadConfig, type Config } from "./config.ts";
 import { watch, type MarketSnapshot } from "./market.ts";
-import { analyze, checkImmediateExit, type TradeSignal, clearHistory, getHistory as getPriceHistory } from "./strategy/signals.ts";
+import { analyze, checkImmediateExit, type TradeSignal, clearHistory, getHistory as getPriceHistory, setHistory as setPriceHistory } from "./strategy/signals.ts";
 import { calcPositionSize } from "./strategy/risk.ts";
 import { checkConcurrentPositionsLimit, checkCorrelationLimit } from "./strategy/concentration.ts";
 import { recordTick, seedCandles, takeCompletedCandle, DEFAULT_INTERVAL_MS } from "./strategy/candles.ts";
@@ -852,6 +852,21 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
             })).filter(c => Number.isFinite(c.close)).sort((a, b) => a.openTime - b.openTime);
             if (candles.length > 0) {
               seedCandles(appSymbol, candles);
+              // Also seed the tick-price history the CLASSIC indicators read
+              // (RSI/MACD/SMA/Bollinger/momentum in signals.ts). analyze()
+              // is what appends to it, and since decisions moved to candle
+              // closes that is once per 5m bar — so SMA(20)/Bollinger(20)
+              // would need 100 minutes of uptime, momentum(10) 55, and RSI
+              // 75, with every restart starting from zero. Without this the
+              // strategy runs blind on default indicator values (rsi 50,
+              // momentum 0, upper=middle=lower) and can never reach an
+              // entry score, which is exactly what it did.
+              setPriceHistory(appSymbol, {
+                prices: candles.map(c => c.close),
+                highs: candles.map(c => c.high),
+                lows: candles.map(c => c.low),
+                timestamps: candles.map(c => c.openTime),
+              });
               logger.info(`[model] Backfilled ${candles.length} x ${intervalMinutes}m candles for ${appSymbol} — the entry gate can score immediately instead of waiting ~2.5h for live ticks to fill its window.`);
             }
           } catch (err) {
