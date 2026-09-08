@@ -58,6 +58,16 @@ export interface Config {
    *  if it would sit alongside an existing one this correlated. Default 0.8;
    *  `false` disables the check. */
   maxCorrelation?: number | false;
+
+  // ── Strategy signal-quality (specs/strategy-signal-quality.md §4) ─────
+  /** Consecutive analyze() cycles a NEW-ENTRY signal must agree before it is
+   *  acted on — damps single-tick indicator noise from becoming a real
+   *  trade. Never applies to stop-loss/take-profit. Default 2. */
+  signalConfirmationTicks?: number;
+  /** Minimum ms a position must be held before the noise-prone "expert exit"
+   *  rule (RSI/Bollinger-based) may close it. Stop-loss and take-profit are
+   *  NEVER subject to this. Default 30000 (30s). */
+  minHoldBeforeExpertExitMs?: number;
 }
 
 export class ConfigError extends Error {
@@ -103,6 +113,8 @@ export function loadConfig(path: string): Config {
     cashReservePercent: raw["cashReservePercent"] as number | undefined,
     maxConcurrentPositions: raw["maxConcurrentPositions"] as number | false | undefined,
     maxCorrelation: raw["maxCorrelation"] as number | false | undefined,
+    signalConfirmationTicks: raw["signalConfirmationTicks"] as number | undefined,
+    minHoldBeforeExpertExitMs: raw["minHoldBeforeExpertExitMs"] as number | undefined,
   };
 
   // Validation
@@ -189,6 +201,18 @@ export function loadConfig(path: string): Config {
     (typeof config.maxCorrelation !== "number" || config.maxCorrelation <= 0 || config.maxCorrelation > 1)
   ) {
     throw new ConfigError("config.maxCorrelation must be a number between 0 (exclusive) and 1 (inclusive), or false to disable, if set");
+  }
+  if (
+    config.signalConfirmationTicks !== undefined &&
+    (typeof config.signalConfirmationTicks !== "number" || config.signalConfirmationTicks <= 0 || !Number.isInteger(config.signalConfirmationTicks))
+  ) {
+    throw new ConfigError("config.signalConfirmationTicks must be a positive integer if set");
+  }
+  if (
+    config.minHoldBeforeExpertExitMs !== undefined &&
+    (typeof config.minHoldBeforeExpertExitMs !== "number" || config.minHoldBeforeExpertExitMs < 0)
+  ) {
+    throw new ConfigError("config.minHoldBeforeExpertExitMs must be a non-negative number if set");
   }
 
   return config as Config;

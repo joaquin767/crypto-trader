@@ -199,6 +199,8 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     cashReservePercent: 8,
     maxConcurrentPositions: 3,
     maxCorrelation: 0.75,
+    signalConfirmationTicks: 3,
+    minHoldBeforeExpertExitMs: 45000,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {

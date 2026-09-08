@@ -6,7 +6,9 @@
 > re-scored by a third round — see git history / the fixes noted inline in §1.1 if auditing this
 > further. Ready to hand to implementation; no code has been written against it yet.
 
-Status: **Spec accepted — implementation (Phase 1) not yet started**
+Status: **Phase 1 implemented and tested (317/317 passing). Phase 2 (cost-aware entry gate +
+backtesting harness) not yet started — no further real capital or strategy-tuning trust until it
+ships, per the Phased rollout plan's gate.**
 Owner: crypto-trader strategy engine (`src/strategy/indicators.ts`, `src/strategy/signals.ts`,
 `src/strategy/risk.ts`)
 Purpose: `specs/live-trading-readiness.md` made the *execution* layer safe (leverage pinned,
@@ -439,11 +441,31 @@ net of `totalFees` before shipping.
 ### Phase 0 — this spec
 Self-review via the spec-factory critique loop (rubric v2, threshold 20/24, no dimension at 0).
 
-### Phase 1 (P0) — required before any further real-capital trading on this strategy
-- [ ] §3 stateful/smoothed RSI + MACD (`updateRsi`, `updateMacd`, wired into `analyze()`)
-- [ ] §4 signal-confirmation ticks for new entries + minimum hold before the "expert exit" rule
-  (stop-loss/take-profit untouched, per design principle 3)
-- [ ] Regression tests proving F1/F2's specific mechanisms are fixed (see Testing strategy)
+### Phase 1 (P0) — required before any further real-capital trading on this strategy — ✅ DONE
+- [x] §3 stateful/smoothed RSI + MACD (`updateRsi`, `updateMacd`, wired into `analyze()`; both
+  bootstrap from the classic one-shot formula on first use — identical output to `calcRSI`/
+  `calcMACD` on a freshly seeded window — then smooth incrementally on every later call)
+- [x] §4 signal-confirmation ticks for new entries (`signalConfirmationTicks`, default 2) +
+  minimum hold before the "expert exit" rule (`minHoldBeforeExpertExitMs`, default 30s) —
+  stop-loss/take-profit confirmed untouched, per design principle 3
+- [x] `Position.openedAt` added (optional, not required — see implementation note below)
+- [x] Regression tests proving F1/F2's specific mechanisms are fixed: `updateRsi` swings ~15x
+  less than `calcRSI` on the same spike-then-flat input (empirically measured, not asserted by
+  guess); `updateMacd`'s `bullish` flag confirmed unable to fire on the bootstrap call and
+  confirmed able to fire on a genuine later crossover; new-entry confirmation and expert-exit
+  min-hold each covered by dedicated tests in `tests/signals.test.ts`. 317/317 tests passing,
+  `tsc --noEmit` clean.
+
+**Implementation note — deviation from this spec's literal §4 text:** `Position.openedAt` was
+added as **optional** (`openedAt?: number`), not the required field originally specified, with a
+missing value treated as "age unknown, don't gate" (age = `snapshot.timestamp - (existing.openedAt
+?? 0)`, i.e. effectively infinite, so the expert-exit gate simply doesn't block). This was a
+deliberate implementation-time call: making it required would have forced every existing test and
+call site that constructs a `Position` literal (portfolio/executor/bybit/tui tests, none of which
+care about this field) to be touched for a change that only matters to one non-critical, noise-
+reduction rule — and a reconciled position adopted from the exchange genuinely has no locally-known
+open time. `portfolio.update()`'s "buy" branch always populates it correctly for every position
+this codebase itself opens going forward, which is what the gate actually needs.
 
 ### Phase 2 (P1) — required before trusting any further tuning of this strategy, or scaling capital
 - [ ] §5 cost-aware entry gate (`hasPlausibleEdge`, wired into new-entry evaluation)

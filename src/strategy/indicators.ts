@@ -52,6 +52,60 @@ export function calcRSI(prices: number[], period = 14): number {
   return 100 - (100 / (1 + rs));
 }
 
+// ── Stateful, smoothed RSI (spec: specs/strategy-signal-quality.md §3) ───
+//
+// calcRSI() above recomputes avgGain/avgLoss from scratch over the trailing
+// `period` raw price deltas on every call, with no memory of the previous
+// average — a single new tick fully replaces 1/period of the window's
+// composition, which on real market noise swings the result across its
+// entire 0-100 range within one or two ticks (see F1's live evidence). This
+// carries a running, exponentially-smoothed average between calls instead —
+// real Wilder RSI — while still bootstrapping its very first value from the
+// classic one-shot average (identical arithmetic to calcRSI) so a freshly
+// seeded/cold-started history reflects its whole trend immediately, exactly
+// like calcRSI does today; only calls *after* that first one are smoothed.
+
+export interface RsiState {
+  avgGain: number;
+  avgLoss: number;
+  initialized: boolean;
+}
+
+export const initialRsiState = (): RsiState => ({ avgGain: 0, avgLoss: 0, initialized: false });
+
+function rsiValue(state: RsiState): number {
+  return state.avgLoss === 0 ? 100 : 100 - 100 / (1 + state.avgGain / state.avgLoss);
+}
+
+/**
+ * Update RSI from the full price history. Bootstraps once (same formula as
+ * `calcRSI`) when `state` isn't initialized yet; every subsequent call folds
+ * in only the latest price delta via Wilder's smoothed running average.
+ */
+export function updateRsi(state: RsiState, prices: number[], period = 14): { state: RsiState; value: number } {
+  if (!state.initialized) {
+    if (prices.length < period + 1) return { state, value: 50 };
+    const changes: number[] = [];
+    for (let i = 1; i < prices.length; i++) changes.push(prices[i]! - prices[i - 1]!);
+    const recent = changes.slice(-period);
+    const avgGain = recent.filter(c => c > 0).reduce((a, b) => a + b, 0) / period;
+    const avgLoss = recent.filter(c => c < 0).reduce((a, b) => a - b, 0) / period;
+    const newState: RsiState = { avgGain, avgLoss, initialized: true };
+    return { state: newState, value: rsiValue(newState) };
+  }
+
+  if (prices.length < 2) return { state, value: rsiValue(state) };
+  const priceChange = prices[prices.length - 1]! - prices[prices.length - 2]!;
+  const gain = Math.max(priceChange, 0);
+  const loss = Math.max(-priceChange, 0);
+  const newState: RsiState = {
+    avgGain: (state.avgGain * (period - 1) + gain) / period,
+    avgLoss: (state.avgLoss * (period - 1) + loss) / period,
+    initialized: true,
+  };
+  return { state: newState, value: rsiValue(newState) };
+}
+
 // ── MACD ─────────────────────────────────────────────────────────────────
 
 export function calcMACD(prices: number[]): MACDResult {
@@ -67,6 +121,52 @@ export function calcMACD(prices: number[]): MACDResult {
   const histogram = macdLine - signalLine;
   const prevMacd = macdHistory.length > 1 ? macdHistory[macdHistory.length - 2]! : macdLine;
   return { macdLine, signalLine, histogram, bullish: prevMacd < signalLine && macdLine >= signalLine };
+}
+
+// ── Stateful, smoothed MACD (spec: specs/strategy-signal-quality.md §3) ──
+//
+// calcMACD() above reconstructs several historical MACD values by re-running
+// calcEMA() from scratch over shifting trailing slices every call, then
+// averages them arithmetically to approximate a signal line — a real signal
+// line is itself an EMA (exponentially weighted, with memory), not a flat
+// average recomputed each time (F6). This carries emaFast/emaSlow/signal as
+// running state, bootstrapping emaFast/emaSlow from the classic `calcEMA`
+// over the full window on the first call (so a freshly seeded/cold-started
+// history reflects its whole trend immediately), then folding incrementally.
+
+export interface MacdState {
+  emaFast: number | null;
+  emaSlow: number | null;
+  signal: number | null;
+}
+
+export const initialMacdState = (): MacdState => ({ emaFast: null, emaSlow: null, signal: null });
+
+export function updateMacd(
+  state: MacdState, prices: number[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9,
+): { state: MacdState; result: MACDResult } {
+  if (prices.length === 0) {
+    return { state, result: { macdLine: 0, signalLine: 0, histogram: 0, bullish: false } };
+  }
+  const price = prices[prices.length - 1]!;
+  const kFast = 2 / (fastPeriod + 1);
+  const kSlow = 2 / (slowPeriod + 1);
+  const kSig = 2 / (signalPeriod + 1);
+
+  const emaFast = state.emaFast === null ? calcEMA(prices, fastPeriod) : price * kFast + state.emaFast * (1 - kFast);
+  const emaSlow = state.emaSlow === null ? calcEMA(prices, slowPeriod) : price * kSlow + state.emaSlow * (1 - kSlow);
+  const macdLine = emaFast - emaSlow;
+  // prevMacd: the MACD line implied by the *previous* state, for crossover
+  // detection. On the bootstrap call there is no previous state, so it's
+  // defined equal to this call's own macdLine — that makes `bullish` false
+  // on the bootstrap call (nothing to compare against yet), exactly as
+  // "cannot fire on the very first tick after initialization" requires.
+  const prevMacd = state.emaFast === null ? macdLine : state.emaFast - state.emaSlow!;
+  const signal = state.signal === null ? macdLine : macdLine * kSig + state.signal * (1 - kSig);
+  const histogram = macdLine - signal;
+  const bullish = state.signal !== null && prevMacd < state.signal && macdLine >= signal;
+
+  return { state: { emaFast, emaSlow, signal }, result: { macdLine, signalLine: signal, histogram, bullish } };
 }
 
 // ── Bollinger Bands ──────────────────────────────────────────────────────

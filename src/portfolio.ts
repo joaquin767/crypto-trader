@@ -5,6 +5,12 @@ export interface Position {
   quantity: number;
   entryPrice: number;
   currentPrice: number;
+  /** Set from the opening trade's timestamp (see `update()`'s "buy" branch).
+   *  Optional — not `?? 0` because a stale position (e.g. reconciled from
+   *  the exchange without a locally-known open time) shouldn't have to
+   *  fabricate one; anything reading this treats a missing value as "age
+   *  unknown, don't gate on it" (specs/strategy-signal-quality.md §4). */
+  openedAt?: number;
 }
 
 export interface Portfolio {
@@ -79,6 +85,7 @@ export function update(portfolio: Portfolio, trade: TradeResult): Portfolio {
       quantity: trade.quantity,
       entryPrice: trade.price,
       currentPrice: trade.price,
+      openedAt: trade.timestamp,
     };
     const cost = trade.quantity * trade.price + trade.fee;
     const newCash = Math.max(portfolio.cashUsd - cost, 0);
