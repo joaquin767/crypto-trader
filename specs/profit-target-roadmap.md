@@ -836,6 +836,78 @@ training or tuning to date) rather than the five symbols this sweep has now exha
 
 ---
 
+## 5.12 — The binding constraint, quantified: AUC
+
+§5.10 closed costs, §5.11 closed barrier geometry, and §5.11.2 identified the signal generator as
+the ceiling. This section puts a number on it, which turns out to settle what is and is not worth
+attempting next.
+
+Under a standard binormal ROC model (positives ~ N(d', 1), negatives ~ N(0, 1),
+`d' = √2·Φ⁻¹(AUC)`), a model of a given AUC selecting the top *p* fraction of its own scores yields
+a computable win rate. Against the measured unconditional base rate of **41%** and a break-even of
+**52.08%** (1.5%/1.5% barriers at 0.0625% round trip):
+
+| AUC | top 1% | top 5% | top 20% | top 50% | Can it clear break-even? |
+|---|---|---|---|---|---|
+| **0.546 (ours)** | **51.8%** | 49.3% | 46.6% | 44.2% | **no — short by 0.32pp at best** |
+| 0.573 | 58.1% | 54.3% | 49.9% | 46.0% | yes |
+| 0.600 | 64.4% | 59.2% | 53.3% | 47.9% | yes |
+| 0.650 | 75.1% | 68.3% | 59.7% | 51.4% | yes |
+
+**The minimum AUC that can break even at any selectivity is 0.547. The model scores 0.546.**
+
+The system is sitting almost exactly on the knife edge, and this single fact explains every result
+in §5.7–§5.11 at once:
+
+- why it loses **slightly** rather than catastrophically;
+- why top-20% beat top-5% (real, but tiny differences across a nearly flat landscape);
+- why no barrier geometry helped — **none of them change AUC**;
+- why zero fees still lost: free trading drops break-even to 50.0%, which top-1% selection *would*
+  clear at 51.8% — but the deployed gate is top-5%, worth only 49.3%.
+
+### 5.12.1 — This retracts the follow-up proposed in §5.11.3
+
+§5.11.3 suggested that letting the model *generate* entries instead of filtering them was the
+remaining untested axis. **The table above already answers it, and the answer is no.** AUC 0.546 is
+measured over the entire bar universe — which is precisely the regime a generate-entries
+architecture would operate in. Deployed at its most aggressive practical selectivity it falls
+**0.32pp short** of break-even. Building it would spend days to arrive at a predicted near-miss.
+
+Recorded rather than quietly dropped: it was proposed here, and the arithmetic that kills it arrived
+afterwards.
+
+### 5.12.2 — The one target that matters
+
+**Out-of-sample AUC ≥ 0.58**, which affords a comfortable 55.5% win rate at a practical top-5% gate.
+Every other lever this spec has tested is downstream of that number, and none of them move it.
+
+The honest read on reaching it: 0.546 → 0.58 is a large jump for this problem, and it will not come
+from a better *fit* to the same inputs. The current 21 features are all OHLC-derived on 5m/dollar
+bars, including 5 order-flow *proxies* — genuine order-flow imbalance was researched and refuted as
+computable from OHLC. It needs better **information**: true tick/trade data, order-book depth,
+funding rates, cross-asset structure. That is A-6, deferred, and it is a weeks-long infrastructure
+project with a genuinely uncertain payoff.
+
+### 5.12.3 — Expected value at this capital scale
+
+Before committing to that project, §2.4's arithmetic deserves restating: at $100–$3,000 of capital,
+**even a fully successful outcome contributes ~17% of the final balance** — a few hundred dollars
+over a year, against deposits of several thousand. The deposits are the growth engine in every
+branch.
+
+That does not make the work worthless, but it does mean it cannot be justified as an income project
+at this scale. It can be justified as a research or engineering project, which is a different
+decision and should be made as one.
+
+**If continuing, the cheap gate first:** before building any tick-data infrastructure, test whether
+AUC ≥ 0.58 is reachable *at all* using data obtainable for free (cross-symbol features, funding
+rates, longer context, non-linear models). That is days, not weeks, it uses the untouched held-out
+universe (AVAXUSDT/DOTUSDT/INJUSDT) exactly once, and it has a clean go/no-go: **if nothing reaches
+0.58 out of sample, stop — the infrastructure project cannot rescue what the information cannot
+support.**
+
+---
+
 ---
 
 ## 6. Gate 1 — Attribution & portfolio safety (P0, hours)
