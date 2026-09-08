@@ -72,7 +72,7 @@ export interface DashboardState {
   // held-out AUC it was measured at, and the barriers/horizon it was
   // trained to predict. Surfaced so the dashboard states what genuinely
   // drives entries, rather than parameters nothing reads.
-  model?: { enabled: boolean; minProbability: number; testAuc: number; horizonBars: number; interval: string; tp: number; sl: number } | null;
+  model?: { enabled: boolean; minProbability: number; testAuc: number; horizonBars: number; interval: string; tp: number; sl: number; horizonHours: number; barKind: string } | null;
 }
 
 /**

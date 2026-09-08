@@ -121,6 +121,13 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
     interval: loadedModel.trainedOn.interval,
     tp: loadedModel.trainedOn.takeProfitPercent,
     sl: loadedModel.trainedOn.stopLossPercent,
+    // A dollar-bar model has no fixed bar interval, so reporting
+    // "N x 5m" would misstate the horizon by ~5x. Report real elapsed time.
+    horizonHours: (loadedModel.trainedOn.horizonBars
+      * (loadedModel.trainedOn.avgBarMs ?? Number.parseFloat(loadedModel.trainedOn.interval) * 60_000)) / 3_600_000,
+    barKind: (loadedModel.trainedOn.timeBarsPerDollarBar ?? 0) > 1
+      ? `dollar bars (~${Math.round((loadedModel.trainedOn.avgBarMs ?? 0) / 60_000)}m avg)`
+      : `${loadedModel.trainedOn.interval}m time bars`,
   };
 
   let lastSignal: TradeSignal | null = null;
@@ -599,7 +606,9 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
 
     logger.info(`Performance: win rate ${(performanceReport.winRate * 100).toFixed(1)}% | closed trades: ${closedTrades.length}`);
 
-    broadcast("learning", { report: performanceReport });
+    // Key must match what the dashboard reads (performanceReport); it was
+    // "report", which meant this event silently updated nothing.
+    broadcast("learning", { performanceReport });
   }
 
   // ── Main timer loop ────────────────────────────────────────────────

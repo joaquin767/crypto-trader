@@ -216,7 +216,22 @@ setInterval(() => { $('clock').textContent = new Date().toLocaleTimeString(); },
 
 /* ── SSE ─────────────────────────────────────────────────── */
 const es = new EventSource('/events');
-const onData = e => { try { render(JSON.parse(e.data)); } catch (_) {} };
+
+// Server events carry DIFFERENT SUBSETS of state: "market" sends everything,
+// "trade" sends only tradeHistory+performanceReport, "learning" only the
+// report. Rendering each payload as if it were complete made every field
+// absent from a partial event blink to its empty state — most visibly
+// "Entry model: off" while the model was demonstrably on, and the status
+// line vanishing every few seconds. So accumulate into one client-side
+// state object and render from that; a partial update now updates its own
+// fields and leaves the rest alone.
+let state = {};
+const onData = e => {
+  try {
+    state = { ...state, ...JSON.parse(e.data) };
+    render(state);
+  } catch (_) {}
+};
 ['message', 'init', 'market', 'trade', 'learning'].forEach(ev => es.addEventListener(ev, onData));
 es.onerror = () => {
   const c = $('conn'); c.className = 'pill off';
@@ -454,7 +469,8 @@ function renderStrategy(d) {
     // anything: 0.50 is a coin flip. Shown next to the threshold so the
     // gate is never mistaken for more certainty than it has.
     add('Model test AUC', d.model.testAuc.toFixed(3), d.model.testAuc >= 0.55 ? 'up' : 'warn');
-    add('Trained to predict', `+${d.model.tp}% before -${d.model.sl}% in ${d.model.horizonBars} x ${esc(d.model.interval)}m`, 'dim');
+    add('Trained to predict', `+${d.model.tp}% before -${d.model.sl}% within ${Number(d.model.horizonHours).toFixed(1)}h`, 'dim');
+    add('Sampling', esc(d.model.barKind || 'time bars'), 'dim');
   } else {
     add('Entry model', 'off', 'dim');
   }
@@ -498,7 +514,7 @@ function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-fetch('/api/state').then(r => r.json()).then(render).catch(() => {});
+fetch('/api/state').then(r => r.json()).then(d => { state = { ...state, ...d }; render(state); }).catch(() => {});
 </script>
 </body>
 </html>
