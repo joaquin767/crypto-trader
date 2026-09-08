@@ -506,7 +506,20 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
   // Runs trading cycle + learning + UI update at refreshIntervalMs
   let bybit: BybitConnector | undefined;
 
+  // Reentrancy guard — a live order can take several seconds to confirm
+  // (see pollForFill in bybit/connector.ts), which can exceed
+  // refreshIntervalMs. Without this guard, the next timer tick would start a
+  // second runTradingCycle() while the first is still awaiting its order,
+  // and both would read the same pre-update `portfolio` and see no open
+  // position yet — silently doubling up a real entry. One tick is dropped
+  // (logged, not swallowed) rather than letting cycles overlap.
+  let cycleInFlight = false;
   const timer = setInterval(async () => {
+    if (cycleInFlight) {
+      logger.warn("[main] Skipping this tick — previous trading cycle is still in flight (likely waiting on an order fill).");
+      return;
+    }
+    cycleInFlight = true;
     try {
       await runTradingCycle();
       const now = Date.now();
@@ -517,6 +530,8 @@ export async function start(config: Config, signal?: AbortSignal): Promise<void>
       updateDashboardAndUI();
     } catch (err) {
       logger.error("Error in trading cycle:", err);
+    } finally {
+      cycleInFlight = false;
     }
   }, config.refreshIntervalMs);
 
