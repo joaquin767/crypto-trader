@@ -36,3 +36,11 @@ data/klines-365/
 # 🔒 Config backups also carry API keys — config.*.json doesn't match these.
 config.json.bak*
 config.json.bak-*
+
+# Freqtrade cross-check: generated inputs/outputs and the venv. The strategy,
+# config, scripts and README ARE committed — see crosscheck/README.md.
+crosscheck/.venv/
+crosscheck/user_data/data/
+crosscheck/user_data/backtest_results/
+crosscheck/entry_signals.json
+data/validation/crosscheck/

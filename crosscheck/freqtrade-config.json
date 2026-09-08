@@ -1,0 +1,66 @@
+{
+  "$comment": "Freqtrade config for the cross-check. Contains no credentials — the exchange block is present only because freqtrade requires one, and every run is a backtest against local files. See crosscheck/README.md.",
+  "max_open_trades": -1,
+  "stake_currency": "USDT",
+  "stake_amount": 25,
+  "tradable_balance_ratio": 1.0,
+  "fiat_display_currency": "USD",
+  "dry_run": true,
+  "dry_run_wallet": 1000000,
+  "cancel_open_orders_on_exit": false,
+  "trading_mode": "spot",
+  "margin_mode": "",
+  "timeframe": "5m",
+
+  "$comment_sizing": "A fixed 25 USDT stake against a deliberately huge wallet, with unlimited concurrent trades. The TypeScript engine backtests each symbol independently against its own 100 USD portfolio, so pairs never compete for capital there; an unbounded wallet reproduces that. Absolute P&L is therefore NOT the comparison metric — per-trade gross return % and exit reason are, and those are sizing-independent.",
+
+  "unfilledtimeout": {
+    "entry": 10,
+    "exit": 10,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": false,
+    "order_book_top": 1,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": { "enabled": false, "bids_to_ask_delta": 1 }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": false,
+    "order_book_top": 1
+  },
+
+  "exchange": {
+    "name": "bybit",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": [
+      "APT/USDT",
+      "ARB/USDT",
+      "LINK/USDT",
+      "OP/USDT",
+      "SOL/USDT"
+    ],
+    "pair_blacklist": []
+  },
+
+  "pairlists": [{ "method": "StaticPairList" }],
+
+  "$comment_fees": "0.055% per side, matching simulatedTakerFeePercent in the TypeScript cross-check config. Both legs are taker in this comparison: post-only entries are disabled on the TypeScript side because freqtrade does not model a resting bid the same way, and that fill model would dominate the diff.",
+  "fee": 0.00055,
+
+  "dataformat_ohlcv": "json",
+  "user_data_dir": "user_data",
+  "datadir": "user_data/data",
+
+  "internals": { "process_throttle_secs": 5 },
+  "bot_name": "crosscheck",
+  "initial_state": "stopped",
+  "force_entry_enable": false
+}

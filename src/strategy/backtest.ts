@@ -53,7 +53,14 @@ export interface BacktestReport {
 export interface ClosedTrade {
   entryTime: number;
   exitTime: number;
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
   pnl: number;
+  /** Gross price move, entry to exit, in percent — fees excluded. The
+   *  engine-independent way to compare this trade against another
+   *  backtester's, whose position sizing will differ. */
+  grossReturnPercent: number;
   exitReason: ExitReason;
 }
 
@@ -215,7 +222,11 @@ export async function runBacktest(
             trades.push({
               entryTime: openEntry.entryTime,
               exitTime: candle.openTime,
+              entryPrice: openEntry.price,
+              exitPrice: result.price,
+              quantity: result.quantity,
               pnl,
+              grossReturnPercent: ((result.price - openEntry.price) / openEntry.price) * 100,
               exitReason: classifyExitReason(signal.reason),
             });
             totalFees += result.fee;
