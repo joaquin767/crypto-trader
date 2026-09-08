@@ -123,6 +123,20 @@ export interface Config {
   /** How long to let an unfilled post-only entry rest before cancelling it.
    *  Default 5000ms. */
   postOnlyTimeoutMs?: number;
+  /** How many bars a post-only entry may rest in the BACKTEST before it is
+   *  cancelled unfilled. Default 1.
+   *
+   *  This is the backtest's analogue of postOnlyTimeoutMs, and the two
+   *  should describe the same duration: postOnlyTimeoutMs should be roughly
+   *  postOnlyRestBars x the bar interval. Note that the live default of
+   *  5000ms against a 5-minute bar is 1.7% of a bar — a resting time so
+   *  short it is barely modellable here, and arguably too short to be
+   *  worth resting at all. See the fill-model note in backtest.ts. */
+  postOnlyRestBars?: number;
+  /** Half-spread (percent of price) a post-only order rests behind the last
+   *  trade, since it sits at the bid rather than at the close. Default 0.01,
+   *  measured from APT/USDT's observed ~0.0156% testnet spread. */
+  postOnlyHalfSpreadPercent?: number;
 }
 
 export class ConfigError extends Error {
@@ -177,6 +191,8 @@ export function loadConfig(path: string): Config {
     simulatedTakerFeePercent: raw["simulatedTakerFeePercent"] as number | undefined,
     usePostOnlyEntries: raw["usePostOnlyEntries"] as boolean | undefined,
     postOnlyTimeoutMs: raw["postOnlyTimeoutMs"] as number | undefined,
+    postOnlyRestBars: raw["postOnlyRestBars"] as number | undefined,
+    postOnlyHalfSpreadPercent: raw["postOnlyHalfSpreadPercent"] as number | undefined,
   };
 
   // Validation
@@ -305,6 +321,18 @@ export function loadConfig(path: string): Config {
     (typeof config.postOnlyTimeoutMs !== "number" || config.postOnlyTimeoutMs <= 0)
   ) {
     throw new ConfigError("config.postOnlyTimeoutMs must be a positive number if set");
+  }
+  if (
+    config.postOnlyRestBars !== undefined &&
+    (typeof config.postOnlyRestBars !== "number" || config.postOnlyRestBars < 1 || !Number.isInteger(config.postOnlyRestBars))
+  ) {
+    throw new ConfigError("config.postOnlyRestBars must be a positive integer if set");
+  }
+  if (
+    config.postOnlyHalfSpreadPercent !== undefined &&
+    (typeof config.postOnlyHalfSpreadPercent !== "number" || config.postOnlyHalfSpreadPercent < 0)
+  ) {
+    throw new ConfigError("config.postOnlyHalfSpreadPercent must be a non-negative number if set");
   }
 
   return config as Config;

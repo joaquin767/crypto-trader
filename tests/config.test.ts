@@ -208,6 +208,8 @@ test("loadConfig round-trips every Config field (regression: a field can silentl
     simulatedTakerFeePercent: 0.055,
     usePostOnlyEntries: true,
     postOnlyTimeoutMs: 4000,
+    postOnlyRestBars: 2,
+    postOnlyHalfSpreadPercent: 0.015,
   };
   writeFileSync(path, JSON.stringify(raw));
   try {

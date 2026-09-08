@@ -28,6 +28,11 @@ export interface BacktestReport {
   symbol: string;
   candleCount: number;
   closedTrades: number;
+  /** Post-only entries that rested, and how many actually filled. A low
+   *  fill rate is the signal that the maker discount is being paid for in
+   *  missed trades — and those misses are adversely selected. */
+  restingPlaced?: number;
+  restingFilled?: number;
   winRate: number;
   totalPnl: number;
   totalFees: number;
@@ -52,6 +57,8 @@ export interface BacktestReport {
  * don't run this concurrently with a live session or another backtest in
  * the same process.
  */
+const signalPlaceholder = null as unknown as Awaited<ReturnType<typeof analyze>>;
+
 export async function runBacktest(
   candles: Candle[],
   symbol: string,
@@ -65,6 +72,27 @@ export async function runBacktest(
   const equityCurve: number[] = [portfolio.totalValueUsd];
   let totalFees = 0;
   let openEntry: { price: number; quantity: number; fee: number } | null = null;
+
+  // ── Post-only fill model ────────────────────────────────────────────
+  // Previously every post-only entry was assumed to fill at the decision
+  // bar's close. That is false, and false in the direction that flatters
+  // results: a resting bid only fills if price actually trades DOWN to it,
+  // so you fill when the market comes back to you and miss when it runs
+  // away — i.e. you systematically capture the losers and skip the winners.
+  // Observed live on 2026-09-08: six consecutive post-only entries failed to
+  // fill while APT rose, then one filled when price came back.
+  //
+  // Modelled here as a real resting order: it sits at the bid (the close
+  // less a half-spread), and fills only if a later bar's LOW reaches it,
+  // within postOnlyRestBars. Fill price is the resting price, which is the
+  // whole point of paying maker.
+  //
+  // Known limitation, stated rather than hidden: OHLC cannot model queue
+  // position. A real order at the touch may still not fill when price only
+  // grazes the level, so even this is an upper bound — just a far tighter
+  // one than "always fills".
+  let resting: { price: number; barsLeft: number; positionUsd: number; signal: typeof signalPlaceholder } | null = null;
+  let restingPlaced = 0, restingFilled = 0, restingCancelled = 0;
 
   for (let i = 0; i < candles.length; i++) {
     const candle = candles[i]!;
@@ -87,14 +115,54 @@ export async function runBacktest(
       symbol, side: "hold", quantity: 0, price: snapshot.price, fee: 0, timestamp: snapshot.timestamp,
     });
 
+    // A resting post-only entry is resolved against THIS bar before any new
+    // decision: did price trade down to our bid, or has it timed out?
+    if (resting !== null) {
+      if (candle.low <= resting.price) {
+        const fillSnapshot: MarketSnapshot = { ...snapshot, price: resting.price };
+        const result = await execute(resting.signal, config, portfolio, fillSnapshot, resting.positionUsd);
+        if (result.side === "buy" && result.quantity > 0) {
+          try {
+            portfolio = updatePortfolio(portfolio, result);
+            openEntry = { price: result.price, quantity: result.quantity, fee: result.fee };
+            totalFees += result.fee;
+            restingFilled += 1;
+          } catch { /* corrupted result — skip, as elsewhere */ }
+        }
+        resting = null;
+      } else if (--resting.barsLeft <= 0) {
+        resting = null;
+        restingCancelled += 1;
+      }
+    }
+
     const signal = analyze(snapshot, portfolio, config);
     const hasPosition = portfolio.positions.some(p => p.symbol === symbol);
-    const actionable = (signal.type === "buy" || signal.type === "sell") && !(signal.type === "sell" && !hasPosition);
+    // Don't stack a new entry on top of one already resting.
+    const actionable = (signal.type === "buy" || signal.type === "sell")
+      && !(signal.type === "sell" && !hasPosition)
+      && !(signal.type === "buy" && resting !== null);
 
     if (actionable) {
       const positionUsd = signal.type === "buy"
         ? calcPositionSize(portfolio, config, signal.indicators.atr, snapshot.price)
         : 0;
+
+      // Post-only entries rest instead of executing immediately. Closes are
+      // never post-only (see config.usePostOnlyEntries) so a sell falls
+      // through to the immediate path below, as it does live.
+      if (signal.type === "buy" && config.usePostOnlyEntries && positionUsd > 0) {
+        const halfSpread = (config.postOnlyHalfSpreadPercent ?? 0.01) / 100;
+        resting = {
+          price: snapshot.price * (1 - halfSpread),
+          barsLeft: config.postOnlyRestBars ?? 1,
+          positionUsd,
+          signal,
+        };
+        restingPlaced += 1;
+        equityCurve.push(portfolio.totalValueUsd);
+        continue;
+      }
 
       if (!(signal.type === "buy" && positionUsd <= 0)) {
         const result = await execute(signal, config, portfolio, snapshot, positionUsd);
@@ -124,6 +192,8 @@ export async function runBacktest(
     symbol,
     candleCount: candles.length,
     closedTrades: pnls.length,
+    restingPlaced,
+    restingFilled,
     winRate: calcWinRate(pnls),
     totalPnl: pnls.reduce((a, b) => a + b, 0),
     totalFees,
