@@ -1,9 +1,10 @@
-// Aggregates every Phase 1 source adapter. `coinalyze-oi` is a valid SourceId (§5.1) but has
+// Aggregates every source adapter. `coinalyze-oi` is a valid SourceId (§5.1) but has
 // no adapter until Phase 6 (§9) — it is intentionally absent here.
 
 import type { AdapterDeps } from "../http.ts";
 import type { SourceAdapter } from "../types.ts";
 import { createBybitFundingAdapter } from "./bybit-funding.ts";
+import { createBybitInstrumentsAdapter } from "./bybit-instruments.ts";
 import { createBybitKlines1dAdapter, createBybitKlines1hAdapter } from "./bybit-klines.ts";
 import { createBybitOiAdapter } from "./bybit-oi.ts";
 import { createDefillamaStablecoinsAdapter } from "./defillama-stablecoins.ts";
@@ -19,6 +20,7 @@ export function createAllSourceAdapters(deps: AdapterDeps): SourceAdapter[] {
     createBybitKlines1hAdapter(deps),
     createBybitFundingAdapter(deps),
     createBybitOiAdapter(deps),
+    createBybitInstrumentsAdapter(deps),
     createFarsideBtcAdapter(deps),
     createFarsideEthAdapter(deps),
     createFredReleaseDatesAdapter(deps),
@@ -30,15 +32,16 @@ export function createAllSourceAdapters(deps: AdapterDeps): SourceAdapter[] {
 }
 
 export {
+  createBybitFundingAdapter,
+  createBybitInstrumentsAdapter,
   createBybitKlines1dAdapter,
   createBybitKlines1hAdapter,
-  createBybitFundingAdapter,
   createBybitOiAdapter,
+  createDefillamaStablecoinsAdapter,
   createFarsideBtcAdapter,
   createFarsideEthAdapter,
+  createFearGreedAdapter,
   createFredReleaseDatesAdapter,
   createMacroCalendarManualAdapter,
-  createDefillamaStablecoinsAdapter,
-  createFearGreedAdapter,
   createUnlocksManualAdapter,
 };

@@ -27,6 +27,7 @@ export const DEFAULT_STALENESS_MS: Readonly<Record<SourceId, number>> = {
   "bybit-klines-1h": 2 * HOUR_MS,
   "bybit-funding": 9 * HOUR_MS,
   "bybit-oi": 26 * HOUR_MS,
+  "bybit-instruments": 7 * DAY_MS, // not a feature source — staleness value kept here for completeness only
   "coinalyze-oi": 26 * HOUR_MS, // Phase 6; no adapter yet, value unused in Phase 1
   "farside-btc-etf": 4 * DAY_MS,
   "farside-eth-etf": 4 * DAY_MS,

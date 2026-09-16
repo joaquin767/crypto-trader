@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 
 import type { AdapterDeps } from "../src/research/http.ts";
 import { createBybitFundingAdapter } from "../src/research/sources/bybit-funding.ts";
+import { createBybitInstrumentsAdapter } from "../src/research/sources/bybit-instruments.ts";
 import { createBybitKlines1dAdapter } from "../src/research/sources/bybit-klines.ts";
 import { createBybitOiAdapter } from "../src/research/sources/bybit-oi.ts";
 import { createDefillamaStablecoinsAdapter } from "../src/research/sources/defillama-stablecoins.ts";
@@ -115,6 +116,42 @@ test("bybit-oi: parses open-interest rows", async () => {
   assert.equal(snap.status, "ok");
   assert.equal(snap.rows.length, 4);
   assert.equal(snap.rows[0]!.field, "oi");
+});
+
+// ── bybit-instruments ────────────────────────────────────────────────────────────────────────
+
+test("bybit-instruments: parses lotSizeFilter into 3 rows keyed by symbol, availableAt = fetchedAt", async () => {
+  const deps = fakeDeps({ fetch: jsonFetch(readFixture("bybit-instruments-response.json")) });
+  const adapter = createBybitInstrumentsAdapter(deps);
+  const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+  assert.equal(snap.status, "ok");
+  assert.equal(snap.rows.length, 3);
+  const minOrderQty = snap.rows.find((r) => r.field === "minOrderQty");
+  assert.equal(minOrderQty?.value, 0.001);
+  assert.equal(minOrderQty?.key, "BTC/USDT");
+  assert.equal(minOrderQty?.availableAt, NOW);
+  const qtyStep = snap.rows.find((r) => r.field === "qtyStep");
+  assert.equal(qtyStep?.value, 0.001);
+  const minNotionalValue = snap.rows.find((r) => r.field === "minNotionalValue");
+  assert.equal(minNotionalValue?.value, 5);
+});
+
+test("bybit-instruments: a network error yields status unavailable, never throws", async () => {
+  const deps = fakeDeps({ fetch: rejectingFetch("DNS failure") });
+  const adapter = createBybitInstrumentsAdapter(deps);
+  const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+  assert.equal(snap.status, "unavailable");
+  assert.deepEqual(snap.rows, []);
+});
+
+test("bybit-instruments: a missing lotSizeFilter is invalid with zero rows", async () => {
+  const deps = fakeDeps({
+    fetch: jsonFetch(JSON.stringify({ retCode: 0, retMsg: "OK", result: { list: [{ symbol: "BTCUSDT" }] } })),
+  });
+  const adapter = createBybitInstrumentsAdapter(deps);
+  const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+  assert.equal(snap.status, "invalid");
+  assert.deepEqual(snap.rows, []);
 });
 
 // ── fred-release-dates ───────────────────────────────────────────────────────────────────────

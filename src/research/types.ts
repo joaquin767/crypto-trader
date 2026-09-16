@@ -3,7 +3,7 @@
 // are verbatim from that section unless noted.
 
 export type SourceId =
-  | "bybit-klines-1d" | "bybit-klines-1h" | "bybit-funding" | "bybit-oi"
+  | "bybit-klines-1d" | "bybit-klines-1h" | "bybit-funding" | "bybit-oi" | "bybit-instruments"
   | "coinalyze-oi" | "farside-btc-etf" | "farside-eth-etf" | "fred-release-dates"
   | "macro-calendar-manual" | "defillama-stablecoins" | "fear-greed" | "unlocks-manual";
 
