@@ -388,6 +388,7 @@ export interface PlannerConfig {
   maintenanceMarginRate: number;   // new; default 0.005, used only for the planning estimate
   minLiqToStopRatio: number;       // new; default 2.0
   roundTripFeePercent: number;     // new; default 0.11 (taker 0.055% × 2)
+  maxOpenManualTrades: number;     // from ManualTradingConfig; compared against openTradeCount
 }
 
 export type TradePlan =
@@ -399,7 +400,7 @@ export type TradePlan =
       estLiquidationPrice: number; liqToStopRatio: number; estRoundTripFeeUsd: number;
       venueIntent: "paper" | "live";  // "live" only if rule.status === "paper-passed" (§8)
     }
-  | { kind: "rejected"; ruleId: string; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing" };
+  | { kind: "rejected"; ruleId: string; origin: "rules-file" | "ai-analyst"; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing" };
 
 /** Pure. Returns 1 unless rule.status === "paper-passed";
  *  then liveLadderCap if liveClosedTradesForRule < 20 or ladderResetByBreaker, else maxLeverage. */
@@ -464,6 +465,9 @@ export interface DailyReport {
   aiAnalyst: AiAnalystSection;                // §5.13; status "disabled" when ai.enabled is false
   disclaimer: "Generated analysis for the owner's review. Not investment advice.";
 }
+
+// buildReport evaluates the rule set itself (evaluateRule → planTrade with the running open-trade counter), so
+// `outcomes` and rule `plans` are outputs, not inputs. Renderers split channels by `origin`, never by position.
 
 /** Pure. Appends ai.plans to plans (after rule plans) and sets aiAnalyst. Never modifies an existing plan. */
 export function attachAiAnalyst(report: DailyReport, ai: AiAnalystSection): DailyReport;

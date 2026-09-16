@@ -171,6 +171,46 @@ export interface Config {
    *  trade, since it sits at the bid rather than at the close. Default 0.01,
    *  measured from APT/USDT's observed ~0.0156% testnet spread. */
   postOnlyHalfSpreadPercent?: number;
+
+  // ── Daily catalyst manual trading (specs/daily-catalyst-manual-trading.md §5.11) ──────────
+  /** Manual trading pipeline settings (research:daily / planner / journal). Presence of this
+   *  key (even `{}`) turns on the revision-1 hard cap: riskPerTradePercent <= 1. */
+  manual?: Partial<ManualTradingConfig>;
+}
+
+/** specs/daily-catalyst-manual-trading.md §5.11. Every field has a spec-defined default, so
+ *  `config.manual` may be a partial override of any subset of them. */
+export interface ManualTradingConfig {
+  maxLeverage: number; // integer 1..5, default 2
+  liveLadderCap: number; // integer 1..maxLeverage, default 2
+  // riskPerTradePercent (existing Config field) is validated <= 1 whenever `manual` is present (revision 1 hard cap)
+  marginBudgetPercent: number; // (0,100], default 25
+  maintenanceMarginRate: number; // default 0.005
+  minLiqToStopRatio: number; // >= 1.5, default 2.0
+  roundTripFeePercent: number; // default 0.11
+  maxOpenManualTrades: number; // integer 1..5, default 3
+  decisionTimeUtc: "00:15"; // fixed in revision 1
+  staleAfterMs: number; // dashboard sync staleness, default 120_000
+  journalPort: number; // default 3082
+}
+
+export const DEFAULT_MANUAL_TRADING_CONFIG: ManualTradingConfig = {
+  maxLeverage: 2,
+  liveLadderCap: 2,
+  marginBudgetPercent: 25,
+  maintenanceMarginRate: 0.005,
+  minLiqToStopRatio: 2.0,
+  roundTripFeePercent: 0.11,
+  maxOpenManualTrades: 3,
+  decisionTimeUtc: "00:15",
+  staleAfterMs: 120_000,
+  journalPort: 3082,
+};
+
+/** Merges `config.manual` (if any) over the spec's revision-1 defaults. loadConfig already
+ *  validated any override present, so this never throws. */
+export function resolveManualTradingConfig(config: Pick<Config, "manual">): ManualTradingConfig {
+  return { ...DEFAULT_MANUAL_TRADING_CONFIG, ...config.manual };
 }
 
 export class ConfigError extends Error {
@@ -230,6 +270,14 @@ export function loadConfig(path: string): Config {
     postOnlyRestBars: raw["postOnlyRestBars"] as number | undefined,
     postOnlyHalfSpreadPercent: raw["postOnlyHalfSpreadPercent"] as number | undefined,
   };
+  // Assigned conditionally (not inline above, unlike every other optional field) so an absent
+  // `manual` key never becomes an explicit `manual: undefined` own-property on the returned
+  // object — tests/config.test.ts's exhaustive round-trip test asserts deepEqual against a raw
+  // fixture that (correctly) omits keys it never set, and `assert/strict`'s deepEqual does
+  // distinguish an explicit `undefined` value from a genuinely absent key.
+  if (raw["manual"] !== undefined) {
+    config.manual = raw["manual"] as Partial<ManualTradingConfig>;
+  }
 
   // Validation
   if (!config.exchange || typeof config.exchange !== "string") {
@@ -380,5 +428,75 @@ export function loadConfig(path: string): Config {
     throw new ConfigError("config.postOnlyHalfSpreadPercent must be a non-negative number if set");
   }
 
+  if (config.manual !== undefined) {
+    validateManualTradingConfig(config.manual);
+    // Revision-1 hard cap (§5.11): presence of `manual` forces the existing riskPerTradePercent
+    // field down to <= 1, regardless of the 100-cap validated above for the base scalper.
+    if (config.riskPerTradePercent !== undefined && config.riskPerTradePercent > 1) {
+      throw new ConfigError("config.riskPerTradePercent must be <= 1 when config.manual is present (revision 1 hard cap)");
+    }
+  }
+
   return config as Config;
+}
+
+function validateManualTradingConfig(manual: Partial<ManualTradingConfig>): void {
+  if (manual.maxLeverage !== undefined) {
+    if (typeof manual.maxLeverage !== "number" || !Number.isInteger(manual.maxLeverage) || manual.maxLeverage < 1 || manual.maxLeverage > 5) {
+      throw new ConfigError("config.manual.maxLeverage must be an integer in 1..5 if set");
+    }
+  }
+  const effectiveMaxLeverage = manual.maxLeverage ?? DEFAULT_MANUAL_TRADING_CONFIG.maxLeverage;
+  if (manual.liveLadderCap !== undefined) {
+    if (
+      typeof manual.liveLadderCap !== "number" || !Number.isInteger(manual.liveLadderCap) ||
+      manual.liveLadderCap < 1 || manual.liveLadderCap > effectiveMaxLeverage
+    ) {
+      throw new ConfigError(`config.manual.liveLadderCap must be an integer in 1..${effectiveMaxLeverage} (config.manual.maxLeverage) if set`);
+    }
+  }
+  if (manual.marginBudgetPercent !== undefined) {
+    if (typeof manual.marginBudgetPercent !== "number" || manual.marginBudgetPercent <= 0 || manual.marginBudgetPercent > 100) {
+      throw new ConfigError("config.manual.marginBudgetPercent must be a number in (0, 100] if set");
+    }
+  }
+  if (manual.maintenanceMarginRate !== undefined) {
+    if (typeof manual.maintenanceMarginRate !== "number" || manual.maintenanceMarginRate <= 0) {
+      throw new ConfigError("config.manual.maintenanceMarginRate must be a positive number if set");
+    }
+  }
+  if (manual.minLiqToStopRatio !== undefined) {
+    if (typeof manual.minLiqToStopRatio !== "number" || manual.minLiqToStopRatio < 1.5) {
+      throw new ConfigError("config.manual.minLiqToStopRatio must be a number >= 1.5 if set");
+    }
+  }
+  if (manual.roundTripFeePercent !== undefined) {
+    if (typeof manual.roundTripFeePercent !== "number" || manual.roundTripFeePercent < 0) {
+      throw new ConfigError("config.manual.roundTripFeePercent must be a non-negative number if set");
+    }
+  }
+  if (manual.maxOpenManualTrades !== undefined) {
+    if (
+      typeof manual.maxOpenManualTrades !== "number" || !Number.isInteger(manual.maxOpenManualTrades) ||
+      manual.maxOpenManualTrades < 1 || manual.maxOpenManualTrades > 5
+    ) {
+      throw new ConfigError("config.manual.maxOpenManualTrades must be an integer in 1..5 if set");
+    }
+  }
+  if (manual.decisionTimeUtc !== undefined && manual.decisionTimeUtc !== "00:15") {
+    throw new ConfigError('config.manual.decisionTimeUtc must be "00:15" (fixed in revision 1) if set');
+  }
+  if (manual.staleAfterMs !== undefined) {
+    if (typeof manual.staleAfterMs !== "number" || manual.staleAfterMs <= 0) {
+      throw new ConfigError("config.manual.staleAfterMs must be a positive number if set");
+    }
+  }
+  if (manual.journalPort !== undefined) {
+    if (
+      typeof manual.journalPort !== "number" || !Number.isInteger(manual.journalPort) ||
+      manual.journalPort < 1 || manual.journalPort > 65535
+    ) {
+      throw new ConfigError("config.manual.journalPort must be an integer port number if set");
+    }
+  }
 }

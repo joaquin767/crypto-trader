@@ -15,7 +15,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | Phase | What it gives you | Status |
 |-------|-------------------|--------|
 | 1 — Data foundation | `npm run snapshot:daily`: fetch sources, save point-in-time snapshots, compute features | ✅ Built |
-| 2 — Rules, planner, report | `npm run research:daily`: rules → sized trade plans → daily report | 🚧 In progress |
+| 2 — Rules, planner, report | `npm run research:daily`: rules → sized trade plans → daily report | ✅ Built |
 | 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ⏳ Planned |
 | 4 — Backtest & gates | `npm run backtest:daily`: Gate D0 (holdout) and Gate D1 (paper) verdicts | ⏳ Planned |
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas | ⏳ Planned |
@@ -93,7 +93,8 @@ Why the AI skips D0: its training data runs to May 2026, inside the holdout wind
 | `FRED_API_KEY` | Free key from FRED, exported in your shell | `hoursToNextCpi` |
 | `data/manual/macro-calendar.json` | FOMC statement times (UTC). Seeded with the remaining 2026 meetings; keep `asOf` fresh (≤ 120 days) | `hoursToNextFomc` |
 | `data/manual/unlocks.json` | Token unlocks for your symbols' base assets; update `asOf` at least weekly | `daysToNextUnlock`, `nextUnlockPctOfFloat` |
-| Schedule | Run `npm run snapshot:daily` (Phase 2+: `research:daily`) at 00:15 UTC via cron or a systemd user timer | the daily cycle |
+| Schedule | Run `npm run research:daily` at 00:15 UTC via cron or a systemd user timer (it takes the snapshot itself) | the daily cycle |
+| `research-rules.json` | Your rule set. Ships with 3 `EXAMPLE` rules — replace them with your own (format below) | rules channel |
 
 Manual file formats:
 
@@ -126,9 +127,64 @@ treated as when the data became available.
 |---------|--------------|-----------|
 | `npm run snapshot:daily` | Fetch all sources for today, save snapshots, print sources + features as JSON | 0 written · 3 already exists (use `--revision N`) · 4 decision time in the future |
 | `npm run snapshot:daily -- --date 2026-09-15 --revision 1` | Re-snapshot a date as a new revision (backdated → scheduled decision time) | same |
+| `npm run research:daily` | Snapshot → features → rules → plans → `reports/<date>.json` + `reports/<date>.md` | 0 written · 2 invalid `research-rules.json` (all issues printed, nothing written) · 3 report exists (use `--refetch`) · 4 decision time in the future |
+| `npm run research:daily -- --refetch` | Re-run today as a new revision; nothing is overwritten | same |
 | `npm run verify` | Typecheck + full test suite | non-zero on failure |
 
-Commands for phases 2–4b are listed in the spec (§5.12) and will be added here as each phase lands.
+Both research commands accept `--snapshot-root DIR` and `--reports-root DIR` to write somewhere other
+than `data/snapshots/` and `reports/` (useful for experiments). Commands for phases 3–4b are in the
+spec (§5.12) and will be added here as each phase lands.
+
+---
+
+## Writing rules
+
+A rule fires when **all** `entryWhenAll` conditions hold. If any feature it references is missing, the
+rule is `not_evaluable` — it never fires on partial data.
+
+```json
+{
+  "id": "etf-flow-momentum",
+  "version": 1,
+  "description": "Long when 5-day BTC ETF inflows are strong and price is trending up",
+  "evidence": ["X1"],
+  "status": "experimental",
+  "symbols": ["SOL/USDT"],
+  "side": "long",
+  "entryWhenAll": [
+    { "feature": "btcEtfNetFlowUsd5d", "op": ">", "value": 500000000 },
+    { "feature": "return7d", "op": "between", "value": [0, 15] }
+  ],
+  "invalidateWhenAny": [{ "feature": "btcEtfNetFlowUsd1d", "op": "<", "value": -300000000 }],
+  "stopAtrMultiple": 2,
+  "targetRMultiple": 2,
+  "maxHoldDays": 5,
+  "forwardOnly": false,
+  "origin": "rules-file"
+}
+```
+
+| Field | Rule |
+|-------|------|
+| `id` | lowercase letters, digits, dashes (3–48). Renaming creates a new rule for the gates |
+| `version` | bump on every change; the rule hash in reports changes with any edit |
+| `status` | `experimental` → `holdout-passed` → `paper-passed` (only you change it, after gate artifacts) |
+| `op` | `<`, `<=`, `>`, `>=`, or `between` with `[low, high]` inclusive |
+| `stopAtrMultiple` / `targetRMultiple` / `maxHoldDays` | (0, 10] · (0, 20] · 1–10 |
+| `forwardOnly` | `true` if the rule uses features without honest history (open interest, unlocks) |
+
+An invalid file stops the run with every problem listed — fix them all, then re-run.
+
+## How a plan is sized
+
+1. Risk per trade = `maxCapitalUsd × riskPerTradePercent` (capped at 1%).
+2. Stop distance = `atr14d × stopAtrMultiple`; quantity = risk ÷ stop distance.
+3. Leverage = the minimum that fits the margin budget, capped (1× until a rule passes D1).
+4. If liquidation is closer than 2× the stop distance, leverage is lowered; if it still fails → `liq_too_close`.
+5. Quantity is rounded **down** to Bybit's step. Below Bybit's minimum order → `size_below_min`.
+
+> With small capital, expect `size_below_min` on high-priced coins: $1 of risk with a wide stop can be
+> less than one minimum lot. That rejection is the system protecting the risk limit, not a bug.
 
 ---
 
