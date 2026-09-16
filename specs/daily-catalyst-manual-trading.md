@@ -5,9 +5,9 @@
 > fixes (open-trade counter, disable-reason contract, gate-reset field list, `aiIdeaToRule` fields,
 > `RestClient.getApiKeyInfo` ownership, 429 AC) were applied after acceptance.
 
-Status: **Revision 2 — accepted spec, not implemented.** Revision 2 adds the AI analyst channel
-(§4.15, §5.13, §6.8, §8.4) at the owner's request: Claude participates in each daily recommendation.
-No code in this spec exists yet.
+Status: **Revision 2 — accepted spec. Phases 1–2 implemented (PR #1); Phase 3 contract (§5.8a, AC-55..68) under
+implementation; Phases 4, 4b, 5 not implemented.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
+the owner's request: Claude participates in each daily recommendation.
 
 Owner (every module this spec creates or changes):
 `src/research/` (new), `src/journal/` (new), `src/backtest-daily/` (new), `src/server/journal-server.ts` (new),
@@ -86,7 +86,7 @@ Operating context:
 | E2 | Latest measurement: nothing on free 5m data reaches the AUC needed to break even. | commits `dc6aa0c`, `e37feee`; `data/validation/auc-feasibility-2026-09-08.json` |
 | E3 | Leverage is pinned to 1x at the exchange; there is no leverage config field. | `src/bybit/connector.ts:403` (`setLeverage("linear", bybitSymbol, "1")`), `:425` (`pos.leverage !== "1"` blocks entries) |
 | E4 | All backtest infrastructure is 5-minute. | `src/strategy/candles.ts:15` (`DEFAULT_INTERVAL_MS = 5 * 60_000`) |
-| E5 | No non-price data fetchers exist (funding history, OI, macro, flows, on-chain, unlocks). | `rg -n "fundingRate/history\|open-interest\|defillama\|farside\|fred" src scripts` → no hits (run 2026-09-16) |
+| E5 | Before this spec, no non-price data fetchers existed (funding history, OI, macro, flows, on-chain, unlocks). | `rg -n "fundingRate/history\|open-interest\|defillama\|farside\|fred" src scripts` → no hits at commit `e37feee` (2026-09-16, before Phase 1). Phases 1–2 have since added them under `src/research/`. |
 | E6 | The journal schema is scalping-specific. | `src/learning/journal.ts:39-43` (`indicatorsAtEntry: { rsi; momentum; atr }`) |
 | E7 | The journal already has atomic write + 5 rotated backups — a reusable durability pattern. | `src/learning/journal.ts:54`, `:105-133` |
 | E8 | Circuit breakers are pure functions over equity/pnl inputs — reusable without the auto-trader. | pure exported functions `src/risk/circuit-breaker.ts:59` (`createCircuitBreakerState`), `:76` (`checkEquityBreakers`), `:122` (`recordTradeOutcome`), `:127` (`checkConsecutiveLosses`), `:148` (`checkSlippage`); config type `:17-34` |
@@ -399,6 +399,7 @@ export type TradePlan =
       quantity: number; notionalUsd: number; riskUsd: number; leverage: number; marginUsd: number;
       estLiquidationPrice: number; liqToStopRatio: number; estRoundTripFeeUsd: number;
       venueIntent: "paper" | "live";  // "live" only if rule.status === "paper-passed" (§8)
+      maxHoldDays: number;            // copied from the rule; used by exit classification (§5.8a)
     }
   | { kind: "rejected"; ruleId: string; origin: "rules-file" | "ai-analyst"; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing" };
 
@@ -531,16 +532,105 @@ export interface SyncResult {
   error: string | null;
   newFills: number;
   positions: { symbol: string; side: "long" | "short"; size: number; avgPrice: number; leverage: number; liqPrice: number; markPrice: number; unrealisedPnl: number }[];
+  warnings: string[];   // e.g. "BTC/USDT: first execution after journalStartTime reduces a position opened earlier — not journaled"
 }
 
-/** Calls rest.getApiKeyInfo() (GET /v5/user/query-api, new additive RestClient method); throws TradePermissionKeyError
- *  unless readOnly === 1 and no Withdraw permission. A network failure also throws (server refuses to start — fail closed). */
+/** Calls rest.getApiKeyInfo() (SDK user.getApiKey → GET /v5/user/query-api, new additive RestClient method); throws
+ *  TradePermissionKeyError unless readOnly === 1 and no Withdraw permission. A network failure also throws (fail closed). */
 export function assertReadOnlyKey(rest: RestClient): Promise<void>;
 
-/** Imports executions since the newest known execId per symbol (dedupe by execId), updates positions and funding
- *  (via getFundingPnlSince, src/bybit/connector.ts:895). Never throws on network error: returns status "failed". */
-export function syncFromExchange(journal: ManualTrade[], rest: RestClient, now: number): Promise<{ journal: ManualTrade[]; result: SyncResult }>;
+/** Pure. Rebuilds trades from raw executions per §5.8a. */
+export function reconstructTrades(executions: readonly RawExecution[], existing: readonly ManualTrade[], symbols: readonly string[], now: number):
+  { journal: ManualTrade[]; warnings: string[] };
+
+export interface RawExecution { execId: string; symbol: string /* app format */; side: "buy" | "sell"; price: number; qty: number;
+  feeUsd: number; time: number; execType: "Trade" | "BustTrade"; }
+
+/** Fetches executions for cfg.symbols from max(journalStartTime, newest known fill time − 1 h) to now in ≤ 7-day windows with
+ *  cursor paging (dedupe by execId), reconstructs trades, then sets fundingUsd per trade and reads positions.
+ *  Any fetch error → status "failed", journal returned unchanged (never partially updated). Never rejects. */
+export function syncFromExchange(journal: ManualTrade[], rest: RestClient, cfg: { symbols: string[]; journalStartTime: number | null },
+  now: number): Promise<{ journal: ManualTrade[]; result: SyncResult }>;
 ```
+
+### 5.8a Journal reconstruction, classification and breaker (normative, Phase 3)
+
+**Evidence that shapes this section.** `BybitConnector.getFundingPnlSince` catches per-symbol errors and returns a partial total
+(`src/bybit/connector.ts:905-907`), which violates P1, and its sign is marked unverified (`src/bybit/connector.ts:883-896`). It is
+therefore **not used**. `RestClient` has no execution-list or API-key method (`src/bybit/rest.ts` exposes only
+`getFundingHistory`, `:263`, filtered to `execType: "Funding"`); the SDK provides `trade.getTradeHistory` and `user.getApiKey`.
+
+**RestClient additions (additive only):** `getApiKeyInfo(): Promise<{ readOnly: 0 | 1; permissions: Record<string, string[]> }>`
+and `getExecutions(category: string, symbol: string, startTime: number, endTime: number, cursor?: string): Promise<{ list: unknown[]; nextPageCursor: string }>`
+(no `execType` filter; the caller keeps `Trade` and `BustTrade`, ignores others).
+
+**Sync start.** `manual.journalStartTime` (ISO-8601 UTC) is required for live sync. Absent → live sync disabled, `SyncResult`
+`status: "failed"`, `error: "manual.journalStartTime not set"`. This keeps the old auto-trader's history out of the journal.
+
+**Reconstruction.** Per symbol, executions sorted by `(time, execId)`; keep a signed running quantity (buy +, sell −).
+- 0 → non-zero opens a trade (`venue: "bybit-live"`, `planId: null`); fills that grow |qty| are `entryFills`, fills that shrink it are `exitFills`.
+- |qty| ≤ 1e-9 closes the trade (`status: "closed"`).
+- A fill that crosses zero is split: the closing part is an exit fill (`execId`), the remainder opens a new trade (`execId + ":flip"`); fee is split pro rata by quantity.
+- If a symbol's first fetched execution shrinks a position (opened before `journalStartTime`), that symbol's executions are skipped until the position returns to zero, with a warning. Nothing is guessed.
+- Existing trades are matched by fill `execId`; plan links, notes and owner-set `exitKind` survive re-sync.
+- **Open trades are never orphaned.** The fetched symbol set is `cfg.symbols ∪ symbols of open bybit-live trades`, and each
+  symbol with an open trade is fetched from `min(normal start, that trade's newest fill time − 1 h)`, regardless of later changes
+  to `journalStartTime` or `config.symbols`. A symbol fetched only because of an open trade adds the warning
+  `"<symbol>: open journal trade but symbol not in config.symbols"`.
+
+**Funding.** `fundingUsd = −Σ execFee` of `getFundingHistory` rows for the trade's symbol with time in
+`[first entry time, last exit time or now]`. Any error → sync `failed`. The sign is unverified: `manual.fundingSignVerified`
+(default `false`) makes the dashboard label every funding value `sign unverified` until the owner confirms one real settlement (§12.13).
+
+**Exit classification (bybit-live, on close).** First match: any exit fill `BustTrade` → `liquidation`; unplanned → `unknown`;
+with `d = |referencePrice − stopPrice|` of `plannedSnapshot` and `avgExit` the quantity-weighted exit price:
+long `avgExit ≤ stopPrice + 0.25·d` (short mirrored) → `stop`; long `avgExit ≥ targetPrice − 0.25·d` → `target`;
+`lastExitTime ≥ firstEntryTime + maxHoldDays·24 h − 1 h` → `time`; else `discretionary`. The owner may change `discretionary`
+to `thesis_invalidated` only (`PATCH /api/trades/:id/exit-kind`). Paper exits carry the owner-supplied `exitKind`.
+
+**Linking.** `POST /api/trades/:id/link {planId}` loads the plan from the latest revision of `reports/<planId date>.json`. It
+returns 409 unless symbol and side match, the trade's first entry time is in `[report decisionTime, plan expiresAt]`, and the plan
+is `kind: "plan"`. `aiStanceAtPlan` comes from that report's `aiAnalyst.assessments`. Never automatic.
+
+**Paper trades.** `recordPaperEntry`: quantity = plan quantity, one fill at `fillPrice`, `feeUsd = notional × roundTripFeePercent / 200`.
+`recordPaperExit`: same fee rule, owner-supplied `exitKind`; funding 0.
+
+**Analytics formulas.** Long `grossPnl = Σexit(q·p) − Σentry(q·p)`, short negated; `netPnlUsd = grossPnl − fees + fundingUsd`.
+`entrySlippagePct`: long `(avgEntry / referencePrice − 1)·100`, short `(1 − avgEntry / referencePrice)·100` (positive = adverse).
+`sizeDeviationPct = |entryQty / plan.quantity − 1|·100`. `maePct` / `mfePct`: worst / best excursion of 1h kline lows/highs
+overlapping `[firstEntry, lastExit]` relative to `avgEntry`, in the trade's direction (MAE ≤ 0 ≤ MFE).
+`followedPlan = planned ∧ exitKind ∈ {stop, target, time, thesis_invalidated} ∧ sizeDeviationPct ≤ 10 ∧ actualLeverage ≤ plan.leverage`
+(paper trades: leverage check skipped). `winRate` = share with `netPnlUsd > 0`. `expectancyR` = mean `rMultiple` of planned trades.
+`maxDrawdownR` = largest peak-to-trough of cumulative R in exit-time order. Live view (long; short mirrored):
+`distanceToStopPct = (mark − stop) / mark·100`, `distanceToLiqPct = (mark − liq) / mark·100`, `liqBeyondStop = liq < stop`.
+`thesis` comes from the latest report's `openTradeThesis` for the trade; absent → `not_evaluable`.
+
+**Breaker from the journal.** Pure `computeBreaker(trades, cbConfig, maxCapitalUsd, now)`: replay closed `bybit-live` trades in
+exit-time order through `src/risk/circuit-breaker.ts` (`createCircuitBreakerState(maxCapitalUsd, firstExitTime)`, then per trade
+`checkEquityBreakers` with equity = `maxCapitalUsd + cumulative netPnlUsd`, `recordTradeOutcome`), then a final
+`checkEquityBreakers` and `checkConsecutiveLosses` at `now`. Each trade is replayed with **two** `checkEquityBreakers` calls at
+**that trade's exit time**: first with the equity *before* the trade (this performs any UTC-day rollover, so the new day starts
+from pre-trade equity), then with the equity *after* it. Calling only with post-trade equity would make the first loss of each
+day invisible to `dailyLoss`, because rollover resets `dayStartEquity` to the equity passed in (`src/risk/circuit-breaker.ts:85-87`). Latching (matches the auto-trader, which latches any
+trigger until a human clears it, `src/main.ts:219`, `:476`):
+- `dailyLoss` holds for the rest of the UTC date on which it tripped, even if later trades recover equity.
+- `drawdown` and `consecutiveLosses` hold **until the owner resets them**: `manual.breakerResetAt` (ISO-8601 UTC, default null).
+  A reset after a trip clears it, and the replay re-baselines at that instant: `createCircuitBreakerState(equityAtReset, resetTime)`
+  (peak = equity at reset, consecutive losses = 0), then continues with trades exiting after `resetTime`.
+- **Tripped** iff the final check trips, or a `dailyLoss` trip exists on `now`'s UTC date, or a `drawdown`/`consecutiveLosses`
+  trip exists after the last reset. The reported trigger is the earliest active trip. Config values come from the existing
+`maxDailyLossPercent` / `maxDrawdownHaltPercent` / `maxConsecutiveLosses` (`src/config.ts:24-28`), defaults otherwise.
+**Ladder reset** (§8.3): until the trip log exists (Phase 4), `ladderResetByBreaker` is always `true` — the leverage cap stays at
+`liveLadderCap` (fail closed). No rule can reach `paper-passed` before Phase 4 anyway.
+
+**research:daily wiring.** Reads `manual-journal.json`: `openTrades` = open trades of both venues, `openTradeCount` starts at their
+count, `liveClosedTradesForRule` = closed `bybit-live` trades with that `ruleId`, breaker = `computeBreaker`. Missing file → empty
+journal. Unreadable (all backups corrupt) → exit **5**, no report written.
+
+**Server.** Binds `127.0.0.1:journalPort`. Live sync every `manual.syncIntervalMs` (default 30 000). No read-only key in
+`BYBIT_READONLY_API_KEY`/`_SECRET` → server starts in paper-only mode with a banner (key with trade/withdraw permission still refuses
+to start). Every request must carry `Host` = `127.0.0.1:<port>` or `localhost:<port>`, and every non-GET request with an `Origin`
+header must have that same origin — otherwise 403 (blocks DNS-rebinding/CSRF from other browser pages).
 
 ### 5.9 Trade analytics — `src/journal/trade-analytics.ts`
 
@@ -655,6 +745,10 @@ export interface ManualTradingConfig {
   maxOpenManualTrades: number;    // integer 1..5, default 3
   decisionTimeUtc: "00:15";       // fixed in revision 1
   staleAfterMs: number;           // dashboard sync staleness, default 120_000
+  syncIntervalMs: number;         // live sync cadence, default 30_000, >= 10_000
+  journalStartTime: string | null;// ISO-8601 UTC; required for live sync (§5.8a), default null
+  fundingSignVerified: boolean;   // default false; owner sets true after §12.13
+  breakerResetAt: string | null;  // ISO-8601 UTC; owner-set to clear drawdown/consecutiveLosses latches (§5.8a), default null
   journalPort: number;            // default 3082
 }
 // Config gains `manual?: Partial<ManualTradingConfig>`; loadConfig validates and throws `ConfigError` (src/config.ts:176) on violation.
@@ -693,7 +787,10 @@ export interface AiAnalystConfig {
 - `journal` HTTP: `GET /` (journal.html), `GET /events` (SSE: `live` every sync, `trade` on change, `: keepalive` 30s),
   `GET /api/trades?venue=`, `GET /api/review/:tradeId`, `GET /api/stats?venue=`, `POST /api/trades/:id/link {planId}`,
   `POST /api/paper/entry {planId, fillPrice, time}`, `POST /api/paper/exit {tradeId, fillPrice, time, exitKind}`,
-  `PATCH /api/trades/:id/notes {notes}`. Server binds `127.0.0.1` only.
+  `PATCH /api/trades/:id/notes {notes}`,
+  `PATCH /api/trades/:id/exit-kind {exitKind: "thesis_invalidated"}` (409 unless the current `exitKind` is `discretionary` and the trade is closed),
+  `GET /api/state` → `{ liveSync: "enabled" | "disabled"; liveSyncReason: string; lastSync: SyncResult | null; fundingSignVerified: boolean; breaker: { tripped: boolean; trigger: string | null; details: string }; openViews: LiveTradeView[] }`.
+  Server binds `127.0.0.1` only. All error responses are `{ error: string }` with status 400 (bad body), 403 (Host/Origin), 404 (unknown id), 409 (state conflict).
 - `research:daily` order of operations: snapshots → features → rule outcomes → rule plans → `buildReport` → write
   `reports/<date>.json` + `.md` (**the rules report is persisted before any AI call**) → if `ai.enabled`: `runAiAnalyst`
   → `attachAiAnalyst` → rewrite both report files. An AI failure never deletes or alters the already-written rules report content.
@@ -876,6 +973,26 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 - [ ] AC-35: Given a corrupted `manual-journal.json` and a valid `.bak.1`, then `loadManualJournal` returns `.bak.1` contents; given all 6 corrupt, then it throws `JournalUnreadableError` and the server refuses to start.
 - [ ] AC-36: Given the journal server, when started, then it listens on `127.0.0.1:journalPort` and not `0.0.0.0` (assert on `server.address()`).
 
+### 6.5a Journal reconstruction & wiring (P0)
+- [ ] AC-55: Given executions buy 1 @100, buy 1 @110, sell 2 @120 (BTC/USDT, after journalStartTime), then one closed trade with 2 entry fills, 1 exit fill, avgEntry 105.
+- [ ] AC-56: Given buy 1 @100 then sell 3 @90, then trade A closes with an exit fill of qty 1 (`execId`) and trade B opens short with qty 2 (`execId:flip`), fee split 1/3 : 2/3.
+- [ ] AC-57: Given a symbol whose first fetched execution is a sell with no prior position, then no trade is created for it until its running quantity returns to 0, and `warnings` names the symbol.
+- [ ] AC-58: Given a re-sync returning the same executions plus one new exit, then plan links, notes and an owner-set `thesis_invalidated` exitKind are preserved and fills are not duplicated.
+- [ ] AC-59: Given `journalStartTime` null, then `syncFromExchange` makes zero REST calls and returns `status:"failed"`, `error:"manual.journalStartTime not set"`.
+- [ ] AC-60: Given the funding history call rejects, then `status:"failed"` and the returned journal deep-equals the input.
+- [ ] AC-61: Exit classification table: BustTrade → liquidation; unplanned → unknown; long plan ref 100 stop 90 target 120 maxHoldDays 5: avgExit 92 → stop; 118 → target; 116 → discretionary (if before the hold limit); 105 after 4 d 23 h → time; 105 after 1 d → discretionary.
+- [ ] AC-62: Given a link request whose trade entry time is after `plan.expiresAt`, or whose side differs, then 409 and the trade is unchanged.
+- [ ] AC-63: Given closed live trades with net PnL −4, −4, −4 on the same UTC day and `maxDailyLossPercent 10`, `maxCapitalUsd 100`, then `computeBreaker` is tripped with trigger `dailyLoss`; given the same trades on a previous day and nothing today, then not tripped by `dailyLoss`.
+- [ ] AC-63a: Given closed live trades today with net PnL −6, −6, +10 (`maxDailyLossPercent 10`, `maxCapitalUsd 100`), then `computeBreaker` is tripped (`dailyLoss`, from the second trade) even though final equity is 98; on the next UTC day with no new trades it is not tripped by `dailyLoss`.
+- [ ] AC-63c: Given 5 consecutive losing live trades (−1 each) on day 1 and one +3 winner on day 3, with `maxConsecutiveLosses 5` and `breakerResetAt` null, then on day 3 `computeBreaker` is tripped (`consecutiveLosses`); with `breakerResetAt` set between the 5th loss and the winner, then not tripped. Given a `drawdown` trip followed by recovery above the threshold without a reset, then still tripped.
+- [ ] AC-63d: Given one losing trade exiting at 23:30 UTC day 1 (−6) and one exiting at 00:30 UTC day 2 (−6), `maxDailyLossPercent 10`, then no `dailyLoss` trip (each day loses 6%), proving per-trade exit times drive the rollover; and given two −6 trades at 00:30 and 01:30 UTC day 2 after a flat day 1, then `dailyLoss` trips (12%) — the day's first loss is counted.
+- [ ] AC-63b: Given an open bybit-live APT/USDT trade and `config.symbols` no longer containing APT/USDT, then sync still fetches APT/USDT from the trade's newest fill − 1 h, closes the trade when its exit arrives, and `warnings` names APT/USDT.
+- [ ] AC-64: Given a corrupt journal with all backups corrupt, then `research:daily` exits 5 and writes no report; given no journal file, then it runs with 0 open trades.
+- [ ] AC-65: Given 2 open journal trades and `maxOpenManualTrades 3`, then at most 1 plan is produced in the run.
+- [ ] AC-66: Given a request with `Host: evil.example:3082`, or a POST with `Origin: http://evil.example`, then 403 and no journal write.
+- [ ] AC-67: Given a long paper entry at 100 and exit at 110 for a plan with quantity 1, `roundTripFeePercent 0.11`, then fees 0.055 + 0.0605 and `netPnlUsd = 9.8845`.
+- [ ] AC-68: Given no `BYBIT_READONLY_API_KEY`, then the server starts, serves `GET /`, and `/api/state` reports `liveSync: "disabled"`.
+
 ### 6.6 Dashboard behavior **[manual]** + smoke
 - [ ] AC-37 [manual]: With one open paper trade and one closed paper trade, `GET /` shows live panel (mark, uPnL, distance to stop %, distance to liq %, funding, thesis state, alerts) and review panel (planned vs actual, R, MAE/MFE, slippage, exit kind, notes); owner signs off with a screenshot committed to `docs/validation/journal-dashboard-<date>.png`.
 - [ ] AC-38 [manual]: Kill network for > `staleAfterMs`; the live panel shows `STALE since <time>` and blanks P&L.
@@ -989,7 +1106,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 |-------|-------|------|
 | **1 — Data foundation** | §4.1 adapters (bybit klines 1d/1h, funding, OI; farside BTC/ETH; fred release dates; macro-calendar manual JSON; defillama stablecoins; fear-greed; unlocks manual JSON), §4.2 snapshot store, §4.3 features per §5.3a/§5.3b, `scripts/snapshot-daily.ts`. AC-1..7, AC-7a. (`scripts/backfill-history.ts` and §4.8 history store move to Phase 4, next to their only consumer.) | P0 |
 | **2 — Rules, planner, report** | §4.4–4.6, `bybit-instruments` adapter, `ManualTradingConfig` (§5.11), `research:daily`, example `research-rules.json` (A10). Type-only stubs so the contract compiles before later phases: `ManualTrade`/`AiStance` types (implementation Phase 3), `AiAnalystSection` type (Phase 4b). Until Phase 3: `openTrades = []`, breaker not tripped, `liveClosedTradesForRule = 0`, `ladderResetByBreaker = false`. Until Phase 4b: `aiDisabledReason = "config"`. AC-8..19, AC-11a/b, AC-14a, AC-15a. | P0 |
-| **3 — Journal & dashboard** | §4.11–4.14, read-only key check, paper entry/exit. AC-27..38. | P0 |
+| **3 — Journal & dashboard** | §4.11–4.14, §5.8a (RestClient additions, reconstruction, funding, exit classification, linking, paper trades, analytics formulas, breaker, research:daily wiring, server hardening). **Modifies shipped Phase 2 code:** adds `maxHoldDays` to the `kind:"plan"` variant in `src/research/planner.ts`; every construction site and fixture (`planTrade`, `src/research/report.ts`, `tests/research-planner.test.ts`, `tests/research-report.test.ts`, `tests/research-daily.test.ts`) is updated in the same change, and `research:daily` switches from its fixed Phase 2 inputs to the journal (§5.8a wiring). AC-27..38, AC-55..68 (incl. 63a–d). | P0 |
 | **4 — Daily backtest & gates** | §4.8 history store + `scripts/backfill-history.ts` (lags per §10.3), §4.9–4.10, `backtest:daily` dev/holdout/d1-check. AC-20..26, AC-26a..g. | P0 |
 | **4b — AI analyst** | §4.15–4.19, §5.13, `ai` config, report/Markdown integration, journal `aiStanceAtPlan`, `byOrigin`/`byAiStance`. AC-40..54. Depends on Phases 2–3. | P0 (AI channel only) |
 | **5 — Persona** | §4.7 via gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`. AC-39. | P1 |
@@ -1069,6 +1186,7 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 10. `rg -l "@anthropic-ai/sdk|from \"zod\"" src scripts` — lists only files under `src/research/ai/`.
 11. `rg -n "ANTHROPIC_API_KEY|sk-ant-" reports data/ai-usage.jsonl data/ai-rules` — returns nothing (no credential leakage).
 12. **[manual, Phase 4b]** AC-54 live smoke, plus 7 consecutive daily runs with AI enabled where the owner confirms each AI stance's cited feature values against the report by hand for at least one assessment per day.
+13. **[manual, Phase 3]** Funding sign check: hold one small real position through a funding settlement, compare the journal's `fundingUsd` sign with Bybit's transaction log (positive funding rate + long = paid). Only then set `manual.fundingSignVerified: true`. (The read-only-key checks are item 8.)
 
 ---
 
