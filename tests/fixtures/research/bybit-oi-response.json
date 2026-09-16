@@ -1,0 +1,17 @@
+{
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+    "symbol": "BTCUSDT",
+    "category": "linear",
+    "list": [
+      { "openInterest": "56000.0", "timestamp": "1700006400000" },
+      { "openInterest": "54000.0", "timestamp": "1699920000000" },
+      { "openInterest": "53000.0", "timestamp": "1699833600000" },
+      { "openInterest": "50000.0", "timestamp": "1699747200000" }
+    ],
+    "nextPageCursor": ""
+  },
+  "retExtInfo": {},
+  "time": 1700010000000
+}
