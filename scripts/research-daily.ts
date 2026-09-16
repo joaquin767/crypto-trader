@@ -10,14 +10,15 @@
 //
 // Exit codes: 0 report written; 2 rule-set validation failure (every issue printed, nothing
 // written); 3 report already exists for the date and --refetch was not given (file(s)
-// unchanged); 4 decision time is in the future.
+// unchanged); 4 decision time is in the future; 5 manual journal is unreadable (all backups
+// corrupt, §5.8a) — no report written.
 //
 // Usage: node --experimental-strip-types scripts/research-daily.ts --config ./config.json
 //   [--date YYYY-MM-DD] [--refetch] [--no-ai] [--snapshot-root <dir>] [--reports-root <dir>]
-//   [--rules-path <file>]
-// (--snapshot-root/--reports-root/--rules-path are not in the spec's CLI list — like
-// snapshot-daily.ts's --snapshot-root, they exist so tests and scratch smoke runs never touch
-// the committed data/snapshots or reports/ directories or the repo's own research-rules.json.)
+//   [--rules-path <file>] [--journal-path <file>]
+// (--snapshot-root/--reports-root/--rules-path/--journal-path are not in the spec's CLI list —
+// like snapshot-daily.ts's --snapshot-root, they exist so tests and scratch smoke runs never
+// touch the committed data/snapshots, reports/, research-rules.json or manual-journal.json.)
 
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -37,6 +38,10 @@ import type { DailyReport } from "../src/research/report.ts";
 import { buildReport, renderReportMarkdown } from "../src/research/report.ts";
 import type { SourceSnapshot } from "../src/research/types.ts";
 import { resolveDecisionTime } from "./snapshot-daily.ts";
+import { DEFAULT_CIRCUIT_BREAKER_CONFIG } from "../src/risk/circuit-breaker.ts";
+import { computeBreaker } from "../src/journal/breaker.ts";
+import { JournalUnreadableError, loadManualJournal } from "../src/journal/manual-journal.ts";
+import type { ManualTrade } from "../src/journal/types.ts";
 
 export interface ResearchDailyArgs {
   date: string;
@@ -45,6 +50,7 @@ export interface ResearchDailyArgs {
   snapshotRoot: string;
   reportsRoot: string;
   rulesPath: string;
+  journalPath: string;
   noAi: boolean;
 }
 
@@ -65,6 +71,7 @@ export function parseResearchDailyArgs(argv: readonly string[], now: number): Re
     snapshotRoot: flagValue(argv, "--snapshot-root") ?? "data/snapshots",
     reportsRoot: flagValue(argv, "--reports-root") ?? "reports",
     rulesPath: flagValue(argv, "--rules-path") ?? "./research-rules.json",
+    journalPath: flagValue(argv, "--journal-path") ?? "./manual-journal.json",
     noAi: argv.includes("--no-ai"),
   };
 }
@@ -161,6 +168,19 @@ export async function runResearchDaily(args: ResearchDailyArgs, deps: AdapterDep
   }
   const ruleSetSha256 = createHash("sha256").update(ruleSetRaw).digest("hex");
 
+  // §5.8a "research:daily wiring": missing journal file → empty journal; unreadable (all
+  // backups corrupt) → exit 5, no report written. Read before any fetch, same reasoning as the
+  // rule-set gate above (never spend the fetch budget on a run that can't complete).
+  let journal: ManualTrade[];
+  try {
+    journal = loadManualJournal({ path: args.journalPath });
+  } catch (err) {
+    if (err instanceof JournalUnreadableError) {
+      return { exitCode: 5, message: `manual journal is unreadable: ${err.message}` };
+    }
+    throw err;
+  }
+
   const adapters = createAllSourceAdapters(deps);
   const snapshots: SourceSnapshot[] = [];
   for (const adapter of adapters) {
@@ -184,6 +204,26 @@ export async function runResearchDaily(args: ResearchDailyArgs, deps: AdapterDep
     maxOpenManualTrades: manual.maxOpenManualTrades,
   };
 
+  const openTrades = journal.filter((t) => t.status === "open");
+  const liveClosedTradesByRule: Record<string, number> = {};
+  for (const t of journal) {
+    if (t.venue === "bybit-live" && t.status === "closed" && t.ruleId !== null) {
+      liveClosedTradesByRule[t.ruleId] = (liveClosedTradesByRule[t.ruleId] ?? 0) + 1;
+    }
+  }
+  const breaker = computeBreaker(
+    journal,
+    {
+      maxDailyLossPercent: config.maxDailyLossPercent ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxDailyLossPercent,
+      maxDrawdownHaltPercent: config.maxDrawdownHaltPercent ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxDrawdownHaltPercent,
+      maxConsecutiveLosses: config.maxConsecutiveLosses ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxConsecutiveLosses,
+      maxSlippagePercent: config.maxSlippagePercent ?? DEFAULT_CIRCUIT_BREAKER_CONFIG.maxSlippagePercent,
+      breakerResetAt: manual.breakerResetAt === null ? null : Date.parse(manual.breakerResetAt),
+    },
+    config.maxCapitalUsd,
+    now,
+  );
+
   const report = buildReport({
     dateUtc: args.date,
     decisionTime: resolved.decisionTime,
@@ -193,9 +233,9 @@ export async function runResearchDaily(args: ResearchDailyArgs, deps: AdapterDep
     snapshots,
     features,
     plannerConfig,
-    // Phase 2 fixed values (§9's Phase 2 row) — real wiring arrives with later phases:
-    breaker: { tripped: false, trigger: null, details: "" }, // circuit breaker: Phase 3+ (journal)
-    openTrades: [], // journal integration: Phase 3
+    breaker,
+    openTrades,
+    liveClosedTradesByRule,
     aiDisabledReason: "config", // `ai` config isn't parsed until Phase 4b; --no-ai has no effect yet
   });
   const markdown = renderReportMarkdown(report);
