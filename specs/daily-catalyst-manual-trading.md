@@ -203,7 +203,7 @@ existing `"BTC/USDT"` config format.
 
 ```ts
 export type SourceId =
-  | "bybit-klines-1d" | "bybit-klines-1h" | "bybit-funding" | "bybit-oi"
+  | "bybit-klines-1d" | "bybit-klines-1h" | "bybit-funding" | "bybit-oi" | "bybit-instruments"
   | "coinalyze-oi" | "farside-btc-etf" | "farside-eth-etf" | "fred-release-dates"
   | "macro-calendar-manual" | "defillama-stablecoins" | "fear-greed" | "unlocks-manual";
 
@@ -320,6 +320,7 @@ Invalid JSON or shape → snapshot `invalid`; missing file → `unavailable`.
 | bybit-klines-1h | 2 h | same with `interval=60&limit=200` |
 | bybit-funding | 9 h | `GET /v5/market/funding/history?category=linear&symbol=<BYBIT>&limit=200` (page back with `endTime` to cover 90 days) |
 | bybit-oi | 26 h | `GET /v5/market/open-interest?category=linear&symbol=<BYBIT>&intervalTime=1d&limit=10` |
+| bybit-instruments (Phase 2) | 7 d | `GET /v5/market/instruments-info?category=linear&symbol=<BYBIT>` → rows `minOrderQty`, `qtyStep`, `minNotionalValue` from `lotSizeFilter`; `availableAt = fetchedAt`; not a feature, read only by `instrumentFilters` |
 | farside-btc-etf / farside-eth-etf | 4 d | HTML `https://farside.co.uk/bitcoin-etf-flow-all-data/`, `https://farside.co.uk/ethereum-etf-flow-all-data/`; fallback CSV §10.2 |
 | fred-release-dates | 7 d | `GET https://api.stlouisfed.org/fred/release/dates?release_id=<CPI>&include_release_dates_with_no_data=true&sort_order=desc&file_type=json&api_key=$FRED_API_KEY`; CPI release id is a named constant verified against FRED at implementation |
 | macro-calendar-manual | 120 d (by `asOf`) | file |
@@ -398,17 +399,25 @@ export type TradePlan =
       estLiquidationPrice: number; liqToStopRatio: number; estRoundTripFeeUsd: number;
       venueIntent: "paper" | "live";  // "live" only if rule.status === "paper-passed" (§8)
     }
-  | { kind: "rejected"; ruleId: string; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" };
+  | { kind: "rejected"; ruleId: string; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing" };
 
 /** Pure. Returns 1 unless rule.status === "paper-passed";
  *  then liveLadderCap if liveClosedTradesForRule < 20 or ladderResetByBreaker, else maxLeverage. */
 export function effectiveMaxLeverage(rule: RuleDefinition, cfg: PlannerConfig,
   liveClosedTradesForRule: number, ladderResetByBreaker: boolean): number;
 
-/** Pure. planId = `${dateUtc}:${ruleId}:${symbol}`. Uses effectiveMaxLeverage(...) as the leverage cap. */
+/** Exchange order-size filters for one symbol (Bybit lotSizeFilter). */
+export interface InstrumentFilter { minOrderQty: number; qtyStep: number; minNotionalValue: number; }
+
+/** Pure. Reads the "bybit-instruments" snapshot (§5.3b); a symbol absent or with non-positive values maps to null. */
+export function instrumentFilters(snapshots: readonly SourceSnapshot[], symbols: readonly string[]): Record<string, InstrumentFilter | null>;
+
+/** Pure. planId = `${dateUtc}:${ruleId}:${symbol}`. Uses effectiveMaxLeverage(...) as the leverage cap.
+ *  decisionTime is the effective decision time (§5.12). instrument null → rejected "instrument_missing". */
 export function planTrade(outcome: Extract<RuleOutcome, { result: "triggered" }>, rule: RuleDefinition,
   fv: FeatureVector, cfg: PlannerConfig, openTradeCount: number, breakerTripped: boolean, dateUtc: string,
-  liveClosedTradesForRule: number, ladderResetByBreaker: boolean): TradePlan;
+  liveClosedTradesForRule: number, ladderResetByBreaker: boolean,
+  instrument: InstrumentFilter | null, decisionTime: number): TradePlan;
 
 /** Linear isolated estimate: long entry×(1 − 1/L + mmr), short entry×(1 + 1/L − mmr). */
 export function estimateLiquidationPrice(entry: number, side: "long" | "short", leverage: number, mmr: number): number;
@@ -427,8 +436,18 @@ Sizing algorithm (normative): `riskUsd = maxCapitalUsd × riskPerTradePercent/10
 `leverage = effectiveMaxLeverage` and scale `quantity` down so `notionalUsd / leverage = marginBudget`
 (riskUsd shrinks accordingly). Then `liqToStopRatio = |referencePrice − estLiquidationPrice| / stopDistance`;
 if `< minLiqToStopRatio`, decrement leverage and re-scale quantity until it passes or leverage = 1; if
-still failing → `rejected: liq_too_close`. If `quantity` rounds below the symbol's minimum order qty →
-`rejected: size_below_min`.
+still failing → `rejected: liq_too_close`. Finally `quantity` is rounded **down** to a multiple of `qtyStep`
+(floating-point safe: `floor(quantity / qtyStep + 1e-9) × qtyStep`); if the result is `< minOrderQty` or its notional
+`< minNotionalValue` → `rejected: size_below_min`. After rounding, `notionalUsd`, `riskUsd` (= quantity × stopDistance),
+`marginUsd` (= notionalUsd / leverage) and `estRoundTripFeeUsd` (= notionalUsd × roundTripFeePercent / 100) are
+recomputed from the rounded quantity. Rounding never increases risk.
+
+Check order (first match decides): `breaker_tripped` → `max_open_trades` → `instrument_missing` → `atr_missing`
+(also when `close` is missing) → sizing → `liq_too_close` → `size_below_min`.
+
+Price levels (normative): `referencePrice = close` feature; long `stopPrice = referencePrice − stopDistance`,
+`targetPrice = referencePrice + stopDistance × targetRMultiple`; short mirrored. `expiresAt = decisionTime + 12 h` (A2).
+`venueIntent = rule.status === "paper-passed" ? "live" : "paper"`.
 
 ### 5.6 Report — `src/research/report.ts`
 
@@ -806,7 +825,9 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 - [ ] AC-8: Given a rule set with 3 distinct errors, when `parseRuleSet` runs, then `RuleSetValidationError.issues.length === 3`.
 - [ ] AC-9: Given a rule whose first condition fails and whose second references a missing feature, when `evaluateRule` runs, then `result === "not_evaluable"`.
 - [ ] AC-10: Given any change to a rule's fields, when `ruleHash` is computed, then it differs; given key reordering only, then it is identical.
-- [ ] AC-11: Given `maxCapitalUsd=100, riskPerTradePercent=1, atr14d=1000, stopAtrMultiple=2, referencePrice=60000, marginBudgetPercent=25, maxLeverage=5, liveLadderCap=2, rule.status="paper-passed", liveClosedTradesForRule=0, ladderResetByBreaker=false`, when `planTrade` runs, then `riskUsd=1, quantity=0.0005, notionalUsd=30, leverage=2, marginUsd=15` (±1e-9).
+- [ ] AC-11: Given `maxCapitalUsd=100, riskPerTradePercent=1, atr14d=1000, stopAtrMultiple=2, referencePrice=60000, marginBudgetPercent=25, maxLeverage=5, liveLadderCap=2, rule.status="paper-passed", liveClosedTradesForRule=0, ladderResetByBreaker=false, instrument={minOrderQty:0.0001, qtyStep:0.0001, minNotionalValue:5}`, when `planTrade` runs, then `riskUsd=1, quantity=0.0005, notionalUsd=30, leverage=2, marginUsd=15, stopPrice=58000, targetPrice=` 60000 + 2000 × targetRMultiple (±1e-9).
+- [ ] AC-11a: Given the AC-11 inputs with `qtyStep=0.001, minOrderQty=0.001`, then `rejected: size_below_min`; given `qtyStep=0.0003, minOrderQty=0.0003`, then `quantity=0.0003`, `riskUsd=0.6`, `notionalUsd=18`, `marginUsd=9`.
+- [ ] AC-11b: Given `instrument=null`, then `rejected: instrument_missing`; given `atr14d` or `close` missing, then `rejected: atr_missing`.
 - [ ] AC-12: Given the same inputs with `rule.status="holdout-passed"`, then `leverage=1` and `venueIntent="paper"`.
 - [ ] AC-13: Given inputs where every leverage from `maxLeverage` down to 1 yields `liqToStopRatio < minLiqToStopRatio`, then `kind:"rejected", reason:"liq_too_close"`.
 - [ ] AC-14: Given `breakerTripped=true`, then every plan is `rejected: breaker_tripped`; given `openTradeCount >= maxOpenManualTrades`, then `rejected: max_open_trades`.
@@ -963,7 +984,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 | Phase | Items | Tier |
 |-------|-------|------|
 | **1 — Data foundation** | §4.1 adapters (bybit klines 1d/1h, funding, OI; farside BTC/ETH; fred release dates; macro-calendar manual JSON; defillama stablecoins; fear-greed; unlocks manual JSON), §4.2 snapshot store, §4.3 features per §5.3a/§5.3b, `scripts/snapshot-daily.ts`. AC-1..7, AC-7a. (`scripts/backfill-history.ts` and §4.8 history store move to Phase 4, next to their only consumer.) | P0 |
-| **2 — Rules, planner, report** | §4.4–4.6, config §5.11, `research:daily`. AC-8..19. | P0 |
+| **2 — Rules, planner, report** | §4.4–4.6, `bybit-instruments` adapter, `ManualTradingConfig` (§5.11), `research:daily`, example `research-rules.json` (A10). Type-only stubs so the contract compiles before later phases: `ManualTrade`/`AiStance` types (implementation Phase 3), `AiAnalystSection` type (Phase 4b). Until Phase 3: `openTrades = []`, breaker not tripped, `liveClosedTradesForRule = 0`, `ladderResetByBreaker = false`. Until Phase 4b: `aiDisabledReason = "config"`. AC-8..19, AC-11a/b, AC-14a, AC-15a. | P0 |
 | **3 — Journal & dashboard** | §4.11–4.14, read-only key check, paper entry/exit. AC-27..38. | P0 |
 | **4 — Daily backtest & gates** | §4.8 history store + `scripts/backfill-history.ts` (lags per §10.3), §4.9–4.10, `backtest:daily` dev/holdout/d1-check. AC-20..26, AC-26a..g. | P0 |
 | **4b — AI analyst** | §4.15–4.19, §5.13, `ai` config, report/Markdown integration, journal `aiStanceAtPlan`, `byOrigin`/`byAiStance`. AC-40..54. Depends on Phases 2–3. | P0 (AI channel only) |
