@@ -6,7 +6,33 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { fetchWithRetryPolicy } from "../src/research/http.ts";
+import { fetchWithRetryPolicy, redactUrl } from "../src/research/http.ts";
+
+test("redactUrl: replaces credential query params, keeps the rest", () => {
+  const out = redactUrl("https://api.stlouisfed.org/fred/release/dates?release_id=10&api_key=abc123SECRET&file_type=json");
+  assert.ok(!out.includes("abc123SECRET"));
+  assert.ok(out.includes("api_key=REDACTED"));
+  assert.ok(out.includes("release_id=10"));
+});
+
+test("network error detail never contains the api_key value, even if the error message echoes the URL", async () => {
+  const url = "https://api.stlouisfed.org/fred/release/dates?release_id=10&api_key=abc123SECRET";
+  const res = await fetchWithRetryPolicy(url, undefined, {
+    fetch: (async () => { throw new Error(`connect ECONNREFUSED for ${url}`); }) as typeof globalThis.fetch,
+    sleep: async () => {},
+  });
+  assert.equal(res.kind, "unavailable");
+  assert.ok(res.kind === "unavailable" && !res.detail.includes("abc123SECRET"), res.kind === "unavailable" ? res.detail : "");
+});
+
+test("429 detail never contains the api_key value", async () => {
+  const url = "https://api.stlouisfed.org/fred/release/dates?api_key=abc123SECRET";
+  const res = await fetchWithRetryPolicy(url, undefined, {
+    fetch: (async () => new Response("", { status: 429 })) as typeof globalThis.fetch,
+    sleep: async () => {},
+  });
+  assert.ok(res.kind === "unavailable" && !res.detail.includes("abc123SECRET"));
+});
 
 function jsonResponse(status: number, body: string, headers: Record<string, string> = {}): Response {
   return new Response(body, { status, headers });
