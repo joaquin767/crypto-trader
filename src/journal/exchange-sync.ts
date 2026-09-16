@@ -30,6 +30,7 @@ import type { ExitKind, Fill, ManualTrade } from "./types.ts";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const SEVEN_DAYS_MS = 7 * DAY_MS;
+export const POSITIONS_SETTLE_COIN = "USDT";
 
 // ── Read-only key assertion (§5.8, AC-27) ──────────────────────────────────────────────────────
 
@@ -448,7 +449,9 @@ export async function syncFromExchange(
       return { ...t, fundingUsd };
     }));
 
-    const positionsRaw = await rest.getPositions("linear");
+    // Bybit rejects an unfiltered linear position list (retCode 10001 "symbol or settleCoin"
+    // required, observed against mainnet). Every journaled symbol is a USDT perpetual.
+    const positionsRaw = await rest.getPositions("linear", undefined, POSITIONS_SETTLE_COIN);
     const positions = parsePositions(positionsRaw.list);
 
     const priorExecIds = new Set(journal.flatMap((t) => [...t.entryFills, ...t.exitFills].map((f) => f.execId)));

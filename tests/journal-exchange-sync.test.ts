@@ -311,6 +311,21 @@ test("an unparseable funding row fails the sync instead of being skipped", async
   assert.deepEqual(journal, []);
 });
 
+test("positions are requested with settleCoin USDT (Bybit rejects an unfiltered linear position list with 10001)", async () => {
+  const calls: unknown[][] = [];
+  const rest = fakeRest({
+    getPositions: (async (...args: unknown[]) => {
+      calls.push(args);
+      // Mirror the real API: without symbol or settleCoin the request is rejected.
+      if (args[1] === undefined && args[2] === undefined) throw new Error("Bybit API error [10001]: symbol or settleCoin required");
+      return { list: [] };
+    }) as FakeRest["getPositions"],
+  });
+  const { result } = await syncFromExchange([], rest, { symbols: ["BTC/USDT"], journalStartTime: 0 }, 2000);
+  assert.equal(result.status, "ok", result.error ?? "");
+  assert.deepEqual(calls, [["linear", undefined, "USDT"]]);
+});
+
 test("AC-60: a funding history rejection leaves the journal unchanged and status failed", async () => {
   const bybitExec = { execId: "abc", symbol: "BTCUSDT", side: "Buy", execPrice: "100", execQty: "1", execFee: "0.05", execTime: "1000", execType: "Trade", closedSize: "0" };
   const rest = fakeRest({
