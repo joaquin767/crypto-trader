@@ -571,7 +571,8 @@ and `getExecutions(category: string, symbol: string, startTime: number, endTime:
 - 0 → non-zero opens a trade (`venue: "bybit-live"`, `planId: null`); fills that grow |qty| are `entryFills`, fills that shrink it are `exitFills`.
 - |qty| ≤ 1e-9 closes the trade (`status: "closed"`).
 - A fill that crosses zero is split: the closing part is an exit fill (`execId`), the remainder opens a new trade (`execId + ":flip"`); fee is split pro rata by quantity.
-- If a symbol's first fetched execution shrinks a position (opened before `journalStartTime`), that symbol's executions are skipped until the position returns to zero, with a warning. Nothing is guessed.
+- **Unseen positions** are detected from Bybit's `closedSize` ("Closed position size", documented on `/v5/execution/list`), never from the fill's side: when no journal trade is open for the symbol, an execution with `closedSize > 0` closed a position opened before `journalStartTime`. That part is not journaled (warning). If `qty − closedSize > 0`, the remainder opened a new position and is journaled as `execId + ":flip"` with fee pro rata. A side-based guess would misread a buy closing an old short as a new long.
+- **execTypes:** `Trade` and `BustTrade` are replayed; `AdlTrade` is replayed as `Trade`; `Funding` is ignored (fetched separately). Any other execType, or an execution missing/invalid `execId`, `side`, `execPrice`, `execQty > 0`, `execFee`, `execTime` or `closedSize ≥ 0`, fails the whole sync (`status: "failed"`, journal unchanged) — never dropped, never treated as a trade.
 - Existing trades are matched by fill `execId`; plan links, notes and owner-set `exitKind` survive re-sync.
 - **Open trades are never orphaned.** The fetched symbol set is `cfg.symbols ∪ symbols of open bybit-live trades`, and each
   symbol with an open trade is fetched from `min(normal start, that trade's newest fill time − 1 h)`, regardless of later changes
@@ -604,6 +605,9 @@ overlapping `[firstEntry, lastExit]` relative to `avgEntry`, in the trade's dire
 `maxDrawdownR` = largest peak-to-trough of cumulative R in exit-time order. Live view (long; short mirrored):
 `distanceToStopPct = (mark − stop) / mark·100`, `distanceToLiqPct = (mark − liq) / mark·100`, `liqBeyondStop = liq < stop`.
 `thesis` comes from the latest report's `openTradeThesis` for the trade; absent → `not_evaluable`.
+`hoursToExpiry` for an open trade = `(firstEntryTime + plan.maxHoldDays·24 h − now) / 1 h` (the plan's `expiresAt` is only the
+12 h entry window and stops mattering once filled); alert `expired` when ≤ 0; `null` when unplanned. Alert
+`stop_beyond_liquidation` fires when `liqBeyondStop === false` (liquidation would be reached before the stop).
 
 **Breaker from the journal.** Pure `computeBreaker(trades, cbConfig, maxCapitalUsd, now)`: replay closed `bybit-live` trades in
 exit-time order through `src/risk/circuit-breaker.ts` (`createCircuitBreakerState(maxCapitalUsd, firstExitTime)`, then per trade
@@ -976,7 +980,7 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 ### 6.5a Journal reconstruction & wiring (P0)
 - [ ] AC-55: Given executions buy 1 @100, buy 1 @110, sell 2 @120 (BTC/USDT, after journalStartTime), then one closed trade with 2 entry fills, 1 exit fill, avgEntry 105.
 - [ ] AC-56: Given buy 1 @100 then sell 3 @90, then trade A closes with an exit fill of qty 1 (`execId`) and trade B opens short with qty 2 (`execId:flip`), fee split 1/3 : 2/3.
-- [ ] AC-57: Given a symbol whose first fetched execution is a sell with no prior position, then no trade is created for it until its running quantity returns to 0, and `warnings` names the symbol.
+- [ ] AC-57: Given no open journal trade for a symbol: a sell with `closedSize = qty = 5` creates no trade and warns; a **buy** with `closedSize = qty = 3` (closing an unseen short) creates no trade and warns; a buy of 5 with `closedSize 2` and fee 10 opens a long of 3 as `execId:flip` with fee 6. Given a `Funding` execution in the list, it is ignored; given a `Settle` execution or one without `closedSize`, the sync fails and the journal is unchanged.
 - [ ] AC-58: Given a re-sync returning the same executions plus one new exit, then plan links, notes and an owner-set `thesis_invalidated` exitKind are preserved and fills are not duplicated.
 - [ ] AC-59: Given `journalStartTime` null, then `syncFromExchange` makes zero REST calls and returns `status:"failed"`, `error:"manual.journalStartTime not set"`.
 - [ ] AC-60: Given the funding history call rejects, then `status:"failed"` and the returned journal deep-equals the input.

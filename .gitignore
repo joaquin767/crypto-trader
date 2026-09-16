@@ -56,3 +56,7 @@ data/validation/folds/
 # and data/validation/daily/ (gate artifacts) are NOT covered by this and stay committed.
 data/snapshots/
 reports/
+
+# Manual trading journal (specs/daily-catalyst-manual-trading.md §5.7/§10.2) — real trade data,
+# not a template; never committed.
+manual-journal.json*
