@@ -83,6 +83,35 @@ Why the AI skips D0: its training data runs to May 2026, inside the holdout wind
 
 ---
 
+## Before your first live trade
+
+Passing the gates proves a rule. These checks prove the **journal** tells the truth about real money.
+Do all of them before the first order with `venueIntent: "live"`. Record the date and result of each
+in `docs/validation/live-readiness.md`.
+
+| # | Check | Status | How | Pass when |
+|---|-------|--------|-----|-----------|
+| 1 | **Read-only key syncs your mainnet account** | ✅ Done 2026-09-16 | `npm run journal` with a mainnet read-only key and `manual.journalStartTime` set | `/api/state` shows `liveSync: "enabled"` and `lastSync.status: "ok"` |
+| 2 | **A key with trade permission is refused** | ⏸ Pending | Start `npm run journal` with a mainnet key that has Trade permission (then delete or restrict that key) | Exits with `refusing to start: Bybit API key has trade or withdraw permission` — not `listening on …` |
+| 3 | **Real fills become the right trade** | ⏸ Pending | Open and close one minimum-size position; watch the dashboard | One trade with the correct side, entry/exit prices, fees and exit label; no sync warnings |
+| 4 | **Funding sign is correct** | ⏸ Pending | Hold that position through a funding settlement; note the rate's sign and your side beforehand | Dashboard funding equals Bybit's transaction-log entry in amount **and** sign (positive rate + long = negative). Then set `manual.fundingSignVerified: true` |
+| 5 | **Plan linking works on a real position** | ⏸ Pending | Link that position to a plan from the same day's report | Link accepted; review shows planned vs actual |
+| 6 | **Stale data is flagged** | ⏸ Pending | With a position open, cut the network for more than 2 minutes | Header shows `STALE since <time>` and P&L is blanked; clears after reconnecting |
+| 7 | **Screenshots saved** | ⏸ Pending | Live panel, stale state, closed-trade review | `docs/validation/journal-dashboard-<date>-{live,stale,review}.png` committed |
+
+> Checks 3–7 need a real position, which means real fees and market risk. Use the smallest size Bybit
+> allows. Whether and when to do it is your decision.
+
+How to load a key without it landing in shell history (type the line in the terminal, one shell):
+
+```bash
+read -rsp "key: " BYBIT_READONLY_API_KEY && echo && read -rsp "secret: " BYBIT_READONLY_API_SECRET && echo && BYBIT_READONLY_API_KEY="$BYBIT_READONLY_API_KEY" BYBIT_READONLY_API_SECRET="$BYBIT_READONLY_API_SECRET" npm run journal
+```
+
+If any check fails, stop: no live trade until it is fixed and the check passes again.
+
+---
+
 ## Setup
 
 ### One-time
@@ -181,11 +210,10 @@ daily report is rejected with `breaker_tripped`.
 
 Resetting is a deliberate, written decision — review what happened before you set it.
 
-### One-time funding check
+### Funding sign
 
-Funding sign is not yet verified against a real settlement, so every funding value shows
-`sign unverified`. Hold one small real position through a funding time, compare with Bybit's
-transaction log, then set `manual.fundingSignVerified: true`.
+Until check 4 of [Before your first live trade](#before-your-first-live-trade) passes, every funding
+value shows `sign unverified`.
 
 ---
 
