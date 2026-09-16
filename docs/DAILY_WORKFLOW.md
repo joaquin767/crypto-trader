@@ -16,7 +16,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 |-------|-------------------|--------|
 | 1 — Data foundation | `npm run snapshot:daily`: fetch sources, save point-in-time snapshots, compute features | ✅ Built |
 | 2 — Rules, planner, report | `npm run research:daily`: rules → sized trade plans → daily report | ✅ Built |
-| 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ⏳ Planned |
+| 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ✅ Built |
 | 4 — Backtest & gates | `npm run backtest:daily`: Gate D0 (holdout) and Gate D1 (paper) verdicts | ⏳ Planned |
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas | ⏳ Planned |
 | 5 — Analyst persona | Interactive Claude Code skill to write and critique rules | ⏳ Planned |
@@ -50,7 +50,7 @@ flowchart TD
 3. **Read the AI channel** (labeled *forward-only, unvalidated*): its regime summary, its own ideas, notes on your open trades.
 4. **Decide.** Check `venueIntent`: `paper` means record it as a paper trade, not a real order.
 5. **Act.** Place the order yourself on Bybit — or record the paper entry in the journal.
-6. **Link it.** In the journal, link the position to its `planId` so it is measured against the plan.
+6. **Link it.** In the journal dashboard, link the position to its `planId` so it is measured against the plan.
 7. **While open:** watch distance to stop, distance to liquidation, funding paid, and whether the thesis still holds.
 8. **After close:** read the review, add notes. Adherence and R-multiple feed the gates.
 
@@ -95,6 +95,10 @@ Why the AI skips D0: its training data runs to May 2026, inside the holdout wind
 | `data/manual/unlocks.json` | Token unlocks for your symbols' base assets; update `asOf` at least weekly | `daysToNextUnlock`, `nextUnlockPctOfFloat` |
 | Schedule | Run `npm run research:daily` at 00:15 UTC via cron or a systemd user timer (it takes the snapshot itself) | the daily cycle |
 | `research-rules.json` | Your rule set. Ships with 3 `EXAMPLE` rules — replace them with your own (format below) | rules channel |
+| Read-only Bybit key | Create an API key with **read-only** permission (no Trade, no Withdraw) and export `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`. The journal refuses to start with any other key | live sync |
+| `manual.journalStartTime` | ISO time in `config.json` (e.g. `"2026-09-17T00:00:00Z"`). Only executions after it are journaled, so old auto-trader history stays out | live sync |
+
+Without the read-only key the dashboard runs in **paper-only mode** — useful for the whole paper phase (Gate D1).
 
 Manual file formats:
 
@@ -131,9 +135,57 @@ treated as when the data became available.
 | `npm run research:daily -- --refetch` | Re-run today as a new revision; nothing is overwritten | same |
 | `npm run verify` | Typecheck + full test suite | non-zero on failure |
 
+| `npm run journal` | Start the dashboard at <http://127.0.0.1:3082> (local only) | exits non-zero if the Bybit key has trade/withdraw permission or can't be verified; exit 5 from `research:daily` if the journal file is unreadable |
+
 Both research commands accept `--snapshot-root DIR` and `--reports-root DIR` to write somewhere other
-than `data/snapshots/` and `reports/` (useful for experiments). Commands for phases 3–4b are in the
-spec (§5.12) and will be added here as each phase lands.
+than `data/snapshots/` and `reports/` (useful for experiments). `research:daily` and `journal` accept
+`--journal-path FILE` (default `manual-journal.json`). Commands for phases 4–4b are in the spec (§5.12)
+and will be added here as each phase lands.
+
+---
+
+## The journal dashboard
+
+`npm run journal`, then open <http://127.0.0.1:3082>. It only answers requests addressed to
+`127.0.0.1`/`localhost`, so no other website in your browser can write to it.
+
+| Panel | What you see | What you do there |
+|-------|--------------|-------------------|
+| Banners | paper-only mode · `STALE since <time>` (P&L blanked) · breaker tripped · funding sign unverified · sync warnings | Act on them before trusting numbers |
+| Live trades | mark price, unrealized P&L, distance to stop %, distance to liquidation %, funding, hours held, hours left before the max-hold exit, thesis state, alerts | Watch risk; close by hand on Bybit when a stop/target/expiry/invalidation says so |
+| Link to plan | unplanned positions | Pick the `planId` from that day's report. Linking is never automatic and is refused if symbol/side/timing don't match |
+| Paper trades | forms for entry and exit | Record what you *would* have done while a rule is still `experimental` |
+| Closed trades | planned vs actual, R-multiple, fees, funding, entry slippage, size deviation, MAE/MFE, exit kind, followed plan | Add notes; mark a discretionary exit as `thesis_invalidated` if that's why you closed |
+| Stats (per venue) | win rate, expectancy in R, max drawdown in R, adherence, per rule, rules vs AI, and by AI stance | This is what the gates read |
+
+### How your fills become trades
+
+- A trade opens when a position goes from flat to non-flat and closes when it returns to flat. Adding
+  size is an entry, reducing is an exit. Reversing through zero closes one trade and opens another.
+- Positions opened **before** `journalStartTime` are never guessed: fills that close them are skipped
+  with a warning (the dashboard shows it).
+- Exits are labeled automatically: `liquidation`, `stop`/`target` (within a quarter of the stop
+  distance), `time` (at the max hold), otherwise `discretionary`.
+- If anything in the sync fails, **nothing** in the journal changes and the dashboard says `STALE`.
+
+### Loss limits (circuit breaker)
+
+Computed from your closed **live** trades, never from paper trades. While tripped, every plan in the
+daily report is rejected with `breaker_tripped`.
+
+| Limit | Config | Clears |
+|-------|--------|--------|
+| Daily loss | `maxDailyLossPercent` (default 10%) | Automatically at the next UTC day |
+| Drawdown from peak | `maxDrawdownHaltPercent` (default 20%) | **Only when you set** `manual.breakerResetAt` to a time after the trip |
+| Consecutive losses | `maxConsecutiveLosses` (default 5) | **Only when you set** `manual.breakerResetAt` |
+
+Resetting is a deliberate, written decision — review what happened before you set it.
+
+### One-time funding check
+
+Funding sign is not yet verified against a real settlement, so every funding value shows
+`sign unverified`. Hold one small real position through a funding time, compare with Bybit's
+transaction log, then set `manual.fundingSignVerified: true`.
 
 ---
 
