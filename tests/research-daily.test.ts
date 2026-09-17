@@ -16,6 +16,7 @@ import {
   decideResearchDailyAction, latestReportRevision, parseResearchDailyArgs, runResearchDaily,
 } from "../scripts/research-daily.ts";
 import type { ResearchDailyArgs } from "../scripts/research-daily.ts";
+import type { ManualTrade } from "../src/journal/types.ts";
 
 const NOW = Date.UTC(2026, 8, 16, 1, 0, 0); // 2026-09-16T01:00:00Z — after the 00:15 decision time
 
@@ -61,6 +62,7 @@ function makeArgs(dir: string, overrides: Partial<ResearchDailyArgs> = {}): Rese
     snapshotRoot: join(dir, "snapshots"),
     reportsRoot: join(dir, "reports"),
     rulesPath: join(dir, "research-rules.json"),
+    journalPath: join(dir, "manual-journal.json"),
     noAi: false,
     ...overrides,
   };
@@ -198,6 +200,87 @@ test("exit 2: a rule referencing a symbol outside config.symbols fails validatio
     const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(badRules) : (() => { throw new Error("unexpected path"); })()) });
     const result = await runResearchDaily(args, deps);
     assert.equal(result.exitCode, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── §5.8a journal wiring (AC-64, AC-65) ─────────────────────────────────────────────────────────
+
+function fixtureOpenTrade(id: string, symbol = "BTC/USDT"): ManualTrade {
+  return {
+    id, venue: "paper", symbol, side: "long", planId: null, ruleId: null, ruleHash: null,
+    plannedSnapshot: null, aiStanceAtPlan: null, entryFills: [], exitFills: [],
+    actualLeverage: null, exchangeLiqPrice: null, fundingUsd: 0,
+    status: "open", exitKind: null, notes: "", createdAt: NOW, updatedAt: NOW,
+  };
+}
+
+test("AC-64: no journal file at all runs with 0 open trades", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir);
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    assert.ok(!existsSync(args.journalPath));
+    const result = await runResearchDaily(args, deps);
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(result.report!.openTradeThesis, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-64: a corrupt journal with all backups corrupt exits 5 and writes no report", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir);
+    writeFileSync(args.journalPath, "not json");
+    for (let n = 1; n <= 5; n++) writeFileSync(`${args.journalPath}.bak.${n}`, "also not json");
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    const result = await runResearchDaily(args, deps);
+    assert.equal(result.exitCode, 5);
+    assert.ok(!existsSync(join(args.reportsRoot, "2026-09-16.json")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-65: 2 open journal trades and maxOpenManualTrades 3 leave room for at most 1 plan", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir);
+    writeFileSync(args.journalPath, JSON.stringify([fixtureOpenTrade("t1"), fixtureOpenTrade("t2")]));
+
+    const dailyBars = (): string[][] => {
+      const bars: string[][] = [];
+      for (let i = 0; i < 20; i++) {
+        const t = Date.UTC(2026, 8, 15, 0, 0, 0) - i * 24 * 60 * 60 * 1000;
+        bars.push([String(t), "100", "101", "99", "100", "1000"]);
+      }
+      return bars;
+    };
+    const fetchStub = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/v5/market/kline") && u.includes("interval=D")) {
+        return new Response(JSON.stringify({ retCode: 0, retMsg: "OK", result: { list: dailyBars() } }), { status: 200 });
+      }
+      if (u.includes("/v5/market/instruments-info")) {
+        return new Response(JSON.stringify({
+          retCode: 0, retMsg: "OK",
+          result: { list: [{ lotSizeFilter: { minOrderQty: "0.0001", qtyStep: "0.0001", minNotionalValue: "5" } }] },
+        }), { status: 200 });
+      }
+      throw new Error("stub network error");
+    }) as unknown as typeof fetch;
+
+    const deps = fakeDeps({
+      readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()),
+      fetch: fetchStub,
+    });
+    const result = await runResearchDaily(args, deps);
+    assert.equal(result.exitCode, 0);
+    const plans = result.report!.plans.filter((p) => p.kind === "plan");
+    assert.ok(plans.length <= 1, `expected at most 1 plan, got ${plans.length}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

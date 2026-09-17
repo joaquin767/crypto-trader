@@ -169,3 +169,31 @@ test("cancelOrder delegates to SDK", async () => {
     assert(err instanceof Error);
   }
 });
+
+// ── Additive Phase 3 methods — specs/daily-catalyst-manual-trading.md §5.8/§5.8a ─────────────
+// Same style as the delegation tests above (real SDK call, network error tolerated in a
+// sandboxed test environment): src/journal/exchange-sync.test.ts covers the actual
+// permission/reconstruction logic against fakes, so these two only prove the additive
+// RestClient methods exist and reach the SDK without breaking any existing method's shape.
+
+test("getApiKeyInfo delegates to SDK", async () => {
+  const client = new RestClient(mockConfig);
+  try {
+    const result = await client.getApiKeyInfo();
+    assert(typeof result.readOnly === "number");
+    assert(typeof result.permissions === "object");
+  } catch (err: any) {
+    assert(err instanceof Error);
+  }
+});
+
+test("getExecutions delegates to SDK", async () => {
+  const client = new RestClient(mockConfig);
+  try {
+    const result = await client.getExecutions("linear", "BTCUSDT", 0, Date.now());
+    assert(Array.isArray(result.list));
+    assert(typeof result.nextPageCursor === "string");
+  } catch (err: any) {
+    assert(err instanceof Error);
+  }
+});

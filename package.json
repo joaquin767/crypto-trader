@@ -10,7 +10,8 @@
     "start": "node --experimental-strip-types src/main.ts --config ./config.json",
     "dashboard": "node --experimental-strip-types src/main.ts --config ./config.json --port 3081",
     "snapshot:daily": "node --experimental-strip-types scripts/snapshot-daily.ts --config ./config.json",
-    "research:daily": "node --experimental-strip-types scripts/research-daily.ts --config ./config.json"
+    "research:daily": "node --experimental-strip-types scripts/research-daily.ts --config ./config.json",
+    "journal": "node --experimental-strip-types src/server/journal-server.ts --config ./config.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

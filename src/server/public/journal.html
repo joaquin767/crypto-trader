@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manual Trading Journal</title>
+<style>
+:root{
+  --bg:#0b0e14; --panel:#141a23; --panel-2:#1b222d; --line:#262e3a;
+  --text:#e6edf3; --dim:#8b98a9; --faint:#5a6675;
+  --up:#2ea043; --up-soft:rgba(46,160,67,.14);
+  --down:#f0503a; --down-soft:rgba(240,80,58,.14);
+  --warn:#d9a441; --warn-soft:rgba(217,164,65,.14);
+  --accent:#4c8dff; --r:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg);color:var(--text);padding:18px;font-size:14px}
+.mono{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,monospace;font-variant-numeric:tabular-nums}
+.up{color:var(--up)} .down{color:var(--down)} .warn{color:var(--warn)} .dim{color:var(--dim)}
+h1{font-size:18px;margin-bottom:14px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin:18px 0 8px}
+h3{font-size:13px;margin-bottom:6px}
+.banner{padding:10px 13px;border-radius:var(--r);margin-bottom:8px;font-size:13px;border:1px solid}
+.banner.crit{background:var(--down-soft);border-color:rgba(240,80,58,.4);color:#ffb4a8}
+.banner.warn{background:var(--warn-soft);border-color:rgba(217,164,65,.35);color:#f0d199}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:10px}
+.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:5px 7px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600;background:var(--panel-2)}
+.pill.up{background:var(--up-soft);color:var(--up)}
+.pill.down{background:var(--down-soft);color:var(--down)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer}
+button.secondary{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}
+input,select,textarea{background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:5px 8px;font-size:12.5px}
+textarea{width:100%;min-height:54px;font-family:inherit}
+form.inline{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.alerts-inline span{display:inline-block;margin-right:6px;padding:1px 6px;border-radius:99px;
+  background:var(--down-soft);color:var(--down);font-size:10.5px}
+.stale{opacity:.5}
+details.review{border-top:1px solid var(--line);padding:8px 0}
+details.review summary{cursor:pointer;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 16px;margin:8px 0}
+.kv div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px dashed var(--line);padding:2px 0}
+</style>
+</head>
+<body>
+<h1>Manual Trading Journal <span id="staleBadge" class="pill warn" hidden></span></h1>
+<div id="banners"></div>
+
+<h2>Open trades</h2>
+<div id="openTrades" class="grid"></div>
+
+<h2>Link a trade to a plan</h2>
+<div class="card">
+  <form class="inline" id="linkForm">
+    <select id="linkTradeId" aria-label="Trade"></select>
+    <input id="linkPlanId" placeholder="planId (dateUtc:ruleId:symbol)" style="min-width:260px" aria-label="Plan id">
+    <button type="submit">Link</button>
+  </form>
+</div>
+
+<h2>Paper entry / exit</h2>
+<div class="grid">
+  <div class="card">
+    <h3>Record paper entry</h3>
+    <form class="inline" id="entryForm">
+      <input id="entryPlanId" placeholder="planId" style="min-width:220px" aria-label="Plan id">
+      <input id="entryFillPrice" type="number" step="any" placeholder="fill price" style="width:110px" aria-label="Fill price">
+      <button type="submit">Enter</button>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Record paper exit</h3>
+    <form class="inline" id="exitForm">
+      <select id="exitTradeId" aria-label="Paper trade"></select>
+      <input id="exitFillPrice" type="number" step="any" placeholder="fill price" style="width:110px" aria-label="Fill price">
+      <select id="exitKind" aria-label="Exit kind">
+        <option value="stop">stop</option>
+        <option value="target">target</option>
+        <option value="time">time</option>
+        <option value="thesis_invalidated">thesis_invalidated</option>
+        <option value="discretionary">discretionary</option>
+      </select>
+      <button type="submit">Exit</button>
+    </form>
+  </div>
+</div>
+
+<h2>Closed trades — review</h2>
+<div id="closedTrades" class="card"></div>
+
+<h2>Stats</h2>
+<div class="grid">
+  <div class="card"><h3>Paper</h3><div id="statsPaper"></div></div>
+  <div class="card"><h3>Bybit live</h3><div id="statsLive"></div></div>
+</div>
+
+<p class="dim" style="margin-top:20px;font-size:11.5px">Generated analysis for the owner's review. Not investment advice.</p>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// Every value that reaches innerHTML goes through esc(): symbols, notes, warnings and error
+// messages come from the exchange, the owner or the server and must never be parsed as markup.
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+function fmt(n, digits = 4) {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return String(Math.round(n * 10 ** digits) / 10 ** digits);
+}
+function pct(n) { return n === null || n === undefined ? "—" : `${fmt(n, 2)}%`; }
+function signCls(n) { return n === null || n === undefined ? "" : n > 0 ? "up" : n < 0 ? "down" : ""; }
+function time(ms) { return ms ? new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "—"; }
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+  return body;
+}
+function jsonBody(method, data) {
+  return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) };
+}
+
+let fundingVerified = false;
+let lastTrades = [];
+
+function renderBanners(state) {
+  const banners = [];
+  if (state.liveSync === "disabled") banners.push({ cls: "warn", text: `Paper-only mode: ${state.liveSyncReason}` });
+  if (state.lastSync && state.lastSync.status === "failed") banners.push({ cls: "crit", text: `Last sync failed — journal unchanged: ${state.lastSync.error}` });
+  if (state.breaker && state.breaker.tripped) banners.push({ cls: "crit", text: `Circuit breaker TRIPPED (${state.breaker.trigger}): ${state.breaker.details}` });
+  if (!state.fundingSignVerified) banners.push({ cls: "warn", text: "Funding sign unverified — treat funding values as unconfirmed until one real settlement is checked." });
+  for (const w of state.lastSync?.warnings || []) banners.push({ cls: "warn", text: w });
+  $("banners").innerHTML = banners.map((b) => `<div class="banner ${b.cls}">${esc(b.text)}</div>`).join("");
+
+  // Paper trades never sync, so staleness only means something for live trades with live sync on.
+  const liveIds = new Set(lastTrades.filter((t) => t.venue === "bybit-live").map((t) => t.id));
+  const staleViews = state.liveSync === "enabled" ? (state.openViews || []).filter((v) => v.stale && liveIds.has(v.tradeId)) : [];
+  const badge = $("staleBadge");
+  if (staleViews.length > 0) {
+    const since = Math.min(...staleViews.map((v) => v.staleSinceMs ?? Date.now()));
+    badge.textContent = `STALE since ${time(since)}`;
+    badge.hidden = false;
+  } else {
+    badge.hidden = true;
+  }
+  fundingVerified = Boolean(state.fundingSignVerified);
+}
+
+function fundingCell(n) {
+  return `<span class="mono ${signCls(n)}">${esc(fmt(n))}</span>${fundingVerified ? "" : ` <span class="pill warn">sign unverified</span>`}`;
+}
+
+function renderOpenTrades(state, trades) {
+  const open = trades.filter((t) => t.status === "open");
+  $("openTrades").innerHTML = open.map((t) => {
+    const v = (state.openViews || []).find((x) => x.tradeId === t.id) || {};
+    const plan = t.plannedSnapshot;
+    const alerts = (v.alerts || [])
+      .filter((a) => !(t.venue === "paper" && a === "data_stale"))
+      .map((a) => `<span>${esc(a)}</span>`).join("");
+    return `<div class="card ${v.stale ? "stale" : ""}">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <b>${esc(t.symbol)}</b>
+        <span><span class="pill">${esc(t.venue)}</span> <span class="pill ${t.side === "long" ? "up" : "down"}">${esc(t.side)}</span></span>
+      </div>
+      <table>
+        <tr><td>mark</td><td class="mono">${esc(fmt(v.markPrice))}</td></tr>
+        <tr><td>unrealized P&amp;L</td><td class="mono ${signCls(v.unrealisedPnlUsd)}">${esc(fmt(v.unrealisedPnlUsd))}</td></tr>
+        <tr><td>stop / target</td><td class="mono">${plan ? `${esc(fmt(plan.stopPrice))} / ${esc(fmt(plan.targetPrice))}` : "—"}</td></tr>
+        <tr><td>distance to stop</td><td class="mono">${esc(pct(v.distanceToStopPct))}</td></tr>
+        <tr><td>distance to liquidation</td><td class="mono">${esc(pct(v.distanceToLiqPct))}</td></tr>
+        <tr><td>liquidation beyond stop</td><td>${v.liqBeyondStop === null || v.liqBeyondStop === undefined ? "—" : v.liqBeyondStop ? "yes" : `<b class="down">NO</b>`}</td></tr>
+        <tr><td>funding</td><td>${fundingCell(t.fundingUsd)}</td></tr>
+        <tr><td>held</td><td class="mono">${esc(fmt(v.heldHours, 1))} h</td></tr>
+        <tr><td>hours left (max hold)</td><td class="mono">${esc(fmt(v.hoursToExpiry, 1))}</td></tr>
+        <tr><td>thesis</td><td>${esc(v.thesis || "not_evaluable")}</td></tr>
+        <tr><td>plan</td><td class="mono">${esc(t.planId || "unplanned")}</td></tr>
+      </table>
+      <div class="alerts-inline" style="margin-top:6px">${alerts}</div>
+      ${notesEditor(t)}
+    </div>`;
+  }).join("") || `<p class="dim">No open trades.</p>`;
+
+  fillSelect("linkTradeId", open.filter((t) => t.planId === null));
+  fillSelect("exitTradeId", open.filter((t) => t.venue === "paper"));
+}
+
+function fillSelect(id, trades) {
+  $(id).innerHTML = trades.map((t) => `<option value="${esc(t.id)}">${esc(t.symbol)} ${esc(t.side)} (${esc(t.id.slice(0, 8))})</option>`).join("")
+    || `<option value="" disabled selected>none</option>`;
+}
+
+function notesEditor(t) {
+  return `<form class="notes-form" data-trade-id="${esc(t.id)}" style="margin-top:8px">
+    <textarea name="notes" placeholder="Notes: why you entered, what you saw, what you'd do differently">${esc(t.notes)}</textarea>
+    <button type="submit" class="secondary">Save notes</button>
+  </form>`;
+}
+
+async function renderClosedTrades(trades) {
+  const closed = trades.filter((t) => t.status === "closed").sort((a, b) => b.updatedAt - a.updatedAt);
+  if (closed.length === 0) { $("closedTrades").innerHTML = `<p class="dim">No closed trades.</p>`; return; }
+  const blocks = await Promise.all(closed.map(async (t) => {
+    let r;
+    try { r = await api(`/api/review/${encodeURIComponent(t.id)}`); }
+    catch (err) { return `<div class="banner warn">${esc(t.symbol)}: review unavailable — ${esc(err.message)}</div>`; }
+    const plan = t.plannedSnapshot;
+    const qty = (fills) => fills.reduce((s, f) => s + f.qty, 0);
+    const avg = (fills) => { const q = qty(fills); return q ? fills.reduce((s, f) => s + f.qty * f.price, 0) / q : null; };
+    const override = r.exitKind === "discretionary"
+      ? `<button type="button" class="secondary thesis-btn" data-trade-id="${esc(t.id)}">Mark exit as thesis_invalidated</button>` : "";
+    return `<details class="review">
+      <summary>
+        <b>${esc(t.symbol)}</b> <span class="pill ${t.side === "long" ? "up" : "down"}">${esc(t.side)}</span>
+        <span class="pill">${esc(t.venue)}</span>
+        <span class="mono ${signCls(r.netPnlUsd)}">${esc(fmt(r.netPnlUsd))} USD</span>
+        <span class="mono">R ${esc(fmt(r.rMultiple, 2))}</span>
+        <span class="pill">${esc(r.exitKind)}</span>
+        <span class="pill ${r.followedPlan ? "up" : "warn"}">${r.followedPlan ? "followed plan" : "deviated"}</span>
+        <span class="dim">${esc(time(t.updatedAt))}</span>
+      </summary>
+      <div class="kv mono">
+        <div><span class="dim">rule</span><span>${esc(r.ruleId || "unplanned")}</span></div>
+        <div><span class="dim">channel / AI stance</span><span>${esc(r.origin || "—")} / ${esc(r.aiStanceAtPlan || "—")}</span></div>
+        <div><span class="dim">entry planned → actual</span><span>${esc(fmt(plan?.referencePrice))} → ${esc(fmt(avg(t.entryFills)))}</span></div>
+        <div><span class="dim">stop / target (plan)</span><span>${esc(fmt(plan?.stopPrice))} / ${esc(fmt(plan?.targetPrice))}</span></div>
+        <div><span class="dim">avg exit</span><span>${esc(fmt(avg(t.exitFills)))}</span></div>
+        <div><span class="dim">size planned → actual</span><span>${esc(fmt(plan?.quantity))} → ${esc(fmt(qty(t.entryFills)))}</span></div>
+        <div><span class="dim">leverage planned → actual</span><span>${esc(fmt(plan?.leverage, 2))} → ${esc(fmt(t.actualLeverage, 2))}</span></div>
+        <div><span class="dim">planned risk</span><span>${esc(fmt(r.plannedRiskUsd))}</span></div>
+        <div><span class="dim">entry slippage</span><span>${esc(pct(r.entrySlippagePct))}</span></div>
+        <div><span class="dim">size deviation</span><span>${esc(pct(r.sizeDeviationPct))}</span></div>
+        <div><span class="dim">fees</span><span>${esc(fmt(r.feesUsd))}</span></div>
+        <div><span class="dim">funding</span><span>${fundingCell(r.fundingUsd)}</span></div>
+        <div><span class="dim">MAE / MFE</span><span>${r.maeMfeAvailable ? `${esc(pct(r.maePct))} / ${esc(pct(r.mfePct))}` : "n/a (klines unavailable)"}</span></div>
+        <div><span class="dim">held</span><span>${esc(time(t.entryFills[0]?.time))} → ${esc(time(t.exitFills.at(-1)?.time))}</span></div>
+      </div>
+      ${override}
+      ${notesEditor(t)}
+    </details>`;
+  }));
+  $("closedTrades").innerHTML = blocks.join("");
+}
+
+function statsTable(stats) {
+  const row = (label, v) => `<tr><td>${esc(label)}</td><td class="mono">${esc(v)}</td></tr>`;
+  const group = (title, obj, cols) => {
+    const entries = Object.entries(obj || {});
+    if (entries.length === 0) return "";
+    return `<h3 style="margin-top:10px">${esc(title)}</h3><div class="table-wrap"><table>
+      <tr><th></th>${cols.map((c) => `<th>${esc(c.label)}</th>`).join("")}</tr>
+      ${entries.map(([k, v]) => `<tr><td>${esc(k)}</td>${cols.map((c) => `<td class="mono">${esc(c.fmt(v[c.key]))}</td>`).join("")}</tr>`).join("")}
+    </table></div>`;
+  };
+  const r2 = (n) => fmt(n, 2);
+  const share = (n) => (n === null || n === undefined ? "—" : `${fmt(n * 100, 1)}%`);
+  return `<table>
+      ${row("closed trades", stats.closedTrades)}
+      ${row("win rate", share(stats.winRate))}
+      ${row("expectancy (R)", r2(stats.expectancyR))}
+      ${row("net P&L (USD)", fmt(stats.totalNetPnlUsd))}
+      ${row("max drawdown (R)", r2(stats.maxDrawdownR))}
+      ${row("plan adherence", share(stats.adherenceRate))}
+    </table>
+    ${group("By rule", stats.byRule, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }])}
+    ${group("Rules vs AI", stats.byOrigin, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }])}
+    ${group("By AI stance (rule trades)", stats.byAiStance, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "winRate", label: "win", fmt: share }])}`;
+}
+
+async function renderStats() {
+  for (const venue of ["paper", "bybit-live"]) {
+    const el = $(venue === "paper" ? "statsPaper" : "statsLive");
+    try { el.innerHTML = statsTable(await api(`/api/stats?venue=${venue}`)); }
+    catch (err) { el.innerHTML = `<p class="warn">${esc(err.message)}</p>`; }
+  }
+}
+
+let refreshing = null;
+function refresh() {
+  refreshing ??= (async () => {
+    try {
+      const [state, trades] = await Promise.all([api("/api/state"), api("/api/trades")]);
+      lastTrades = trades;
+      renderBanners(state);
+      renderOpenTrades(state, trades);
+      await renderClosedTrades(trades);
+      await renderStats();
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
+
+async function submit(action) {
+  try { await action(); await refresh(); } catch (err) { alert(err.message); }
+}
+
+$("linkForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  submit(() => api(`/api/trades/${encodeURIComponent($("linkTradeId").value)}/link`, jsonBody("POST", { planId: $("linkPlanId").value.trim() })));
+});
+$("entryForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  submit(() => api("/api/paper/entry", jsonBody("POST", { planId: $("entryPlanId").value.trim(), fillPrice: Number($("entryFillPrice").value), time: Date.now() })));
+});
+$("exitForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  submit(() => api("/api/paper/exit", jsonBody("POST", {
+    tradeId: $("exitTradeId").value, fillPrice: Number($("exitFillPrice").value), time: Date.now(), exitKind: $("exitKind").value,
+  })));
+});
+document.addEventListener("submit", (e) => {
+  const form = e.target.closest(".notes-form");
+  if (!form) return;
+  e.preventDefault();
+  submit(() => api(`/api/trades/${encodeURIComponent(form.dataset.tradeId)}/notes`, jsonBody("PATCH", { notes: form.elements.notes.value })));
+});
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".thesis-btn");
+  if (!btn) return;
+  submit(() => api(`/api/trades/${encodeURIComponent(btn.dataset.tradeId)}/exit-kind`, jsonBody("PATCH", { exitKind: "thesis_invalidated" })));
+});
+
+// Don't clobber a notes field the owner is typing in when a live event arrives.
+function refreshUnlessEditing() {
+  if (document.activeElement?.tagName === "TEXTAREA") return;
+  refresh().catch(() => {});
+}
+const events = new EventSource("/events");
+events.addEventListener("live", refreshUnlessEditing);
+events.addEventListener("trade", refreshUnlessEditing);
+
+refresh().catch((err) => { $("banners").innerHTML = `<div class="banner crit">${esc(err.message)}</div>`; });
+</script>
+</body>
+</html>

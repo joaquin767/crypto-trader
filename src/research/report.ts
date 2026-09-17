@@ -20,6 +20,11 @@ import type { FeatureName, FeatureVector, SourceSnapshot, SourceStatus } from ".
 import type { AiAnalystSection } from "./ai/types.ts";
 import type { ManualTrade } from "../journal/types.ts";
 
+// Phase 3 (§9's Phase 3 row, §5.8a "research:daily wiring"): `ladderResetByBreaker` stays
+// hardcoded `true` — "until the trip log exists (Phase 4), ladderResetByBreaker is always true
+// (fail closed)" is normative, not a placeholder like Phase 2's values were.
+const LADDER_RESET_BY_BREAKER = true;
+
 export const DISCLAIMER = "Generated analysis for the owner's review. Not investment advice." as const;
 
 export interface DailyReport {
@@ -71,12 +76,17 @@ export function buildReport(input: {
   plannerConfig: PlannerConfig;
   breaker: { tripped: boolean; trigger: string | null; details: string };
   openTrades: ManualTrade[];
+  /** Closed `bybit-live` trade count per `ruleId` (§5.8a leverage ladder, §5.5
+   *  `effectiveMaxLeverage`'s `liveClosedTradesForRule`). Computed by the caller from the full
+   *  journal (not just `openTrades`) — Phase 2 hardcoded 0 here; Phase 3 wires the real count. */
+  liveClosedTradesByRule?: Record<string, number>;
   aiDisabledReason: null | "config" | "cli-flag";
 }): DailyReport {
   const {
     dateUtc, decisionTime, now, ruleSet, ruleSetSha256, snapshots, features,
     plannerConfig, breaker, openTrades, aiDisabledReason,
   } = input;
+  const liveClosedTradesByRule = input.liveClosedTradesByRule ?? {};
 
   const sources = snapshots.map((s) => ({
     sourceId: s.sourceId, status: s.status, statusDetail: s.statusDetail, fetchedAt: s.fetchedAt, sha256: s.sha256,
@@ -109,8 +119,8 @@ export function buildReport(input: {
       openTradeCount,
       breaker.tripped,
       dateUtc,
-      /* liveClosedTradesForRule */ 0, // Phase 2 fixed (§9); real value arrives with Phase 4's gates
-      /* ladderResetByBreaker */ false, // Phase 2 fixed (§9); real value arrives with Phase 4's gates
+      liveClosedTradesByRule[outcome.ruleId] ?? 0,
+      LADDER_RESET_BY_BREAKER,
       instruments[outcome.symbol] ?? null,
       decisionTime,
     );

@@ -51,6 +51,7 @@ export type TradePlan =
       liqToStopRatio: number;
       estRoundTripFeeUsd: number;
       venueIntent: "paper" | "live"; // "live" only if rule.status === "paper-passed" (§8)
+      maxHoldDays: number; // copied from the rule; used by exit classification (§5.8a)
     }
   | {
       kind: "rejected";
@@ -224,6 +225,7 @@ export function planTrade(
     liqToStopRatio,
     estRoundTripFeeUsd,
     venueIntent,
+    maxHoldDays: rule.maxHoldDays,
   };
 }
 

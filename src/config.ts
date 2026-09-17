@@ -191,6 +191,10 @@ export interface ManualTradingConfig {
   maxOpenManualTrades: number; // integer 1..5, default 3
   decisionTimeUtc: "00:15"; // fixed in revision 1
   staleAfterMs: number; // dashboard sync staleness, default 120_000
+  syncIntervalMs: number; // live sync cadence, default 30_000, >= 10_000
+  journalStartTime: string | null; // ISO-8601 UTC; required for live sync (§5.8a), default null
+  fundingSignVerified: boolean; // default false; owner sets true after §12.13
+  breakerResetAt: string | null; // ISO-8601 UTC; owner-set to clear drawdown/consecutiveLosses latches (§5.8a), default null
   journalPort: number; // default 3082
 }
 
@@ -204,6 +208,10 @@ export const DEFAULT_MANUAL_TRADING_CONFIG: ManualTradingConfig = {
   maxOpenManualTrades: 3,
   decisionTimeUtc: "00:15",
   staleAfterMs: 120_000,
+  syncIntervalMs: 30_000,
+  journalStartTime: null,
+  fundingSignVerified: false,
+  breakerResetAt: null,
   journalPort: 3082,
 };
 
@@ -497,6 +505,24 @@ function validateManualTradingConfig(manual: Partial<ManualTradingConfig>): void
       manual.journalPort < 1 || manual.journalPort > 65535
     ) {
       throw new ConfigError("config.manual.journalPort must be an integer port number if set");
+    }
+  }
+  if (manual.syncIntervalMs !== undefined) {
+    if (typeof manual.syncIntervalMs !== "number" || manual.syncIntervalMs < 10_000) {
+      throw new ConfigError("config.manual.syncIntervalMs must be a number >= 10000 if set");
+    }
+  }
+  if (manual.journalStartTime !== undefined && manual.journalStartTime !== null) {
+    if (typeof manual.journalStartTime !== "string" || Number.isNaN(Date.parse(manual.journalStartTime))) {
+      throw new ConfigError("config.manual.journalStartTime must be an ISO-8601 date string or null if set");
+    }
+  }
+  if (manual.fundingSignVerified !== undefined && typeof manual.fundingSignVerified !== "boolean") {
+    throw new ConfigError("config.manual.fundingSignVerified must be a boolean if set");
+  }
+  if (manual.breakerResetAt !== undefined && manual.breakerResetAt !== null) {
+    if (typeof manual.breakerResetAt !== "string" || Number.isNaN(Date.parse(manual.breakerResetAt))) {
+      throw new ConfigError("config.manual.breakerResetAt must be an ISO-8601 date string or null if set");
     }
   }
 }

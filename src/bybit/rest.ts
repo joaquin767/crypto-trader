@@ -301,4 +301,55 @@ export class RestClient {
       await this.client.account.setMarginMode({ setMarginMode: mode as any });
     });
   }
+
+  /**
+   * Read-only API key introspection — specs/daily-catalyst-manual-trading.md §5.8/§5.8a.
+   * Wraps `GET /v5/user/query-api` (SDK `user.getApiKey`). Additive only: no existing method
+   * changes, so the auto-trader is unaffected. Used by the journal server at startup
+   * (`assertReadOnlyKey`) to refuse to run against a key that can place orders or withdraw.
+   */
+  async getApiKeyInfo(): Promise<{ readOnly: 0 | 1; permissions: Record<string, string[]> }> {
+    return this.withReadRetry("/v5/user/query-api", async () => {
+      const res = await this.client.user.getApiKey();
+      const result = res.result as { readOnly: 0 | 1; permissions: Record<string, string[]> };
+      return { readOnly: result.readOnly, permissions: result.permissions ?? {} };
+    });
+  }
+
+  /**
+   * Raw executions (fills) for the manual journal's exchange sync —
+   * specs/daily-catalyst-manual-trading.md §5.8/§5.8a. Unlike getFundingHistory(), this carries
+   * no `execType` filter: the caller (src/journal/exchange-sync.ts) keeps `Trade` and
+   * `BustTrade` rows itself and ignores the rest (e.g. `Funding`, which getFundingHistory
+   * already covers). `cursor` pages through Bybit's `nextPageCursor`.
+   */
+  async getExecutions(
+    category: string, symbol: string, startTime: number, endTime: number, cursor?: string,
+  ): Promise<{ list: unknown[]; nextPageCursor: string }> {
+    return this.withReadRetry("/v5/execution/list", async () => {
+      const res = await this.client.trade.getTradeHistory({
+        category: category as any, symbol, startTime, endTime, limit: 100, cursor,
+      });
+      const result = res.result as any;
+      return { list: result.list ?? [], nextPageCursor: result.nextPageCursor ?? "" };
+    });
+  }
+
+  /**
+   * One page of funding settlements (`execType: "Funding"`) inside an explicit window, for the
+   * manual journal (§5.8a). Unlike getFundingHistory(), which only takes a startTime and so
+   * returns at most Bybit's 7-day default span and one page, this takes both bounds and a cursor
+   * so the caller can cover a whole holding period without silently dropping rows.
+   */
+  async getFundingExecutions(
+    category: string, symbol: string, startTime: number, endTime: number, cursor?: string,
+  ): Promise<{ list: unknown[]; nextPageCursor: string }> {
+    return this.withReadRetry("/v5/execution/list", async () => {
+      const res = await this.client.trade.getTradeHistory({
+        category: category as any, symbol, execType: "Funding", startTime, endTime, limit: 100, cursor,
+      });
+      const result = res.result as any;
+      return { list: result.list ?? [], nextPageCursor: result.nextPageCursor ?? "" };
+    });
+  }
 }
