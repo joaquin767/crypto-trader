@@ -41,6 +41,10 @@ const DAY_MS = 24 * HOUR_MS;
 // (~6 months) before the statement, which is comfortably inside the Fed's typical publication
 // lead time without ever claiming knowledge earlier than realistic (P2).
 const FOMC_SCHEDULE_KNOWN_LAG_MS = 180 * DAY_MS;
+// CPI release dates are a published schedule too (BLS releases each year's calendar months ahead). Marking a
+// date as known only at its own release instant made every *upcoming* CPI invisible, so hoursToNextCpi was
+// missing on every backtest day. 60 days is conservative and still always reveals the next monthly release.
+const CPI_SCHEDULE_KNOWN_LAG_MS = 60 * DAY_MS;
 const FOMC_HISTORY_PATH = "data/manual/fomc-history.json";
 
 export interface BackfillArgs {
@@ -269,7 +273,7 @@ async function buildFredSource(deps: AdapterDeps): Promise<SourceRow[] | { failu
     const t = Date.parse(`${rd.date}T00:00:00Z`);
     if (!Number.isFinite(t)) return { failure: `unparseable release date "${rd.date}"` };
     // §10.3: scheduled release time (08:30 ET, DST-aware).
-    rows.push({ key: "CPI", observedFor: t, availableAt: cpiReleaseInstantUtcMs(rd.date), field: "releaseDate", value: rd.date });
+    rows.push({ key: "CPI", observedFor: t, availableAt: cpiReleaseInstantUtcMs(rd.date) - CPI_SCHEDULE_KNOWN_LAG_MS, field: "releaseDate", value: rd.date });
   }
   return rows;
 }

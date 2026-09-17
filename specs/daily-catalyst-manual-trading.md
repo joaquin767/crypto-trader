@@ -835,11 +835,17 @@ export function replayRule(opts: ReplayOptions): ReplayResult;
   over all trades in the drawn clusters. The CI90 is `[percentile(means, 0.05), percentile(means, 0.95)]` using `percentile` from
   `src/strategy/walkforward.ts:109`. Per-trade i.i.d. resampling is not allowed: it would understate uncertainty for correlated trades.
 - **Permutation control (exposure-matched):** 1 000 runs. Each run keeps the observed cluster structure exactly:
-  - For every observed cluster (its set of symbols), draw one holdout day uniformly from the days that are `eligibleDays` for **all**
-    symbols in that cluster, and simulate those same symbols on that day with a plan built the same way (same side,
-    `stopAtrMultiple`, `targetRMultiple`, `maxHoldDays`, planner, costs). The null therefore has the rule's own symbol mix, trade
-    count and same-day clustering — only the timing is random.
-  - A drawn cluster with any unfilled symbol is redrawn, up to 5 attempts per cluster; a run with any cluster still unfilled is failed.
+  - For every observed cluster (its set of symbols), draw one holdout day uniformly from that cluster's **fillable days**, and
+    simulate those same symbols on that day with a plan built the same way (same side, `stopAtrMultiple`, `targetRMultiple`,
+    `maxHoldDays`, planner, costs). The null therefore has the rule's own symbol mix, trade count and same-day clustering — only
+    the timing is random.
+  - **Fillable days** of a cluster: days in `eligibleDays` for **all** its symbols on which, for every symbol, the planner returns
+    `kind: "plan"` and `simulatePlan` fills. They are computed once per distinct symbol set before any run. Observed trades exist
+    only on such days (a rejected or unfilled plan is never a trade), so conditioning the null on them compares like with like;
+    without it, days rejected for size (common with small capital) made nearly every run fail and the control could never complete.
+  - A cluster whose symbol set has **no** fillable day fails every run → 0 completed runs → `insufficient_data` (step 2b). Fail closed.
+  - (Revised 2026-09-17: the earlier "redraw up to 5 attempts per cluster" produced 0 of 1 000 completed runs for a 128-trade rule
+    on real history.)
   - `p = (1 + #{completed runs with meanR ≥ observed}) / (1 + completedRuns)`. If fewer than 900 runs complete → `insufficient_data` (step 2b).
 - **Concentration:** `topSymbolShare` uses the positive-P&L definition of `src/strategy/walkforward.ts:412-414`.
 - **Drawdown:** `maxDrawdownR` is the largest peak-to-trough of cumulative R in exit-time order.
@@ -1202,6 +1208,7 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 - [ ] AC-94: Permutation preserves exposure: for observed clusters `[{A}, {A}, {A, B}]`, every permutation run simulates exactly 4 trades — A three times and B once — and the `{A, B}` cluster's day is eligible for both symbols.
 - [ ] AC-95: Contiguity: 15 daily bars with one missing day inside the last 15 → `atr14d` missing with reason `gap in daily bars`; the same with no gap → value. A stablecoin comparison row 30 h older than its target → `stablecoinSupplyChange7dPct` missing (`gap`). 5 ETF rows spanning 10 calendar days → `btcEtfNetFlowUsd5d` missing.
 - [ ] AC-96: `insufficient_data` when `decisionDaysWithTrades < 20` even with 40 closed trades.
+- [ ] AC-97: Permutation draws only fillable days: with 100 eligible days of which 90 are `size_below_min` for the symbol and 10 fill, 1 000 runs all complete and every drawn day is one of the 10; with 0 fillable days, 0 runs complete (→ `insufficient_data`, step 2b). A 2-symbol cluster only draws days fillable for both symbols.
 - [ ] AC-87: `topSymbolShare` for per-symbol P&L {A: +8, B: +2, C: −20} is 0.8.
 - [ ] AC-88: d1-check ignores paper trades whose `ruleHash` differs from the current rule, and ignores a gate-d0 artifact with `edge_confirmed` but a different `ruleHash` (→ D1 `failed`, step 1).
 - [ ] AC-89: `unexplainedIncompleteDays`: 5 days since first paper entry, 2 reports incomplete on a source the rule uses, 1 report missing, 1 of those 3 dates listed in `docs/validation/d1-<ruleId>.md` → 2.
@@ -1485,7 +1492,9 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
   necessary filter, never sufficient on its own: **Gate D1 (forward paper) is the only truly out-of-sample test.** Mitigations:
   pre-registration (holdout runs require the rule to be committed; `rulesFileCommit` is recorded), the per-rule 3-run cap and the
   global Bonferroni alpha. Post-hoc tuning after a `no_edge` is visible in git history, not prevented.
-- A26: Backfilled FOMC rows use `availableAt = meeting time − 180 days` (the Fed publishes each year's schedule well ahead; exact
+- A26: Backfilled CPI release dates use `availableAt = release time − 60 days` (BLS publishes the year's schedule months ahead;
+  using the release instant itself hid every upcoming release, so `hoursToNextCpi` was missing on every backtest day), and a
+  backfilled schedule whose coverage extends past T is current at T for staleness. Backfilled FOMC rows use `availableAt = meeting time − 180 days` (the Fed publishes each year's schedule well ahead; exact
   publication dates aren't recorded). `hoursToNextFomc` only looks at the nearest future meeting, so this cannot change a feature
   value within the backtest window. `simulatePlan` derives decision time from the `planId` date prefix (`<date>T00:15:00Z`).
   The 2025-08-22 notation vote listed on the Fed calendar is excluded: it has no rate statement.

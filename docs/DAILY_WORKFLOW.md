@@ -174,19 +174,32 @@ Manual file formats:
 { "asOf": "2026-09-16", "unlocks": [{ "asset": "APT", "time": "2026-10-12T00:00:00Z", "pctOfCirculating": 1.1 }] }
 ```
 
-### Farside is blocked — fallback
+### ETF flows from Farside — browser import
 
-Farside currently answers `403` to the script. Until that changes, drop a CSV per asset and the adapter
-uses it automatically:
+Farside's bot protection answers `403` to scripts, and this project doesn't try to get around it. Instead you
+save the pages in your browser and import them into CSVs the system reads automatically.
 
-```csv
-date,totalUsdMillions
-2026-09-15,-120.4
+1. Open both pages in your browser:
+   - <https://farside.co.uk/bitcoin-etf-flow-all-data/>
+   - <https://farside.co.uk/ethereum-etf-flow-all-data/>
+2. Save each one: **Save Page As… → "Webpage, Complete"** (for example `~/Downloads/farside-btc.html` and
+   `~/Downloads/farside-eth.html`). If the import later says no table was found, try "Webpage, HTML only".
+3. Import both:
+
+```bash
+npm run farside:import -- --btc ~/Downloads/farside-btc.html --eth ~/Downloads/farside-eth.html
 ```
 
-Paths: `data/manual/farside-btc.csv`, `data/manual/farside-eth.csv`. For the daily report, the file's
-modification time is treated as when the data became available. For backtests, include the full history
-(from January 2024); each day's flow is treated as known at 12:00 UTC the following day.
+It prints the days and date range per asset. It writes `data/manual/farside-btc.csv` and `farside-eth.csv`
+(format `date,totalUsdMillions`), merges with what you imported before (newer values win when Farside revises a
+day), and writes **nothing** if either page can't be parsed. The CSVs are gitignored (third-party data).
+
+| Use | How the CSV is treated | How often to import |
+|-----|------------------------|---------------------|
+| Backtests (`npm run backfill`) | Each day's flow counts as known at 12:00 UTC the following day | Once, with the all-data pages (history from January 2024) |
+| Daily report | The file's modification time counts as when the data became available; older than 4 days → ETF features `missing` | **Before 00:15 UTC (21:15 in UTC−3) on each day you want ETF rules evaluated** |
+
+If you skip the daily import, ETF rules simply show `not_evaluable` in that day's report — nothing is guessed.
 
 ---
 

@@ -21,9 +21,10 @@ import type { SourceAdapter, SourceId, SourceRow } from "../types.ts";
 import { okSnapshot, invalidSnapshot, unavailableSnapshot } from "./common.ts";
 
 const USD_MILLIONS_TO_USD = 1_000_000;
-// A plain browser-like UA; Farside has been reported to block non-browser clients.
-const FARSIDE_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+// An honest user agent. Farside's bot protection answers 403 to scripts; this project does not try to look
+// like a browser to get around that. The owner saves the pages in a real browser and imports them with
+// `npm run farside:import` into the CSV fallback read below.
+const FARSIDE_USER_AGENT = "crypto-trader-research/0.2 (personal research; manual CSV import fallback)";
 
 const MONTHS: Record<string, number> = {
   Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,

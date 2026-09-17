@@ -27,6 +27,7 @@ export interface HistoryFile {
 // (read by src/research/features.ts's findAsOfMs) using T's own UTC date, rather than relying on
 // anything recorded in the history file itself.
 const MANUAL_SOURCE_IDS = new Set<SourceId>(["macro-calendar-manual", "unlocks-manual"]);
+const SCHEDULE_SOURCE_IDS = new Set<SourceId>(["fred-release-dates"]);
 const META_KEY = "_meta";
 const META_ASOF_FIELD = "asOf";
 
@@ -65,6 +66,12 @@ export function snapshotsAt(history: readonly HistoryFile[], decisionTime: numbe
 
     if (visible.length === 0) {
       return unavailableSnapshot(file.sourceId, decisionTime, "no history before T");
+    }
+    // A published schedule (CPI release dates) isn't stale because its newest *visible* row is weeks old:
+    // when the backfilled schedule extends past T, it was current at T. Otherwise fall back to the normal
+    // rule so a schedule that stops before T still goes stale.
+    if (SCHEDULE_SOURCE_IDS.has(file.sourceId) && file.coverage.to >= decisionTime) {
+      return okSnapshot(file.sourceId, decisionTime, visible);
     }
     const fetchedAt = maxOf(visible.map((r) => r.availableAt));
     return okSnapshot(file.sourceId, fetchedAt, visible);

@@ -21,8 +21,6 @@ import { mulberry32 } from "./stats.ts";
 import type { SimTrade } from "./simulate.ts";
 import { simulatePlan } from "./simulate.ts";
 
-const MAX_ATTEMPTS_PER_CLUSTER = 5;
-
 export interface PermutationOptions {
   rule: RuleDefinition;
   history: readonly HistoryFile[];
@@ -42,6 +40,9 @@ export interface PermutationOptions {
 export interface PermutationResult {
   meanRs: number[];
   runsAttempted: number;
+  /** Distinct days actually drawn across all runs (sorted) — lets tests and artifacts confirm draws came only
+   *  from fillable days. */
+  drawnDays: string[];
 }
 
 interface ObservedCluster {
@@ -67,11 +68,12 @@ function intersectEligibleDays(eligibleDays: Readonly<Record<string, readonly st
 
 /**
  * Pure. §5.10a: 1 000 runs, each keeping the observed cluster structure exactly. For every
- * observed cluster, draw one holdout day uniformly from the days eligible for ALL symbols in
- * that cluster, and simulate those same symbols on that day with a plan built the same way (same
- * side/stopAtrMultiple/targetRMultiple/maxHoldDays/planner/costs as the rule). A drawn cluster
- * with any unfilled symbol is redrawn, up to 5 attempts; a run with any cluster still unfilled
- * after that is failed (not counted in `meanRs`, but counted in `runsAttempted`).
+ * observed cluster, draw one holdout day uniformly from that cluster's FILLABLE days — eligible for
+ * all its symbols, and for every symbol the planner returns a plan and the simulation fills — and
+ * simulate those same symbols on that day with a plan built the same way (same side /
+ * stopAtrMultiple / targetRMultiple / maxHoldDays / planner / costs). Observed trades only exist on
+ * such days, so the null compares like with like. A cluster with no fillable day fails every run
+ * (not counted in `meanRs`, counted in `runsAttempted`) — fail closed.
  */
 export function runPermutation(opts: PermutationOptions): PermutationResult {
   const { rule, history, plannerConfig, trades, eligibleDays, cutoffMs, slippageBps, runs, seed } = opts;
@@ -98,15 +100,28 @@ export function runPermutation(opts: PermutationOptions): PermutationResult {
   // per rule on the real backfilled history).
   const simCache = new Map<string, SimTrade | null>();
 
+  // Point-in-time snapshots (which hash their rows) are the expensive part and are identical for every symbol on
+  // a day, so features and instrument filters are built once per day for all rule symbols. Fillable-day
+  // precomputation touches every eligible day, which made per-(day, symbol) rebuilding take minutes per rule.
+  const dayCache = new Map<string, { instruments: ReturnType<typeof instrumentFilters>; fvBySymbol: Map<string, ReturnType<typeof buildFeatures>[number]> }>();
+  function dayInputs(day: string, decisionTime: number) {
+    const known = dayCache.get(day);
+    if (known !== undefined) return known;
+    const snapshots = featureSnapshotsAt(history, decisionTime);
+    const fvs = buildFeatures(snapshots, rule.symbols, decisionTime, DEFAULT_STALENESS_MS);
+    const value = { instruments: instrumentFilters(snapshots, rule.symbols), fvBySymbol: new Map(fvs.map((fv) => [fv.symbol, fv])) };
+    dayCache.set(day, value);
+    return value;
+  }
+
   function simulateOne(day: string, symbol: string): SimTrade | null {
     const key = `${day}|${symbol}`;
     const cached = simCache.get(key);
     if (cached !== undefined) return cached;
 
     const decisionTime = Date.parse(`${day}T00:15:00Z`);
-    const snapshots = featureSnapshotsAt(history, decisionTime);
-    const instruments = instrumentFilters(snapshots, rule.symbols);
-    const [fv] = buildFeatures(snapshots, [symbol], decisionTime, DEFAULT_STALENESS_MS);
+    const { instruments, fvBySymbol } = dayInputs(day, decisionTime);
+    const fv = fvBySymbol.get(symbol);
     // Synthesized "triggered" outcome: the permutation control forces entry with the rule's own
     // side/sizing on a random day — it never re-checks entryWhenAll (see file header).
     const outcome: Extract<RuleOutcome, { result: "triggered" }> = {
@@ -125,7 +140,20 @@ export function runPermutation(opts: PermutationOptions): PermutationResult {
     return result;
   }
 
+  // Fillable days per distinct symbol set, computed once before any run. Iterating candidate days in order
+  // (not via the RNG) keeps the draw sequence identical for the same seed regardless of how many days fill.
+  const fillableBySymbolSet = new Map<string, string[]>();
+  const fillableByCluster = clusters.map((c, ci) => {
+    const setKey = [...c.symbols].sort().join(",");
+    const known = fillableBySymbolSet.get(setKey);
+    if (known !== undefined) return known;
+    const fillable = candidatesByCluster[ci]!.filter((day) => c.symbols.every((symbol) => simulateOne(day, symbol) !== null));
+    fillableBySymbolSet.set(setKey, fillable);
+    return fillable;
+  });
+
   const meanRs: number[] = [];
+  const drawn = new Set<string>();
   let runsAttempted = 0;
 
   for (let run = 0; run < runs; run++) {
@@ -134,32 +162,17 @@ export function runPermutation(opts: PermutationOptions): PermutationResult {
     let runFailed = clusters.length === 0;
 
     for (let ci = 0; ci < clusters.length && !runFailed; ci++) {
-      const cluster = clusters[ci]!;
-      const candidates = candidatesByCluster[ci]!;
-      let filled = false;
-
-      for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_CLUSTER && !filled; attempt++) {
-        if (candidates.length === 0) break;
-        const day = candidates[Math.floor(rng() * candidates.length)]!;
-
-        const clusterTrades: SimTrade[] = [];
-        let clusterOk = true;
-        for (const symbol of cluster.symbols) {
-          const sim = simulateOne(day, symbol);
-          if (sim === null) {
-            clusterOk = false;
-            break;
-          }
-          clusterTrades.push(sim);
-        }
-
-        if (clusterOk) {
-          runTrades.push(...clusterTrades);
-          filled = true;
-        }
+      const fillable = fillableByCluster[ci]!;
+      if (fillable.length === 0) {
+        runFailed = true;
+        break;
       }
-
-      if (!filled) runFailed = true;
+      const day = fillable[Math.floor(rng() * fillable.length)]!;
+      drawn.add(day);
+      for (const symbol of clusters[ci]!.symbols) {
+        // Non-null by construction: the day was kept only if every symbol of this set fills (memoized).
+        runTrades.push(simulateOne(day, symbol)!);
+      }
     }
 
     if (runFailed) continue;
@@ -167,5 +180,5 @@ export function runPermutation(opts: PermutationOptions): PermutationResult {
     meanRs.push(meanR);
   }
 
-  return { meanRs, runsAttempted };
+  return { meanRs, runsAttempted, drawnDays: [...drawn].sort() };
 }
