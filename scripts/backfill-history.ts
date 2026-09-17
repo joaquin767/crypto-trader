@@ -80,8 +80,15 @@ function summaryOf(sourceId: SourceId, rows: SourceRow[], failure: string | null
   if (rows.length === 0) {
     return { sourceId, rows: 0, coverage: "-", failure };
   }
-  const from = Math.min(...rows.map((r) => r.observedFor));
-  const to = Math.max(...rows.map((r) => r.observedFor));
+  // Reduce, not Math.min/max(...spread): a multi-year 1h backfill can produce hundreds of
+  // thousands of rows, and spreading that many arguments into Math.min/max overflows the call
+  // stack (found running the Phase 4b smoke test over the real 2024-01-01..2026-09-15 window).
+  let from = rows[0]!.observedFor;
+  let to = rows[0]!.observedFor;
+  for (const r of rows) {
+    if (r.observedFor < from) from = r.observedFor;
+    if (r.observedFor > to) to = r.observedFor;
+  }
   return { sourceId, rows: rows.length, coverage: `${new Date(from).toISOString().slice(0, 10)}..${new Date(to).toISOString().slice(0, 10)}`, failure };
 }
 

@@ -9,7 +9,7 @@ import { evaluateRule } from "../research/rules.ts";
 import type { RuleDefinition, RuleOutcome } from "../research/rules.ts";
 import { instrumentFilters, planTrade } from "../research/planner.ts";
 import type { PlannerConfig } from "../research/planner.ts";
-import type { SourceRow } from "../research/types.ts";
+import type { SourceRow, SourceSnapshot } from "../research/types.ts";
 import type { HistoryFile } from "./history-store.ts";
 import { snapshotsAt } from "./history-store.ts";
 import type { SimTrade } from "./simulate.ts";
@@ -57,6 +57,53 @@ function symbolBarTimes(history: readonly HistoryFile[], symbol: string): number
   return [...times].sort((a, b) => a - b);
 }
 
+/** One symbol's 1h bars, assembled from raw SourceRows, filtered to `availableAt <= cutoffMs`
+ *  BEFORE any field is read (AC-84: a bar the simulation must not see is never touched at all).
+ *  Exported so src/backtest-daily/permutation.ts's exposure-matched control can reuse the exact
+ *  same bar/funding extraction replayRule uses, instead of re-deriving it (§5.10a "Permutation
+ *  control"). */
+export function historyBarsForSymbol(
+  history: readonly HistoryFile[],
+  symbol: string,
+  cutoffMs: number,
+): { t: number; o: number; h: number; l: number; c: number; v: number }[] {
+  const file = history.find((h) => h.sourceId === "bybit-klines-1h");
+  if (!file) return [];
+  const byTime = new Map<number, { t: number; o?: number; h?: number; l?: number; c?: number; v?: number }>();
+  for (const r of file.rows) {
+    if (r.availableAt > cutoffMs) continue;
+    if (r.key !== symbol) continue;
+    const bar = byTime.get(r.observedFor) ?? { t: r.observedFor };
+    if (r.field === "open") bar.o = r.value as number;
+    else if (r.field === "high") bar.h = r.value as number;
+    else if (r.field === "low") bar.l = r.value as number;
+    else if (r.field === "close") bar.c = r.value as number;
+    else if (r.field === "volume") bar.v = r.value as number;
+    byTime.set(r.observedFor, bar);
+  }
+  const complete = [...byTime.values()].filter(
+    (b): b is { t: number; o: number; h: number; l: number; c: number; v: number } =>
+      b.o !== undefined && b.h !== undefined && b.l !== undefined && b.c !== undefined && b.v !== undefined,
+  );
+  complete.sort((a, b) => a.t - b.t);
+  return complete;
+}
+
+/** One symbol's funding rows, filtered to `availableAt <= cutoffMs` (same reasoning as
+ *  `historyBarsForSymbol`). Exported for permutation.ts. */
+export function fundingRowsForSymbol(history: readonly HistoryFile[], symbol: string, cutoffMs: number): SourceRow[] {
+  const fundingFile = history.find((h) => h.sourceId === "bybit-funding");
+  return (fundingFile?.rows ?? []).filter((r) => r.availableAt <= cutoffMs && r.key === symbol && r.field === "fundingRate");
+}
+
+/** Point-in-time snapshots + instrument filters for a decision day, restricted to the sources
+ *  `buildFeatures` actually reads (excludes bybit-klines-1h, which only feeds simulation, never
+ *  a rule feature) so repeated calls — as permutation.ts makes, once per drawn day per run — stay
+ *  cheap even over a multi-year 1h history. Exported for permutation.ts. */
+export function featureSnapshotsAt(history: readonly HistoryFile[], decisionTime: number): SourceSnapshot[] {
+  return snapshotsAt(history.filter((h) => h.sourceId !== "bybit-klines-1h"), decisionTime);
+}
+
 /** A day is eligible for a symbol when its 1h bars cover decisionTime through
  *  decisionTime + maxHoldDays*24h, without a gap, and that horizon is within cutoffMs
  *  (§5.10a "eligibleDays" — used by the permutation control, Phase 4b). */
@@ -93,41 +140,11 @@ export function replayRule(opts: ReplayOptions): ReplayResult {
   // Symbol -> exitTime of that symbol's currently-open sim trade, or undefined if flat.
   const openUntil = new Map<string, number>();
   const fundingBySymbol = new Map<string, SourceRow[]>();
-  const barsBySymbol = new Map<string, ReturnType<typeof historyBars>>();
-
-  function historyBars(symbol: string): { t: number; o: number; h: number; l: number; c: number; v: number }[] {
-    const file = history.find((h) => h.sourceId === "bybit-klines-1h");
-    if (!file) return [];
-    const byTime = new Map<number, { t: number; o?: number; h?: number; l?: number; c?: number; v?: number }>();
-    for (const r of file.rows) {
-      // Filtered to availableAt <= cutoffMs BEFORE any field is read, so a bar the simulation
-      // must not see (its close time is beyond the holdout cutoff) is never touched at all —
-      // not merely excluded after the fact (AC-84).
-      if (r.availableAt > cutoffMs) continue;
-      if (r.key !== symbol) continue;
-      const bar = byTime.get(r.observedFor) ?? { t: r.observedFor };
-      if (r.field === "open") bar.o = r.value as number;
-      else if (r.field === "high") bar.h = r.value as number;
-      else if (r.field === "low") bar.l = r.value as number;
-      else if (r.field === "close") bar.c = r.value as number;
-      else if (r.field === "volume") bar.v = r.value as number;
-      byTime.set(r.observedFor, bar);
-    }
-    const complete = [...byTime.values()].filter(
-      (b): b is { t: number; o: number; h: number; l: number; c: number; v: number } =>
-        b.o !== undefined && b.h !== undefined && b.l !== undefined && b.c !== undefined && b.v !== undefined,
-    );
-    complete.sort((a, b) => a.t - b.t);
-    return complete;
-  }
+  const barsBySymbol = new Map<string, ReturnType<typeof historyBarsForSymbol>>();
 
   for (const symbol of rule.symbols) {
-    barsBySymbol.set(symbol, historyBars(symbol));
-    const fundingFile = history.find((h) => h.sourceId === "bybit-funding");
-    fundingBySymbol.set(
-      symbol,
-      (fundingFile?.rows ?? []).filter((r) => r.availableAt <= cutoffMs && r.key === symbol && r.field === "fundingRate"),
-    );
+    barsBySymbol.set(symbol, historyBarsForSymbol(history, symbol, cutoffMs));
+    fundingBySymbol.set(symbol, fundingRowsForSymbol(history, symbol, cutoffMs));
   }
 
   const eligibleDays: Record<string, string[]> = {};
@@ -178,7 +195,11 @@ export function replayRule(opts: ReplayOptions): ReplayResult {
       const funding = fundingBySymbol.get(symbol) ?? [];
       const sim = simulatePlan(plan, bars, funding, rule.maxHoldDays, slippageBps, cutoffMs);
       if ("kind" in sim && sim.kind === "unfilled") {
-        unfilled.push({ day, symbol, reason: sim.reason });
+        // Bars past cutoffMs were removed before simulating (leakage protection), so the simulator only sees
+        // "ran out of bars". Name the real cause when the hold window itself reaches past the cutoff.
+        const holdEnd = decisionTime + rule.maxHoldDays * 24 * 60 * 60 * 1000 + 60 * 60 * 1000;
+        const reason = holdEnd > cutoffMs && !sim.reason.includes("cutoff") ? `cutoff: hold window extends beyond cutoffMs (${sim.reason})` : sim.reason;
+        unfilled.push({ day, symbol, reason });
         continue;
       }
 

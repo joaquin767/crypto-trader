@@ -867,6 +867,13 @@ export function replayRule(opts: ReplayOptions): ReplayResult;
   window, across all rule ids. Renaming a rule therefore gains nothing: each additional test on the same holdout raises the bar for
   every later test (Bonferroni over the whole family).
 - The ledger is append-only by convention and reviewed in git; editing or deleting lines is visible in history and is out of policy.
+- **Gate modes use fixed inputs** (added after the Phase 4 independent verification found two bypasses): in `holdout` and
+  `d1-check` mode the CLI rejects `--rules-path`, `--history-dir`, `--reports-root`, `--journal-path`, `--artifacts-dir`,
+  `--ledger-path`, `--docs-validation-dir`, `--seed`, `--resamples` and `--permutation-runs`; they exist for `dev` only.
+  `--slippage-bps` is accepted in gate modes only when ≥ 5 (costs may only become more conservative). The pre-registration git
+  checks run against the rules file actually loaded, and an untracked file counts as uncommitted.
+- **AI ids in d1-check:** `ai-analyst-<hash8>` selects trades whose full `ruleHash` starts with that 8-char prefix; rules-file ids
+  always match the full hash exactly.
 
 #### d1-check
 

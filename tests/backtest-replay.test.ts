@@ -158,5 +158,7 @@ test("AC-84: replayRule never reads (accesses .value of) a 1h bar beyond cutoffM
     // silently filled using data beyond holdoutStart.
     assert.equal(result.trades.length, 0);
     assert.equal(result.unfilled.length, 1);
+    // AC-81 through the real pipeline: the artifact names the cutoff, not a data gap.
+    assert.match(result.unfilled[0]!.reason, /^cutoff/);
   });
 });

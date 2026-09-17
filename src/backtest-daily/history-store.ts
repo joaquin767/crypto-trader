@@ -34,6 +34,15 @@ function utcDateStr(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
+/** Not Math.max(...spread): a multi-year 1h history file's `visible` rows can number in the
+ *  hundreds of thousands, and spreading that many arguments overflows the call stack (found
+ *  running the Phase 4b smoke test over the real backfilled history). */
+function maxOf(values: readonly number[]): number {
+  let max = values[0]!;
+  for (const v of values) if (v > max) max = v;
+  return max;
+}
+
 /**
  * Pure. Point-in-time view at decision time T: for each source, rows with availableAt ≤ T.
  * The snapshot's `fetchedAt` = the newest such row's `availableAt` (NOT T), so buildFeatures'
@@ -50,14 +59,14 @@ export function snapshotsAt(history: readonly HistoryFile[], decisionTime: numbe
       const asOfMs = Date.parse(`${dateStr}T00:00:00Z`);
       const metaRow: SourceRow = { key: META_KEY, observedFor: asOfMs, availableAt: asOfMs, field: META_ASOF_FIELD, value: dateStr };
       const rows = [metaRow, ...visible];
-      const fetchedAt = Math.max(...rows.map((r) => r.availableAt));
+      const fetchedAt = maxOf(rows.map((r) => r.availableAt));
       return okSnapshot(file.sourceId, fetchedAt, rows);
     }
 
     if (visible.length === 0) {
       return unavailableSnapshot(file.sourceId, decisionTime, "no history before T");
     }
-    const fetchedAt = Math.max(...visible.map((r) => r.availableAt));
+    const fetchedAt = maxOf(visible.map((r) => r.availableAt));
     return okSnapshot(file.sourceId, fetchedAt, visible);
   });
 }

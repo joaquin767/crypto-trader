@@ -38,6 +38,30 @@ export const DEFAULT_STALENESS_MS: Readonly<Record<SourceId, number>> = {
   "unlocks-manual": 7 * DAY_MS,
 };
 
+/** FeatureName -> the single SourceId that feeds it, per §5.3a's table (Phase 4b: used by
+ *  Gate D1's `unexplainedIncompleteDays` to know which report sources matter for a given rule,
+ *  without re-deriving it from FeatureValue.sourceId at runtime for days whose report never ran
+ *  buildFeatures for this rule). */
+export const FEATURE_SOURCE_ID: Readonly<Record<FeatureName, SourceId>> = {
+  close: "bybit-klines-1d",
+  return1d: "bybit-klines-1d",
+  return7d: "bybit-klines-1d",
+  atr14d: "bybit-klines-1d",
+  realizedVol7d: "bybit-klines-1d",
+  fundingRate8hAvg3d: "bybit-funding",
+  fundingRatePercentile90d: "bybit-funding",
+  oiChange3dPct: "bybit-oi",
+  btcEtfNetFlowUsd1d: "farside-btc-etf",
+  btcEtfNetFlowUsd5d: "farside-btc-etf",
+  ethEtfNetFlowUsd1d: "farside-eth-etf",
+  stablecoinSupplyChange7dPct: "defillama-stablecoins",
+  fearGreed: "fear-greed",
+  hoursToNextFomc: "macro-calendar-manual",
+  hoursToNextCpi: "fred-release-dates",
+  daysToNextUnlock: "unlocks-manual",
+  nextUnlockPctOfFloat: "unlocks-manual",
+};
+
 const META_KEY = "_meta";
 const META_ASOF_FIELD = "asOf";
 
