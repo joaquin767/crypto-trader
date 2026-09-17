@@ -35,6 +35,7 @@ npm run start
 
 | Document | What it covers |
 |----------|---------------|
+| **[DAILY_WORKFLOW.md](docs/DAILY_WORKFLOW.md)** | **New direction:** daily catalyst research, manual execution, trade journal — the daily cycle, gates before real money, setup, build status |
 | **[SETUP.md](docs/SETUP.md)** | Installation, configuration, running the app |
 | **[USER_GUIDE.md](docs/USER_GUIDE.md)** | Dashboard walkthrough, interpreting signals, monitoring risk, **FAQ** |
 | **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** | The three pillars: Trading Engine, Learning System, Web Dashboard |

@@ -50,3 +50,9 @@ __pycache__/
 
 # Exported fold feature matrices (~large, regenerate with scripts/export-folds.ts)
 data/validation/folds/
+
+# Daily-catalyst research pipeline (specs/daily-catalyst-manual-trading.md §10.2) —
+# regenerable snapshots and reports; not committed. data/manual/ (owner-maintained inputs)
+# and data/validation/daily/ (gate artifacts) are NOT covered by this and stay committed.
+data/snapshots/
+reports/

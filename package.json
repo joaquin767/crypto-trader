@@ -8,7 +8,9 @@
     "test": "node --test --experimental-strip-types \"tests/*.test.ts\"",
     "verify": "npm run typecheck && npm run test",
     "start": "node --experimental-strip-types src/main.ts --config ./config.json",
-    "dashboard": "node --experimental-strip-types src/main.ts --config ./config.json --port 3081"
+    "dashboard": "node --experimental-strip-types src/main.ts --config ./config.json --port 3081",
+    "snapshot:daily": "node --experimental-strip-types scripts/snapshot-daily.ts --config ./config.json",
+    "research:daily": "node --experimental-strip-types scripts/research-daily.ts --config ./config.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

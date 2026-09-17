@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "etf-flow-momentum",
+      "version": 1,
+      "description": "EXAMPLE — not a recommendation: format fixture for A10/X1. BTC spot-ETF net inflows are a market-wide risk-on signal (§2.2 X1); this rule goes long when the trailing 5-day flow is strongly positive and invalidates on a sharp single-day reversal. Not backtested; status stays \"experimental\" until Gate D0/D1.",
+      "evidence": ["X1"],
+      "status": "experimental",
+      "symbols": ["APT/USDT", "SOL/USDT"],
+      "side": "long",
+      "entryWhenAll": [
+        { "feature": "btcEtfNetFlowUsd5d", "op": ">", "value": 100000000 }
+      ],
+      "invalidateWhenAny": [
+        { "feature": "btcEtfNetFlowUsd1d", "op": "<", "value": -50000000 }
+      ],
+      "stopAtrMultiple": 2,
+      "targetRMultiple": 3,
+      "maxHoldDays": 5,
+      "forwardOnly": false,
+      "origin": "rules-file"
+    },
+    {
+      "id": "pre-fomc-cpi-derisk",
+      "version": 1,
+      "description": "EXAMPLE — not a recommendation: format fixture for A10/X2. Encodes \"no new entries within 24h of a scheduled macro event\" as an entry gate rather than a separate blocking mechanism (this engine only expresses entry rules): entryWhenAll requires both hoursToNextFomc and hoursToNextCpi to exceed 24h, so the rule simply cannot trigger — and therefore proposes no new plan — inside that 24h pre-event window; a modest already-trending filter (return1d > 0) supplies the rest of the entry thesis so the example has a real signal, not just a calendar gate. Not backtested.",
+      "evidence": ["X2"],
+      "status": "experimental",
+      "symbols": ["APT/USDT", "SOL/USDT"],
+      "side": "long",
+      "entryWhenAll": [
+        { "feature": "hoursToNextFomc", "op": ">", "value": 24 },
+        { "feature": "hoursToNextCpi", "op": ">", "value": 24 },
+        { "feature": "return1d", "op": ">", "value": 0 }
+      ],
+      "invalidateWhenAny": [
+        { "feature": "hoursToNextFomc", "op": "<", "value": 24 },
+        { "feature": "hoursToNextCpi", "op": "<", "value": 24 }
+      ],
+      "stopAtrMultiple": 1.5,
+      "targetRMultiple": 2,
+      "maxHoldDays": 3,
+      "forwardOnly": false,
+      "origin": "rules-file"
+    },
+    {
+      "id": "funding-extreme-contrarian",
+      "version": 1,
+      "description": "EXAMPLE — not a recommendation: format fixture for A10/X4. Extreme positive funding (>95th percentile of the trailing 90 days) implies crowded leveraged longs; this rule fades that crowding with a short, and invalidates once funding normalizes back under the 50th percentile. Not backtested.",
+      "evidence": ["X4"],
+      "status": "experimental",
+      "symbols": ["APT/USDT", "SOL/USDT"],
+      "side": "short",
+      "entryWhenAll": [
+        { "feature": "fundingRatePercentile90d", "op": ">", "value": 95 }
+      ],
+      "invalidateWhenAny": [
+        { "feature": "fundingRatePercentile90d", "op": "<", "value": 50 }
+      ],
+      "stopAtrMultiple": 2.5,
+      "targetRMultiple": 4,
+      "maxHoldDays": 7,
+      "forwardOnly": false,
+      "origin": "rules-file"
+    }
+  ]
+}
