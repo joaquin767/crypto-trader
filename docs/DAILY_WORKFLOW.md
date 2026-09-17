@@ -20,7 +20,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 3b — Trade chart & replay | Price chart per trade with plan levels, volatility range, live follow and candle-by-candle replay | ✅ Built |
 | 4 — Backtest & gates | `npm run backfill` + `npm run backtest:daily`: dev backtests, Gate D0 (holdout) and Gate D1 (paper) verdicts | ✅ Built |
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas, via the `claude-cli` subscription by default (or `anthropic-api`) | ✅ Built — AC-54/AC-54a live-smoke sign-off pending |
-| 5 — Analyst persona | Interactive Claude Code skill to write and critique rules | ⏳ Planned |
+| 5 — Analyst persona | Interactive Claude Code skill to discuss reports and write or critique rules | ✅ Built — AC-39 owner check pending |
 
 This table is updated at the end of every phase.
 
@@ -461,6 +461,29 @@ Farside ETF-flow import) will show `missing` if they weren't fetched inside the 
 any rule. A late AI run is honest, just data-thin — never back-dated.
 
 ---
+
+## Talking to the analyst (persona skill)
+
+The `crypto-fundamental-analyst` skill (`.claude/skills/crypto-fundamental-analyst/SKILL.md`) is the
+interactive counterpart of the AI channel. Open Claude Code in this repo and ask, for example:
+
+- "Analyze today's report" or "discuss `reports/2026-09-17.md`"
+- "Critique the rule `funding-extreme-contrarian`"
+- "Propose a rule for post-unlock weakness in APT"
+
+It loads the same `prompts/ai-analyst.md` the batch analyst uses, so both speak with one voice.
+
+| It does | It never does |
+|---------|---------------|
+| Restates a report's `outcomes`, `plans` and `aiAnalyst` as they are and comments on them | Invents an outcome, a plan, or a number that isn't in the report |
+| Cites a §2.2 evidence ID (`X1`–`X14`) with its strength for every claim, or says `no evidence in §2.2` | Upgrades weak evidence to sound convincing |
+| Returns a proposed rule as a JSON block in `research-rules.json` format (`status: experimental`) | Writes to `reports/`, `data/`, `research-rules.json` or `config.json` — you paste the rule yourself and bump `version` on edits |
+| Ends every reply with the report disclaimer | States buy/sell/size/leverage/venue for anything not already in a report's `plans` |
+
+A rule it proposes still owes Gate D0 (unless `forwardOnly`) and Gate D1 before any leverage, like any
+other rule. **AC-39 owner check:** run it once on a real report and confirm the four "never" rules above
+held; `tests/persona-skill.test.ts` checks the mechanical half (file, frontmatter, references, the four
+statements).
 
 ## Writing rules
 

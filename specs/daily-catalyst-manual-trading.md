@@ -9,7 +9,9 @@ Status: **Revision 2 — accepted spec. Phases 1–4 implemented; Phase 4b (AI a
 defaulting to the `claude-cli` provider (the owner's Claude subscription via the locally installed CLI, no
 per-call API billing) with `anthropic-api` as the pay-as-you-go alternative (§4.15–4.19, §5.13, §6.8
 AC-40..53/AC-40a..c all green; AC-54/AC-54a are the manual live-smoke checks and stay for the owner);
-Phase 5 (interactive persona) not implemented.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
+Phase 5 (interactive persona, §4.7) implemented as `.claude/skills/crypto-fundamental-analyst/SKILL.md` via
+gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`; AC-39's mechanical half is covered by
+`tests/persona-skill.test.ts`, its owner run stays manual.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
 the owner's request: Claude participates in each daily recommendation.
 
 Owner (every module this spec creates or changes):

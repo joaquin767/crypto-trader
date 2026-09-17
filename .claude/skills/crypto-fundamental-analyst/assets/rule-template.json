@@ -1,0 +1,20 @@
+{
+  "id": "kebab-case-id",
+  "version": 1,
+  "description": "What the rule claims, which catalyst it encodes, and why the evidence ID applies. Not backtested; status stays experimental until Gate D0/D1.",
+  "evidence": ["X1"],
+  "status": "experimental",
+  "symbols": ["APT/USDT", "SOL/USDT"],
+  "side": "long",
+  "entryWhenAll": [
+    { "feature": "btcEtfNetFlowUsd5d", "op": ">", "value": 100000000 }
+  ],
+  "invalidateWhenAny": [
+    { "feature": "btcEtfNetFlowUsd1d", "op": "<", "value": -50000000 }
+  ],
+  "stopAtrMultiple": 2,
+  "targetRMultiple": 3,
+  "maxHoldDays": 5,
+  "forwardOnly": false,
+  "origin": "rules-file"
+}
