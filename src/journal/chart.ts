@@ -8,6 +8,7 @@
 // guessing or interpolating.
 
 import type { Kline } from "../research/types.ts";
+import type { PlanOrigin } from "../research/planner.ts";
 import type { ManualTrade, ManualTradeVenue } from "./types.ts";
 import { firstEntryTime, lastExitTime, netPnlUsdOf } from "./trade-analytics.ts";
 
@@ -94,7 +95,7 @@ export interface TradeChartData {
   side: "long" | "short";
   venue: ManualTradeVenue;
   status: "open" | "closed";
-  origin: "rules-file" | "ai-analyst" | null;
+  origin: PlanOrigin | null;
   ruleId: string | null;
   leverage: number | null; // actualLeverage for bybit-live, plannedSnapshot.leverage for paper
   interval: ChartInterval;

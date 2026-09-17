@@ -62,8 +62,16 @@ reports/
 data/history/
 
 # Manual trading journal (specs/daily-catalyst-manual-trading.md §5.7/§10.2) — real trade data,
-# not a template; never committed.
+# not a template; never committed. `manual-journal.json*` also covers the persona channel's
+# sync-freshness sidecar `manual-journal.sync.json` (§5.15, revision 3) — machine state, not a
+# record — and its own `.tmp` write-then-rename file.
 manual-journal.json*
+manual-journal.sync.json*
+
+# Persona decision channel (specs/daily-catalyst-manual-trading.md §5.15/§10.2, revision 3) — the
+# Plan Report is fully derived from the committed decision + that date's report; `reports/` is
+# already ignored above, this line documents that `reports/*.decision.md` is covered by it.
+reports/*.decision.md
 
 # Farside ETF flow CSVs imported from browser-saved pages (`npm run farside:import`) — third-party data,
 # refreshed by the owner; not committed.

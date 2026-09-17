@@ -183,6 +183,40 @@ export interface Config {
    *  The API key is never read from here — only from `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
    *  or the SDK's default credential chain (§5.11). */
   ai?: Partial<AiAnalystConfig>;
+
+  /** Persona decision channel settings (specs/daily-catalyst-manual-trading.md §5.11, §5.15,
+   *  revision 3). There is no `enabled` flag: the channel is a CLI (`npm run decide`) the owner
+   *  runs by hand, so not running it is how it stays off. No credential and no network is
+   *  involved. */
+  persona?: Partial<PersonaConfig>;
+}
+
+/** specs/daily-catalyst-manual-trading.md §5.11 (revision 3). Every field has a spec-defined
+ *  default, so `config.persona` may be a partial override of any subset of them. */
+export interface PersonaConfig {
+  executionWindowMs: number; // > 0, default 21_600_000 (6 h). The Plan Report's execute window: decidedAt + this (§13 A29)
+  maxEntryGapAtr: number; // > 0, default 0.25. Gap rule: skip the entry if |mark − referencePrice| > this × atr14d (§13 A30)
+  channelStatus: "experimental" | "paper-passed"; // default "experimental"; owner-edited after the persona channel's Gate D1 (§8.5)
+  passedSkillHash: string | null; // default null; loadConfig throws ConfigError when channelStatus is "paper-passed" and this is null
+  ownerTimeZone: string; // IANA zone for the Plan Report's second clock column, default "America/Argentina/Buenos_Aires" (UTC−3)
+  decisionsRoot: string; // default "data/decisions"
+  skillRoot: string; // default ".claude/skills/crypto-fundamental-analyst" — the skillHash input root (§5.15)
+}
+
+export const DEFAULT_PERSONA_CONFIG: PersonaConfig = {
+  executionWindowMs: 21_600_000,
+  maxEntryGapAtr: 0.25,
+  channelStatus: "experimental",
+  passedSkillHash: null,
+  ownerTimeZone: "America/Argentina/Buenos_Aires",
+  decisionsRoot: "data/decisions",
+  skillRoot: ".claude/skills/crypto-fundamental-analyst",
+};
+
+/** Merges `config.persona` (if any) over the spec's revision-3 defaults. loadConfig already
+ *  validated any override present, so this never throws. */
+export function resolvePersonaConfig(config: Pick<Config, "persona">): PersonaConfig {
+  return { ...DEFAULT_PERSONA_CONFIG, ...config.persona };
 }
 
 /** specs/daily-catalyst-manual-trading.md §5.11. Every field has a spec-defined default, so
@@ -326,6 +360,9 @@ export function loadConfig(path: string): Config {
   }
   if (raw["ai"] !== undefined) {
     config.ai = raw["ai"] as Partial<AiAnalystConfig>;
+  }
+  if (raw["persona"] !== undefined) {
+    config.persona = raw["persona"] as Partial<PersonaConfig>;
   }
 
   // Validation
@@ -488,6 +525,9 @@ export function loadConfig(path: string): Config {
   if (config.ai !== undefined) {
     validateAiAnalystConfig(config.ai);
   }
+  if (config.persona !== undefined) {
+    validatePersonaConfig(config.persona);
+  }
 
   return config as Config;
 }
@@ -632,5 +672,34 @@ function validateAiAnalystConfig(ai: Partial<AiAnalystConfig>): void {
   }
   if (ai.timeoutMs !== undefined && (typeof ai.timeoutMs !== "number" || ai.timeoutMs <= 0)) {
     throw new ConfigError("config.ai.timeoutMs must be a positive number if set");
+  }
+}
+
+const PERSONA_CHANNEL_STATUSES = ["experimental", "paper-passed"] as const;
+
+function validatePersonaConfig(persona: Partial<PersonaConfig>): void {
+  if (persona.executionWindowMs !== undefined && (typeof persona.executionWindowMs !== "number" || persona.executionWindowMs <= 0)) {
+    throw new ConfigError("config.persona.executionWindowMs must be a positive number if set");
+  }
+  if (persona.maxEntryGapAtr !== undefined && (typeof persona.maxEntryGapAtr !== "number" || persona.maxEntryGapAtr <= 0)) {
+    throw new ConfigError("config.persona.maxEntryGapAtr must be a positive number if set");
+  }
+  if (persona.channelStatus !== undefined && !(PERSONA_CHANNEL_STATUSES as readonly string[]).includes(persona.channelStatus)) {
+    throw new ConfigError(`config.persona.channelStatus must be one of ${PERSONA_CHANNEL_STATUSES.join(", ")} if set`);
+  }
+  if (persona.passedSkillHash !== undefined && persona.passedSkillHash !== null && typeof persona.passedSkillHash !== "string") {
+    throw new ConfigError("config.persona.passedSkillHash must be a string or null if set");
+  }
+  if (persona.channelStatus === "paper-passed" && (persona.passedSkillHash ?? null) === null) {
+    throw new ConfigError('config.persona.passedSkillHash must be set when config.persona.channelStatus is "paper-passed" (§5.11)');
+  }
+  if (persona.ownerTimeZone !== undefined && (typeof persona.ownerTimeZone !== "string" || persona.ownerTimeZone.length === 0)) {
+    throw new ConfigError("config.persona.ownerTimeZone must be a non-empty string if set");
+  }
+  if (persona.decisionsRoot !== undefined && (typeof persona.decisionsRoot !== "string" || persona.decisionsRoot.length === 0)) {
+    throw new ConfigError("config.persona.decisionsRoot must be a non-empty string if set");
+  }
+  if (persona.skillRoot !== undefined && (typeof persona.skillRoot !== "string" || persona.skillRoot.length === 0)) {
+    throw new ConfigError("config.persona.skillRoot must be a non-empty string if set");
   }
 }

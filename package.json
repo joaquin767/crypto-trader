@@ -14,6 +14,7 @@
     "journal": "node --experimental-strip-types src/server/journal-server.ts --config ./config.json",
     "backfill": "node --experimental-strip-types scripts/backfill-history.ts --config ./config.json",
     "backtest:daily": "node --experimental-strip-types scripts/backtest-daily.ts --config ./config.json",
+    "decide": "node --experimental-strip-types scripts/decide-daily.ts --config ./config.json",
     "farside:import": "node --experimental-strip-types scripts/farside-import.ts"
   },
   "devDependencies": {

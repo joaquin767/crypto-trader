@@ -29,13 +29,15 @@ export interface PlannerConfig {
   maxOpenManualTrades: number;
 }
 
+export type PlanOrigin = "rules-file" | "ai-analyst" | "persona"; // "persona" added in revision 3 (§5.15)
+
 export type TradePlan =
   | {
       kind: "plan";
       planId: string;
       ruleId: string;
       ruleHash: string;
-      origin: "rules-file" | "ai-analyst";
+      origin: PlanOrigin;
       symbol: string;
       side: "long" | "short";
       referencePrice: number;
@@ -52,11 +54,17 @@ export type TradePlan =
       estRoundTripFeeUsd: number;
       venueIntent: "paper" | "live"; // "live" only if rule.status === "paper-passed" (§8)
       maxHoldDays: number; // copied from the rule; used by exit classification (§5.8a)
+      /** Revision 3, persona provenance. Both OPTIONAL so `planTrade` is not modified: it never
+       *  sets them, and `src/decision/decide.ts` attaches them afterwards (§5.15
+       *  `withPersonaProvenance`). Set only on a `origin: "persona"` plan whose choice was
+       *  `kind: "report-plan"`. */
+      basedOnPlanId?: string | null; // the report planId the persona chose
+      basedOnRuleKey?: string | null; // "<that plan's ruleId>@<first 8 chars of its ruleHash>" (§5.9 key format)
     }
   | {
       kind: "rejected";
       ruleId: string;
-      origin: "rules-file" | "ai-analyst";
+      origin: PlanOrigin;
       symbol: string;
       reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing";
     };

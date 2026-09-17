@@ -8,6 +8,7 @@
 
 import type { ThesisState } from "../research/rules.ts";
 import type { AiStance } from "../research/ai/types.ts";
+import type { PlanOrigin } from "../research/planner.ts";
 import type { Kline } from "../research/types.ts";
 import type { ExitKind, Fill, ManualTrade, ManualTradeVenue } from "./types.ts";
 import type { SyncResult } from "./exchange-sync.ts";
@@ -146,8 +147,11 @@ export interface ClosedTradeReview {
   tradeId: string;
   ruleId: string | null;
   ruleHash: string | null;
-  origin: "rules-file" | "ai-analyst" | null;
+  origin: PlanOrigin | null;
   aiStanceAtPlan: AiStance | null;
+  /** Revision 3: `plannedSnapshot.basedOnRuleKey`, null unless origin "persona" on a chosen
+   *  report plan (§5.9). */
+  basedOnRuleKey: string | null;
   plannedRiskUsd: number | null;
   netPnlUsd: number;
   feesUsd: number;
@@ -215,6 +219,7 @@ export function reviewClosedTrade(t: ManualTrade, klines1h: readonly Kline[]): C
     ruleHash: t.ruleHash,
     origin: plan?.origin ?? null,
     aiStanceAtPlan: t.aiStanceAtPlan,
+    basedOnRuleKey: plan?.basedOnRuleKey ?? null,
     plannedRiskUsd,
     netPnlUsd,
     feesUsd,
@@ -241,8 +246,14 @@ export interface AggregateStats {
   adherenceRate: number | null;
   /** key "<ruleId>@<first 8 chars of ruleHash>" so rule versions never blend (§5.9). */
   byRule: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;
-  byOrigin: Record<"rules-file" | "ai-analyst", { closed: number; expectancyR: number | null; netPnlUsd: number }>;
+  byOrigin: Record<PlanOrigin, { closed: number; expectancyR: number | null; netPnlUsd: number }>;
   byAiStance: Record<AiStance | "none", { closed: number; expectancyR: number | null; winRate: number | null }>;
+  /** Revision 3. Closed persona-origin trades whose decision picked another channel's plan,
+   *  grouped by that plan's rule: key = `basedOnRuleKey` ("<ruleId>@<first 8 chars of ruleHash>",
+   *  same format as `byRule`). Answers "which rules does the persona actually pick, and how do
+   *  those picks do?" Persona ideas of the persona's own (no `basedOnPlanId`) are not counted
+   *  here — they appear only in `byOrigin.persona`. It counts *closed trades*, not decisions. */
+  chosenByPersona: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;
 }
 
 function mean(values: readonly number[]): number | null {
@@ -283,6 +294,7 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
   const byOrigin: AggregateStats["byOrigin"] = {
     "rules-file": { closed: 0, expectancyR: null, netPnlUsd: 0 },
     "ai-analyst": { closed: 0, expectancyR: null, netPnlUsd: 0 },
+    "persona": { closed: 0, expectancyR: null, netPnlUsd: 0 },
   };
   const byAiStance: AggregateStats["byAiStance"] = {
     support: { closed: 0, expectancyR: null, winRate: null },
@@ -290,15 +302,17 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
     oppose: { closed: 0, expectancyR: null, winRate: null },
     none: { closed: 0, expectancyR: null, winRate: null },
   };
+  const chosenByPersona: AggregateStats["chosenByPersona"] = {};
 
   const ruleBuckets = new Map<string, ReturnType<typeof bucket>>();
-  const originBuckets: Record<"rules-file" | "ai-analyst", ReturnType<typeof bucket>> = {
-    "rules-file": bucket(), "ai-analyst": bucket(),
+  const originBuckets: Record<PlanOrigin, ReturnType<typeof bucket>> = {
+    "rules-file": bucket(), "ai-analyst": bucket(), "persona": bucket(),
   };
   const stanceBuckets: Record<AiStance | "none", { rs: number[]; wins: number; closed: number }> = {
     support: { rs: [], wins: 0, closed: 0 }, caution: { rs: [], wins: 0, closed: 0 },
     oppose: { rs: [], wins: 0, closed: 0 }, none: { rs: [], wins: 0, closed: 0 },
   };
+  const chosenBuckets = new Map<string, ReturnType<typeof bucket>>();
 
   for (const r of reviews) {
     // Unplanned trades (no ruleId) are skipped, as before; a ruleId without a hash (should not
@@ -325,12 +339,21 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
       if (r.rMultiple !== null) s.rs.push(r.rMultiple);
       if (r.netPnlUsd > 0) s.wins += 1;
     }
+    // chosenByPersona (revision 3): closed persona-origin trades whose decision picked another
+    // channel's plan (basedOnRuleKey non-null); a persona idea of its own is not counted here.
+    if (r.origin === "persona" && r.basedOnRuleKey !== null) {
+      const b = chosenBuckets.get(r.basedOnRuleKey) ?? bucket();
+      b.closed += 1;
+      b.netPnlUsd += r.netPnlUsd;
+      if (r.rMultiple !== null) b.rs.push(r.rMultiple);
+      chosenBuckets.set(r.basedOnRuleKey, b);
+    }
   }
 
   for (const [key, b] of ruleBuckets) {
     byRule[key] = { closed: b.closed, expectancyR: mean(b.rs), netPnlUsd: b.netPnlUsd };
   }
-  for (const origin of ["rules-file", "ai-analyst"] as const) {
+  for (const origin of ["rules-file", "ai-analyst", "persona"] as const) {
     const b = originBuckets[origin];
     byOrigin[origin] = { closed: b.closed, expectancyR: mean(b.rs), netPnlUsd: b.netPnlUsd };
   }
@@ -338,6 +361,12 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
     const s = stanceBuckets[stance];
     byAiStance[stance] = { closed: s.closed, expectancyR: mean(s.rs), winRate: s.closed === 0 ? null : s.wins / s.closed };
   }
+  for (const [key, b] of chosenBuckets) {
+    chosenByPersona[key] = { closed: b.closed, expectancyR: mean(b.rs), netPnlUsd: b.netPnlUsd };
+  }
 
-  return { venue, closedTrades, winRate, expectancyR, totalNetPnlUsd, maxDrawdownR, adherenceRate, byRule, byOrigin, byAiStance };
+  return {
+    venue, closedTrades, winRate, expectancyR, totalNetPnlUsd, maxDrawdownR, adherenceRate,
+    byRule, byOrigin, byAiStance, chosenByPersona,
+  };
 }

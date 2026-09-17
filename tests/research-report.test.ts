@@ -229,3 +229,29 @@ test("an open AI-origin trade whose persisted rule IS supplied gets a real thesi
   assert.equal(report.openTradeThesis.length, 1);
   assert.equal(report.openTradeThesis[0]!.state, "invalidated");
 });
+
+// ── AC-118 (revision 3): persona-origin thesis loaded from personaRules ──────────────────────────
+
+function personaOriginTrade(ruleId: string): ManualTrade {
+  return {
+    id: "persona-trade-1", venue: "paper", symbol: "BTC/USDT", side: "long", planId: "2026-09-16:persona-3f9a1c2b:BTC/USDT",
+    ruleId, ruleHash: "hash", plannedSnapshot: null, aiStanceAtPlan: null, entryFills: [], exitFills: [],
+    actualLeverage: null, exchangeLiqPrice: null, fundingUsd: 0, status: "open", exitKind: null,
+    notes: "", createdAt: 0, updatedAt: 0,
+  };
+}
+
+test("AC-118: an open persona-origin trade whose decision file's personaRule was never loaded -> not_evaluable", () => {
+  const trade = personaOriginTrade("persona-3f9a1c2b");
+  const report = buildReport(buildInput({ openTrades: [trade] })); // no `personaRules` map passed
+  assert.equal(report.openTradeThesis.length, 1);
+  assert.equal(report.openTradeThesis[0]!.state, "not_evaluable");
+});
+
+test("AC-118: an open persona-origin trade whose personaRule IS supplied gets a real thesis evaluation", () => {
+  const trade = personaOriginTrade("persona-3f9a1c2b");
+  const personaRule = rule({ id: "persona-3f9a1c2b", origin: "persona", invalidateWhenAny: [{ feature: "close", op: ">", value: 1 }] });
+  const report = buildReport(buildInput({ openTrades: [trade], personaRules: { "persona-3f9a1c2b": personaRule } }));
+  assert.equal(report.openTradeThesis.length, 1);
+  assert.equal(report.openTradeThesis[0]!.state, "invalidated");
+});

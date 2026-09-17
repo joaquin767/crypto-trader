@@ -60,6 +60,9 @@ import type { ManualTrade } from "../src/journal/types.ts";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const AI_PREFIX = "ai-analyst-";
+// Revision 3 (§8.5, §5.10a "AI ids in d1-check"): a `persona-*` id is treated exactly like an
+// `ai-analyst-*` one — synthetic, always forwardOnly, hash taken from the id's 8-char prefix.
+const PERSONA_PREFIX = "persona-";
 
 // ── deps (git/time/fs injected so tests never shell out or touch real files) ───────────────────
 
@@ -304,17 +307,27 @@ function isAiAnalystId(id: string): boolean {
   return id.startsWith(AI_PREFIX);
 }
 
+/** persona-<hash8> ids are synthetic too (§8.5, "AI ids in d1-check"): built by
+ *  personaIdeaToRule/reportPlanToPersonaRule, never present in research-rules.json. Same
+ *  treatment as an ai-analyst-* id — always forwardOnly, hash from the id's 8-char prefix. */
+function isPersonaId(id: string): boolean {
+  return id.startsWith(PERSONA_PREFIX);
+}
+
 interface RuleIdentity {
   ruleId: string;
   ruleHash: string;
   forwardOnly: boolean;
-  origin: "rules-file" | "ai-analyst";
-  rule: RuleDefinition | null; // null for the synthetic ai-analyst-* identity
+  origin: "rules-file" | "ai-analyst" | "persona";
+  rule: RuleDefinition | null; // null for a synthetic ai-analyst-*/persona-* identity
 }
 
 function resolveRuleIdentity(id: string, ruleSet: RuleSet): RuleIdentity | null {
   if (isAiAnalystId(id)) {
     return { ruleId: id, ruleHash: id.slice(AI_PREFIX.length), forwardOnly: true, origin: "ai-analyst", rule: null };
+  }
+  if (isPersonaId(id)) {
+    return { ruleId: id, ruleHash: id.slice(PERSONA_PREFIX.length), forwardOnly: true, origin: "persona", rule: null };
   }
   const rule = ruleSet.rules.find((r) => r.id === id);
   if (!rule) return null;
@@ -518,7 +531,10 @@ async function runD1Check(
     throw err;
   }
 
-  const selected = selectPaperTradesForRule(journal, identity.ruleId, identity.ruleHash, identity.origin === "ai-analyst" ? "prefix" : "exact");
+  const selected = selectPaperTradesForRule(
+    journal, identity.ruleId, identity.ruleHash,
+    identity.origin === "ai-analyst" || identity.origin === "persona" ? "prefix" : "exact",
+  );
   const reviews: D1Review[] = selected.map((t) => ({ ...reviewClosedTrade(t, []), venue: t.venue }));
 
   const now = deps.now();

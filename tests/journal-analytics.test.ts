@@ -129,6 +129,7 @@ test("reviewClosedTrade: unplanned trade has null plannedRiskUsd/rMultiple", () 
 function review(overrides: Partial<ClosedTradeReview> = {}): ClosedTradeReview {
   return {
     tradeId: "t", ruleId: "r1", ruleHash: "hash12345678", origin: "rules-file", aiStanceAtPlan: null,
+    basedOnRuleKey: null,
     plannedRiskUsd: 1, netPnlUsd: 0, feesUsd: 0, fundingUsd: 0, rMultiple: 0,
     entrySlippagePct: null, sizeDeviationPct: null, maePct: 0, mfePct: 0,
     exitKind: "target", followedPlan: true,
@@ -185,4 +186,25 @@ test("aggregate: byOrigin separates rules-file from ai-analyst", () => {
   const stats = aggregate(reviews, "paper");
   assert.equal(stats.byOrigin["rules-file"].closed, 1);
   assert.equal(stats.byOrigin["ai-analyst"].closed, 1);
+});
+
+test("revision 3: byOrigin.persona and chosenByPersona are always present and zero-filled when empty", () => {
+  const stats = aggregate([], "paper");
+  assert.deepEqual(stats.byOrigin.persona, { closed: 0, expectancyR: null, netPnlUsd: 0 });
+  assert.deepEqual(stats.chosenByPersona, {});
+});
+
+test("revision 3: chosenByPersona groups closed persona-origin trades by basedOnRuleKey; a persona's own idea (no basedOnRuleKey) is not counted", () => {
+  const reviews: ClosedTradeReview[] = [
+    review({ tradeId: "p1", origin: "persona", ruleId: "persona-3f9a1c2b", ruleHash: "h".repeat(64), basedOnRuleKey: "etf-flow-momentum@aaaaaaaa", netPnlUsd: 5, rMultiple: 1.5 }),
+    review({ tradeId: "p2", origin: "persona", ruleId: "persona-3f9a1c2b", ruleHash: "h".repeat(64), basedOnRuleKey: "etf-flow-momentum@aaaaaaaa", netPnlUsd: -2, rMultiple: -0.5 }),
+    review({ tradeId: "p3", origin: "persona", ruleId: "persona-3f9a1c2b", ruleHash: "h".repeat(64), basedOnRuleKey: null, netPnlUsd: 3, rMultiple: 1 }),
+  ];
+  const stats = aggregate(reviews, "paper");
+  assert.equal(stats.byOrigin.persona.closed, 3);
+  assert.equal(Object.keys(stats.chosenByPersona).length, 1);
+  const key = stats.chosenByPersona["etf-flow-momentum@aaaaaaaa"]!;
+  assert.equal(key.closed, 2);
+  assert.equal(key.netPnlUsd, 3);
+  assert.ok(Math.abs(key.expectancyR! - 0.5) < 1e-9);
 });

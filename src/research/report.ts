@@ -88,6 +88,12 @@ export function buildReport(input: {
    *  (AC-53), the same fallback already used for a missing FeatureVector. Phase 4b gap
    *  resolution — see this file's own header for the analogous outcomes/plans one. */
   aiRules?: Record<string, RuleDefinition>;
+  /** Revision 3 (§5.8a): the decision file's `personaRule` for currently open persona-origin
+   *  trades, keyed by `ruleId` (same convention as `aiRules`) — `research-rules.json` never
+   *  contains a "persona" rule either. Missing from this map (decision file absent/unreadable,
+   *  or never loaded) -> `openTradeThesis.state: "not_evaluable"` (AC-118), same fallback as a
+   *  missing AI rule. */
+  personaRules?: Record<string, RuleDefinition>;
   aiDisabledReason: null | "config" | "cli-flag";
 }): DailyReport {
   const {
@@ -96,6 +102,7 @@ export function buildReport(input: {
   } = input;
   const liveClosedTradesByRule = input.liveClosedTradesByRule ?? {};
   const aiRules = input.aiRules ?? {};
+  const personaRules = input.personaRules ?? {};
 
   const sources = snapshots.map((s) => ({
     sourceId: s.sourceId, status: s.status, statusDetail: s.statusDetail, fetchedAt: s.fetchedAt, sha256: s.sha256,
@@ -140,7 +147,7 @@ export function buildReport(input: {
   const openTradeThesis: DailyReport["openTradeThesis"] = [];
   for (const trade of openTrades) {
     if (trade.status !== "open" || trade.ruleId === null) continue;
-    const rule = rulesById.get(trade.ruleId) ?? aiRules[trade.ruleId];
+    const rule = rulesById.get(trade.ruleId) ?? aiRules[trade.ruleId] ?? personaRules[trade.ruleId];
     const fv = features.find((f) => f.symbol === trade.symbol);
     if (!rule || !fv) {
       openTradeThesis.push({ tradeId: trade.id, ruleId: trade.ruleId, state: "not_evaluable", conditions: [] });
