@@ -83,6 +83,20 @@ test("readSnapshots returns the latest revision per source", () => {
   });
 });
 
+test("readSnapshots ignores non-snapshot files in the date directory (the AI channel's ai-analyst.raw.json)", () => {
+  withTempDir((dir) => {
+    const snap = fixtureSnapshot();
+    writeSnapshot("2026-09-16", snap, { rootDir: dir });
+    // §5.13 puts the AI channel's raw response next to the snapshots: an array of events, no rows.
+    writeFileSync(join(dir, "2026-09-16", "ai-analyst.raw.json"), JSON.stringify([{ type: "system" }, { type: "result" }]));
+    writeFileSync(join(dir, "2026-09-16", "notes.json"), JSON.stringify({ hello: "world" }));
+
+    const result = readSnapshots("2026-09-16", { rootDir: dir });
+    assert.equal(result.length, 1);
+    assert.equal(result[0]!.sourceId, snap.sourceId);
+  });
+});
+
 test("writeSnapshot computes sha256 of JSON.stringify(rows) itself, ignoring a caller-supplied value", () => {
   withTempDir((dir) => {
     const snap = fixtureSnapshot({ sha256: "totally-wrong" });

@@ -293,6 +293,7 @@ function writePersonaDecision(dir: string, overrides: { executeUntil?: number } 
       timeExitOnOrBefore: DECISION + 5 * 86_400_000, nextReportAt: DECISION + 86_400_000,
       ownerTimeZone: "America/Argentina/Buenos_Aires",
     },
+    ownerTimeZone: "America/Argentina/Buenos_Aires",
     disclaimer: "Generated analysis for the owner's review. Not investment advice.",
   };
   writeFileSync(join(dir, "decisions", "2026-09-16.json"), JSON.stringify(decision));

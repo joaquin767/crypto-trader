@@ -431,6 +431,7 @@ async function runPlanMode(
     basedOnPlanId,
     basedOnRuleKey,
     ownerProtocol,
+    ownerTimeZone: pctx.personaCfg.ownerTimeZone,
     disclaimer: "Generated analysis for the owner's review. Not investment advice.",
   };
 

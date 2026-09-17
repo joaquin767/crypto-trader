@@ -1509,6 +1509,7 @@ export interface DailyDecision {
   personaRule: RuleDefinition | null;
   basedOnPlanId: string | null; basedOnRuleKey: string | null;    // non-null iff choice.kind === "report-plan"
   ownerProtocol: OwnerProtocol | null;                            // null iff plan is null
+  ownerTimeZone: string;                                          // persona.ownerTimeZone at decide time, on every decision (no-trade included): the Plan Report's second clock column must never fall back to UTC
   disclaimer: "Generated analysis for the owner's review. Not investment advice.";
 }
 

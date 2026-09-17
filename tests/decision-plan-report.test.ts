@@ -102,6 +102,7 @@ function makeDecision(): { decision: DailyDecision; report: DailyReport } {
     validation: { ok: true, rejections: [], unverifiedWebRefs: [] },
     plan, personaRule, basedOnPlanId: sourcePlan.planId, basedOnRuleKey: `${RULE.id}@${ruleHash(RULE).slice(0, 8)}`,
     ownerProtocol,
+    ownerTimeZone: PERSONA_CFG.ownerTimeZone,
     disclaimer: "Generated analysis for the owner's review. Not investment advice.",
   };
   return { decision, report };
@@ -150,6 +151,12 @@ test("AC-106: a no-trade decision still renders sections 2, 4 and 7", () => {
   assert.match(md, /## 2\. When to come back/);
   assert.match(md, /## 4\. Stances on every plan in today's report/);
   assert.match(md, /## 7\. Other open positions/);
+  // The second clock column comes from the decision's own ownerTimeZone, not from the (null)
+  // ownerProtocol — the first real no-trade run printed "UTC+0" here.
+  assert.match(md, /decided \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC \(\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC-3\)/);
+  assert.doesNotMatch(md, /UTC\+0\)/);
+  // The no-trade come-back table still names the paper-exit recording step for earlier positions.
+  assert.match(md, /Position closed[^\n]*POST \/api\/paper\/exit/);
 });
 
 test("AC-119: other open positions lists exactly the other open trades, and excludes the decision's own", () => {

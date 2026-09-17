@@ -353,6 +353,7 @@ function writePersonaDecisionFixture(decisionsRoot: string, date: string, ruleId
     input: { dateUtc: date, choice: { kind: "no-trade", reason: "unused" }, stances: [], news: [], rationale: "r" },
     validation: { ok: true, rejections: [], unverifiedWebRefs: [] },
     plan: null, personaRule, basedOnPlanId: null, basedOnRuleKey: null, ownerProtocol: null,
+    ownerTimeZone: "America/Argentina/Buenos_Aires",
     disclaimer: "Generated analysis for the owner's review. Not investment advice.",
   };
   writeFileSync(join(decisionsRoot, `${date}.json`), JSON.stringify(decision));

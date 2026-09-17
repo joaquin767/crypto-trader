@@ -161,7 +161,7 @@ function renderSection2(decision: DailyDecision): string[] {
     );
   } else {
     lines.push(
-      "| **Position closed** (an earlier open trade) | Record/confirm the exit as usual, then `review closed trade` at the next report | " + reviewPathHint + " |",
+      "| **Position closed** (an earlier open trade) | Paper: record the exit the same day with `POST /api/paper/exit` (`exitKind` stop / target / time); live: `npm run journal` syncs it. Then `review closed trade` at the next report | " + reviewPathHint + " |",
     );
     lines.push(
       "| **Position still open** (an earlier open trade) | `manage open position` for that trade at the next report | " + managePathHint + " |",
@@ -270,7 +270,9 @@ export function renderPlanReport(
   report: DailyReport,
   otherOpenTrades: readonly OtherOpenTradeRow[] = [],
 ): string {
-  const tz = decision.ownerProtocol?.ownerTimeZone ?? "UTC";
+  // Found on the first real no-trade run: `ownerProtocol` is null when there is no plan, and the
+  // second clock column silently became UTC+0. The zone now travels on the decision itself.
+  const tz = decision.ownerTimeZone ?? decision.ownerProtocol?.ownerTimeZone ?? "UTC";
   const lines: string[] = [];
 
   const plan = decision.plan;
