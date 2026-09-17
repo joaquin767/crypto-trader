@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 
+import type { AiAnalystConfig } from "./research/ai/types.ts";
+
 export interface Config {
   exchange: string;            // e.g. "binance", "coinbase"
   apiKey: string;
@@ -176,6 +178,11 @@ export interface Config {
   /** Manual trading pipeline settings (research:daily / planner / journal). Presence of this
    *  key (even `{}`) turns on the revision-1 hard cap: riskPerTradePercent <= 1. */
   manual?: Partial<ManualTradingConfig>;
+
+  /** AI analyst channel settings (specs/daily-catalyst-manual-trading.md §5.11, §5.13).
+   *  The API key is never read from here — only from `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
+   *  or the SDK's default credential chain (§5.11). */
+  ai?: Partial<AiAnalystConfig>;
 }
 
 /** specs/daily-catalyst-manual-trading.md §5.11. Every field has a spec-defined default, so
@@ -219,6 +226,35 @@ export const DEFAULT_MANUAL_TRADING_CONFIG: ManualTradingConfig = {
  *  validated any override present, so this never throws. */
 export function resolveManualTradingConfig(config: Pick<Config, "manual">): ManualTradingConfig {
   return { ...DEFAULT_MANUAL_TRADING_CONFIG, ...config.manual };
+}
+
+export type { AiAnalystConfig } from "./research/ai/types.ts";
+
+/** specs/daily-catalyst-manual-trading.md §5.11. Every field has a spec-defined default, so
+ *  `config.ai` may be a partial override of any subset of them. `channelStatus`/`passedPromptHash`
+ *  are the owner-edited Gate D1 record for the AI channel (§8.4) — they start conservative
+ *  (`"experimental"`, `null`) so a fresh checkout never runs the AI channel at anything but
+ *  leverage 1 / paper venue. */
+export const DEFAULT_AI_ANALYST_CONFIG: AiAnalystConfig = {
+  enabled: false,
+  model: "claude-opus-5",
+  effort: "high",
+  maxTokens: 32_000,
+  webSearchMaxUses: 5,
+  maxIdeasPerDay: 3,
+  monthlyBudgetUsd: 15,
+  inputUsdPerMTok: 5,
+  outputUsdPerMTok: 25,
+  webSearchUsdPerRequest: 0.01,
+  channelStatus: "experimental",
+  passedPromptHash: null,
+  timeoutMs: 600_000,
+};
+
+/** Merges `config.ai` (if any) over the spec's revision-1 defaults. loadConfig already
+ *  validated any override present, so this never throws. */
+export function resolveAiAnalystConfig(config: Pick<Config, "ai">): AiAnalystConfig {
+  return { ...DEFAULT_AI_ANALYST_CONFIG, ...config.ai };
 }
 
 export class ConfigError extends Error {
@@ -285,6 +321,9 @@ export function loadConfig(path: string): Config {
   // distinguish an explicit `undefined` value from a genuinely absent key.
   if (raw["manual"] !== undefined) {
     config.manual = raw["manual"] as Partial<ManualTradingConfig>;
+  }
+  if (raw["ai"] !== undefined) {
+    config.ai = raw["ai"] as Partial<AiAnalystConfig>;
   }
 
   // Validation
@@ -444,6 +483,9 @@ export function loadConfig(path: string): Config {
       throw new ConfigError("config.riskPerTradePercent must be <= 1 when config.manual is present (revision 1 hard cap)");
     }
   }
+  if (config.ai !== undefined) {
+    validateAiAnalystConfig(config.ai);
+  }
 
   return config as Config;
 }
@@ -524,5 +566,62 @@ function validateManualTradingConfig(manual: Partial<ManualTradingConfig>): void
     if (typeof manual.breakerResetAt !== "string" || Number.isNaN(Date.parse(manual.breakerResetAt))) {
       throw new ConfigError("config.manual.breakerResetAt must be an ISO-8601 date string or null if set");
     }
+  }
+}
+
+const AI_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+const AI_CHANNEL_STATUSES = ["experimental", "paper-passed"] as const;
+
+function validateAiAnalystConfig(ai: Partial<AiAnalystConfig>): void {
+  if (ai.enabled !== undefined && typeof ai.enabled !== "boolean") {
+    throw new ConfigError("config.ai.enabled must be a boolean if set");
+  }
+  if (ai.model !== undefined && (typeof ai.model !== "string" || ai.model.length === 0)) {
+    throw new ConfigError("config.ai.model must be a non-empty string if set");
+  }
+  if (ai.effort !== undefined && !(AI_EFFORT_LEVELS as readonly string[]).includes(ai.effort)) {
+    throw new ConfigError(`config.ai.effort must be one of ${AI_EFFORT_LEVELS.join(", ")} if set`);
+  }
+  if (ai.maxTokens !== undefined) {
+    if (typeof ai.maxTokens !== "number" || !Number.isInteger(ai.maxTokens) || ai.maxTokens <= 0) {
+      throw new ConfigError("config.ai.maxTokens must be a positive integer if set");
+    }
+  }
+  if (ai.webSearchMaxUses !== undefined) {
+    if (
+      typeof ai.webSearchMaxUses !== "number" || !Number.isInteger(ai.webSearchMaxUses) ||
+      ai.webSearchMaxUses < 0 || ai.webSearchMaxUses > 10
+    ) {
+      throw new ConfigError("config.ai.webSearchMaxUses must be an integer in 0..10 if set");
+    }
+  }
+  if (ai.maxIdeasPerDay !== undefined) {
+    if (
+      typeof ai.maxIdeasPerDay !== "number" || !Number.isInteger(ai.maxIdeasPerDay) ||
+      ai.maxIdeasPerDay < 0 || ai.maxIdeasPerDay > 3
+    ) {
+      throw new ConfigError("config.ai.maxIdeasPerDay must be an integer in 0..3 if set");
+    }
+  }
+  if (ai.monthlyBudgetUsd !== undefined && (typeof ai.monthlyBudgetUsd !== "number" || ai.monthlyBudgetUsd <= 0)) {
+    throw new ConfigError("config.ai.monthlyBudgetUsd must be a positive number if set");
+  }
+  for (const field of ["inputUsdPerMTok", "outputUsdPerMTok", "webSearchUsdPerRequest"] as const) {
+    const v = ai[field];
+    if (v !== undefined && (typeof v !== "number" || v < 0)) {
+      throw new ConfigError(`config.ai.${field} must be a non-negative number if set`);
+    }
+  }
+  if (ai.channelStatus !== undefined && !(AI_CHANNEL_STATUSES as readonly string[]).includes(ai.channelStatus)) {
+    throw new ConfigError(`config.ai.channelStatus must be one of ${AI_CHANNEL_STATUSES.join(", ")} if set`);
+  }
+  if (ai.passedPromptHash !== undefined && ai.passedPromptHash !== null && typeof ai.passedPromptHash !== "string") {
+    throw new ConfigError("config.ai.passedPromptHash must be a string or null if set");
+  }
+  if (ai.channelStatus === "paper-passed" && (ai.passedPromptHash ?? null) === null) {
+    throw new ConfigError('config.ai.passedPromptHash must be set when config.ai.channelStatus is "paper-passed" (§5.11)');
+  }
+  if (ai.timeoutMs !== undefined && (typeof ai.timeoutMs !== "number" || ai.timeoutMs <= 0)) {
+    throw new ConfigError("config.ai.timeoutMs must be a positive number if set");
   }
 }

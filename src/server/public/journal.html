@@ -82,7 +82,7 @@ details.review summary{cursor:pointer;display:flex;gap:10px;flex-wrap:wrap;align
     </div>
     <select id="chartTradeSelect" aria-label="Chart trade"></select>
   </div>
-  <p id="chartAiEmpty" class="dim" hidden>AI analyst arrives in Phase 4b.</p>
+  <p id="chartAiEmpty" class="dim" hidden>No AI-origin trades yet — the AI channel proposes forward-only, unvalidated ideas (see the daily report); once one is linked or recorded as a trade, it appears here.</p>
   <p id="chartEmpty" class="dim" hidden>No trades to chart yet.</p>
   <div id="chartBody" hidden>
     <div class="chart-card-row" id="chartCardRow"></div>
@@ -234,6 +234,7 @@ function renderOpenTrades(state, trades) {
         <tr><td>hours left (max hold)</td><td class="mono">${esc(fmt(v.hoursToExpiry, 1))}</td></tr>
         <tr><td>thesis</td><td>${esc(v.thesis || "not_evaluable")}</td></tr>
         <tr><td>plan</td><td class="mono">${esc(t.planId || "unplanned")}</td></tr>
+        <tr><td>channel / AI stance</td><td class="mono">${esc(plan?.origin || "—")} / ${esc(t.aiStanceAtPlan || "—")}</td></tr>
       </table>
       <div class="alerts-inline" style="margin-top:6px">${alerts}</div>
       ${notesEditor(t)}
@@ -330,7 +331,8 @@ function statsTable(stats) {
     </table>
     ${group("By rule", stats.byRule, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }], ruleKeyLabel)}
     ${group("Rules vs AI", stats.byOrigin, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }])}
-    ${group("By AI stance (rule trades)", stats.byAiStance, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "winRate", label: "win", fmt: share }])}`;
+    ${group("By AI stance (rule trades)", stats.byAiStance, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "winRate", label: "win", fmt: share }])}
+    ${stats.aiStanceNoPredictiveValue ? `<p class="warn" style="margin-top:6px">AI stance has no measured predictive value</p>` : ""}`;
 }
 
 async function renderStats() {

@@ -5,8 +5,9 @@
 > fixes (open-trade counter, disable-reason contract, gate-reset field list, `aiIdeaToRule` fields,
 > `RestClient.getApiKeyInfo` ownership, 429 AC) were applied after acceptance.
 
-Status: **Revision 2 — accepted spec. Phases 1–2 implemented (PR #1); Phase 3 contract (§5.8a, AC-55..68) under
-implementation; Phases 4, 4b, 5 not implemented.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
+Status: **Revision 2 — accepted spec. Phases 1–4 implemented; Phase 4b (AI analyst channel) implemented
+(§4.15–4.19, §5.13, §6.8 AC-40..53 all green; AC-54 is the manual live-smoke check and stays for the owner);
+Phase 5 (interactive persona) not implemented.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
 the owner's request: Claude participates in each daily recommendation.
 
 Owner (every module this spec creates or changes):
@@ -1273,22 +1274,22 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 
 ### 6.8 AI analyst (P0 for the AI channel; the rules channel does not depend on it)
 All tests use a fake `AiClientPort`; no test calls the network.
-- [ ] AC-40: Given the port returns each `failed` reason in turn, when `runAiAnalyst` runs, then `status === "unavailable"`, `reason` contains the failure reason, `plans` and `assessments` are empty, and the rules report written before the call is byte-identical afterward except for the `aiAnalyst` section.
-- [ ] AC-41: Given AI enabled and a fake port returning a valid output, then every rule plan in the final report deep-equals the same plan from a run with `--no-ai` (AI never modifies rule plans).
-- [ ] AC-42: Given an idea citing `{kind:"feature", symbol:"BTC/USDT", feature:"fundingRate8hAvg3d", value: 0.0002}` while the FeatureVector value is `0.0003`, then the idea is absent from `ideas`/`plans` and `rejected` contains `{path:"ideas[0]", reason:"unverifiable_feature"}`.
-- [ ] AC-43: Given an idea citing a web URL not present in `webResults`, then it is rejected with `unverifiable_web`; given the URL present, it is kept.
-- [ ] AC-44: Given an assessment for a `planId` not in `rulePlans`, then it is rejected `unknown_plan`; given an idea on a symbol not in `configSymbols`, then `symbol_not_configured`; given an idea with zero refs, then `no_evidence`.
-- [ ] AC-45: Given 5 verified ideas and `maxIdeasPerDay = 3`, then exactly the first 3 remain and 2 items are rejected `over_limit`.
-- [ ] AC-46: Given `ai.channelStatus = "experimental"`, or `"paper-passed"` with `passedPromptHash` ≠ the current hash, then every AI plan has `origin:"ai-analyst"`, `leverage: 1`, `venueIntent:"paper"`.
-- [ ] AC-47: Given `monthToDateSpendUsd >= monthlyBudgetUsd`, then the fake port's `analyze` call count is 0 and `status === "skipped_budget"`.
-- [ ] AC-48: Given a `failed` result carrying usage, then one ledger line is appended with that usage and `resultKind:"failed"`.
-- [ ] AC-49: Given any change to the system prompt text, output schema, model, effort, maxTokens, webSearchMaxUses, or maxIdeasPerDay, then `promptVersionHash` changes; given a change only to monthlyBudgetUsd, pricing fields, timeoutMs, channelStatus or passedPromptHash, it is identical.
-- [ ] AC-49a: Given `aiDisabledReason: null`, when `buildReport` runs, then `aiAnalyst.status === "pending"` and `reason === ""`; given `"config"`, then `"disabled"` with reason `"ai.enabled is false"`; given `"cli-flag"`, then `"disabled"` with reason `"--no-ai"`.
-- [ ] AC-49b: Given a report file for today whose `aiAnalyst.status === "pending"` and no `--refetch`, when `research:daily` runs, then it exits 3 and prints `AI step incomplete for <date>; rerun with --refetch`.
-- [ ] AC-50: Given closed rule-origin reviews with AI stances [support +1R, support +2R, oppose −1R, none +0.5R], then `byAiStance.support = {closed:2, expectancyR:1.5, winRate:1}`, `byAiStance.oppose = {closed:1, expectancyR:-1, winRate:0}`, `byAiStance.caution.closed = 0`; AI-origin reviews do not appear in `byAiStance`.
-- [ ] AC-51: Given no `ANTHROPIC_API_KEY` and no SDK credential, then `research:daily` exits 0 with `aiAnalyst.status === "unavailable"`, reason `no_api_key`.
-- [ ] AC-52: `renderReportMarkdown` output contains the heading `AI analyst channel — forward-only, unvalidated` exactly once when `aiAnalyst.status !== "disabled"`, and every AI plan appears only under it.
-- [ ] AC-53: Given an open AI-origin trade whose `data/ai-rules/<planId>.json` is missing, then its `openTradeThesis.state === "not_evaluable"`.
+- [x] AC-40: Given the port returns each `failed` reason in turn, when `runAiAnalyst` runs, then `status === "unavailable"`, `reason` contains the failure reason, `plans` and `assessments` are empty, and the rules report written before the call is byte-identical afterward except for the `aiAnalyst` section.
+- [x] AC-41: Given AI enabled and a fake port returning a valid output, then every rule plan in the final report deep-equals the same plan from a run with `--no-ai` (AI never modifies rule plans).
+- [x] AC-42: Given an idea citing `{kind:"feature", symbol:"BTC/USDT", feature:"fundingRate8hAvg3d", value: 0.0002}` while the FeatureVector value is `0.0003`, then the idea is absent from `ideas`/`plans` and `rejected` contains `{path:"ideas[0]", reason:"unverifiable_feature"}`.
+- [x] AC-43: Given an idea citing a web URL not present in `webResults`, then it is rejected with `unverifiable_web`; given the URL present, it is kept.
+- [x] AC-44: Given an assessment for a `planId` not in `rulePlans`, then it is rejected `unknown_plan`; given an idea on a symbol not in `configSymbols`, then `symbol_not_configured`; given an idea with zero refs, then `no_evidence`.
+- [x] AC-45: Given 5 verified ideas and `maxIdeasPerDay = 3`, then exactly the first 3 remain and 2 items are rejected `over_limit`.
+- [x] AC-46: Given `ai.channelStatus = "experimental"`, or `"paper-passed"` with `passedPromptHash` ≠ the current hash, then every AI plan has `origin:"ai-analyst"`, `leverage: 1`, `venueIntent:"paper"`.
+- [x] AC-47: Given `monthToDateSpendUsd >= monthlyBudgetUsd`, then the fake port's `analyze` call count is 0 and `status === "skipped_budget"`.
+- [x] AC-48: Given a `failed` result carrying usage, then one ledger line is appended with that usage and `resultKind:"failed"`.
+- [x] AC-49: Given any change to the system prompt text, output schema, model, effort, maxTokens, webSearchMaxUses, or maxIdeasPerDay, then `promptVersionHash` changes; given a change only to monthlyBudgetUsd, pricing fields, timeoutMs, channelStatus or passedPromptHash, it is identical.
+- [x] AC-49a: Given `aiDisabledReason: null`, when `buildReport` runs, then `aiAnalyst.status === "pending"` and `reason === ""`; given `"config"`, then `"disabled"` with reason `"ai.enabled is false"`; given `"cli-flag"`, then `"disabled"` with reason `"--no-ai"`.
+- [x] AC-49b: Given a report file for today whose `aiAnalyst.status === "pending"` and no `--refetch`, when `research:daily` runs, then it exits 3 and prints `AI step incomplete for <date>; rerun with --refetch`.
+- [x] AC-50: Given closed rule-origin reviews with AI stances [support +1R, support +2R, oppose −1R, none +0.5R], then `byAiStance.support = {closed:2, expectancyR:1.5, winRate:1}`, `byAiStance.oppose = {closed:1, expectancyR:-1, winRate:0}`, `byAiStance.caution.closed = 0`; AI-origin reviews do not appear in `byAiStance`.
+- [x] AC-51: Given no `ANTHROPIC_API_KEY` and no SDK credential, then `research:daily` exits 0 with `aiAnalyst.status === "unavailable"`, reason `no_api_key`.
+- [x] AC-52: `renderReportMarkdown` output contains the heading `AI analyst channel — forward-only, unvalidated` exactly once when `aiAnalyst.status !== "disabled"`, and every AI plan appears only under it.
+- [x] AC-53: Given an open AI-origin trade whose `data/ai-rules/<planId>.json` is missing, then its `openTradeThesis.state === "not_evaluable"`.
 - [ ] AC-54 [manual]: One live call with a real key on a real day's snapshot: response parses, `rawResponsePath` exists, ledger cost within ±20% of the Anthropic console's reported cost for that request (this also verifies `webSearchUsdPerRequest`, A16); owner reads the AI section and signs off in `docs/validation/ai-analyst-smoke-<date>.md`.
 
 ---

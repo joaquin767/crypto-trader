@@ -203,3 +203,29 @@ test("AC-49a: aiDisabledReason wiring", () => {
   assert.equal(cliDisabled.aiAnalyst.status, "disabled");
   assert.equal(cliDisabled.aiAnalyst.reason, "--no-ai");
 });
+
+// ── AC-53 ───────────────────────────────────────────────────────────────────────────────────
+
+function aiOriginTrade(ruleId: string): ManualTrade {
+  return {
+    id: "ai-trade-1", venue: "paper", symbol: "BTC/USDT", side: "long", planId: "2026-09-16:ai-analyst-abcd1234:BTC/USDT",
+    ruleId, ruleHash: "hash", plannedSnapshot: null, aiStanceAtPlan: null, entryFills: [], exitFills: [],
+    actualLeverage: null, exchangeLiqPrice: null, fundingUsd: 0, status: "open", exitKind: null,
+    notes: "", createdAt: 0, updatedAt: 0,
+  };
+}
+
+test("AC-53: an open AI-origin trade whose ai-rules file was never loaded -> openTradeThesis not_evaluable", () => {
+  const trade = aiOriginTrade("ai-analyst-abcd1234");
+  const report = buildReport(buildInput({ openTrades: [trade] })); // no `aiRules` map passed
+  assert.equal(report.openTradeThesis.length, 1);
+  assert.equal(report.openTradeThesis[0]!.state, "not_evaluable");
+});
+
+test("an open AI-origin trade whose persisted rule IS supplied gets a real thesis evaluation", () => {
+  const trade = aiOriginTrade("ai-analyst-abcd1234");
+  const aiRule = rule({ id: "ai-analyst-abcd1234", origin: "ai-analyst", invalidateWhenAny: [{ feature: "close", op: ">", value: 1 }] });
+  const report = buildReport(buildInput({ openTrades: [trade], aiRules: { "ai-analyst-abcd1234": aiRule } }));
+  assert.equal(report.openTradeThesis.length, 1);
+  assert.equal(report.openTradeThesis[0]!.state, "invalidated");
+});
