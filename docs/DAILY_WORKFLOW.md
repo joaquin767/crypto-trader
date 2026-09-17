@@ -154,10 +154,10 @@ If any check fails, stop: no live trade until it is fixed and the check passes a
 | Item | How | Needed for |
 |------|-----|-----------|
 | `config.json` | Existing config; `symbols` drives which markets are researched | everything |
-| `FRED_API_KEY` | Free key from FRED, exported in your shell | `hoursToNextCpi` |
+| `FRED_API_KEY` | Free key from FRED, stored in the secrets file (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) | `hoursToNextCpi` |
 | `data/manual/macro-calendar.json` | FOMC statement times (UTC). Seeded with the remaining 2026 meetings; keep `asOf` fresh (≤ 120 days) | `hoursToNextFomc` |
 | `data/manual/unlocks.json` | Token unlocks for your symbols' base assets; update `asOf` at least weekly | `daysToNextUnlock`, `nextUnlockPctOfFloat` |
-| Schedule | Run `npm run research:daily` at 00:15 UTC via cron or a systemd user timer (it takes the snapshot itself) | the daily cycle |
+| Schedule | systemd user timer running `research:daily` at 00:15 UTC (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) | the daily cycle |
 | `research-rules.json` | Your rule set. Ships with 3 `EXAMPLE` rules — replace them with your own (format below) | rules channel |
 | Read-only Bybit key | Create an API key with **read-only** permission (no Trade, no Withdraw) and export `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`. The journal refuses to start with any other key | live sync |
 | `manual.journalStartTime` | ISO time in `config.json` (e.g. `"2026-09-17T00:00:00Z"`). Only executions after it are journaled, so old auto-trader history stays out | live sync |
@@ -173,6 +173,45 @@ Manual file formats:
 // data/manual/unlocks.json
 { "asOf": "2026-09-16", "unlocks": [{ "asset": "APT", "time": "2026-10-12T00:00:00Z", "pctOfCirculating": 1.1 }] }
 ```
+
+### Secrets and the daily schedule
+
+**Secrets** live in one file outside the repo, readable only by you:
+`~/.config/crypto-trader/secrets.env` (permissions `600`), plain `KEY=value` lines, no `export`:
+
+```
+FRED_API_KEY=...
+```
+
+- Interactive terminals load it from `~/.bashrc`:
+  `set -a; [ -f ~/.config/crypto-trader/secrets.env ] && . ~/.config/crypto-trader/secrets.env; set +a`
+- The scheduled job reads it directly (`EnvironmentFile=`). Don't put keys in `~/.profile` (login shells only) or in the
+  repo (`.gitignore` has no `.env` rule).
+
+**Schedule:** two systemd user units in `~/.config/systemd/user/`:
+
+| Unit | What it does |
+|------|--------------|
+| `crypto-trader-research.timer` | Fires daily at **00:15:10 UTC** (21:15:10 in UTC−3). `Persistent=true`: if the machine was off, it runs once when it's back — that late report is honest (data fetched after the 2 h window is excluded), never back-dated |
+| `crypto-trader-research.service` | Runs `research-daily.ts` in the repo with the secrets file and an **absolute nvm node path** (user services don't inherit your shell's PATH — update it if you upgrade node) |
+
+Useful commands:
+
+```bash
+systemctl --user list-timers crypto-trader-research.timer
+```
+
+```bash
+systemctl --user status crypto-trader-research.service
+```
+
+```bash
+journalctl --user -u crypto-trader-research.service --since today
+```
+
+A failed run (for example exit 2 for invalid rules, or 3 if today's report already exists) shows as failed in
+`status`. **User timers only run while you're logged in**; to run them when logged out, enable lingering
+for your user with `loginctl enable-linger $USER` (a system setting — your call).
 
 ### ETF flows from Farside — browser import
 
