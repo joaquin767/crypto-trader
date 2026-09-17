@@ -1,5 +1,4 @@
-// Aggregates every source adapter. `coinalyze-oi` is a valid SourceId (§5.1) but has
-// no adapter until Phase 6 (§9) — it is intentionally absent here.
+// Aggregates every source adapter.
 
 import type { AdapterDeps } from "../http.ts";
 import type { SourceAdapter } from "../types.ts";
@@ -7,6 +6,7 @@ import { createBybitFundingAdapter } from "./bybit-funding.ts";
 import { createBybitInstrumentsAdapter } from "./bybit-instruments.ts";
 import { createBybitKlines1dAdapter, createBybitKlines1hAdapter } from "./bybit-klines.ts";
 import { createBybitOiAdapter } from "./bybit-oi.ts";
+import { createCoinalyzeOiAdapter } from "./coinalyze-oi.ts";
 import { createDefillamaStablecoinsAdapter } from "./defillama-stablecoins.ts";
 import { createFarsideBtcAdapter, createFarsideEthAdapter } from "./farside.ts";
 import { createFearGreedAdapter } from "./fear-greed.ts";
@@ -20,6 +20,7 @@ export function createAllSourceAdapters(deps: AdapterDeps): SourceAdapter[] {
     createBybitKlines1hAdapter(deps),
     createBybitFundingAdapter(deps),
     createBybitOiAdapter(deps),
+    createCoinalyzeOiAdapter(deps),
     createBybitInstrumentsAdapter(deps),
     createFarsideBtcAdapter(deps),
     createFarsideEthAdapter(deps),
@@ -37,6 +38,7 @@ export {
   createBybitKlines1dAdapter,
   createBybitKlines1hAdapter,
   createBybitOiAdapter,
+  createCoinalyzeOiAdapter,
   createDefillamaStablecoinsAdapter,
   createFarsideBtcAdapter,
   createFarsideEthAdapter,

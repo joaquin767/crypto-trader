@@ -28,7 +28,7 @@ export const DEFAULT_STALENESS_MS: Readonly<Record<SourceId, number>> = {
   "bybit-funding": 9 * HOUR_MS,
   "bybit-oi": 26 * HOUR_MS,
   "bybit-instruments": 7 * DAY_MS, // not a feature source — staleness value kept here for completeness only
-  "coinalyze-oi": 26 * HOUR_MS, // Phase 6; no adapter yet, value unused in Phase 1
+  "coinalyze-oi": 26 * HOUR_MS, // Phase 7 (§5.16): oiChange3dPct's fallback when bybit-oi's rows are insufficient
   "farside-btc-etf": 4 * DAY_MS,
   "farside-eth-etf": 4 * DAY_MS,
   "fred-release-dates": 7 * DAY_MS,
@@ -41,7 +41,10 @@ export const DEFAULT_STALENESS_MS: Readonly<Record<SourceId, number>> = {
 /** FeatureName -> the single SourceId that feeds it, per §5.3a's table (Phase 4b: used by
  *  Gate D1's `unexplainedIncompleteDays` to know which report sources matter for a given rule,
  *  without re-deriving it from FeatureValue.sourceId at runtime for days whose report never ran
- *  buildFeatures for this rule). */
+ *  buildFeatures for this rule). `oiChange3dPct` stays "bybit-oi" here even though Phase 7's
+ *  fallback (§5.16) can populate the feature from "coinalyze-oi" instead — this table names the
+ *  nominal/primary source for that bookkeeping, while FeatureValue.sourceId (below) always names
+ *  the source actually used for a given day's value. */
 export const FEATURE_SOURCE_ID: Readonly<Record<FeatureName, SourceId>> = {
   close: "bybit-klines-1d",
   return1d: "bybit-klines-1d",
@@ -222,6 +225,21 @@ function computeOiChange3dPct(rows: readonly SourceRow[], symbol: string, source
   return value(pct, latest.availableAt, sourceId);
 }
 
+/** §5.16 Phase 7 hardening: `bybit-oi` is tried first; `coinalyze-oi` is consulted only when
+ *  `bybit-oi` cannot produce a value (its snapshot isn't resolved, or its rows are insufficient).
+ *  When neither works, the "missing" result is `bybit-oi`'s own — never a compound message
+ *  blending both sources' failures — since `bybit-oi` is the nominal primary
+ *  (FEATURE_SOURCE_ID.oiChange3dPct, unchanged by this fallback). */
+function computeOiChange3dPctWithFallback(bybit: ResolvedSource, coinalyzeOi: ResolvedSource, symbol: string): FeatureValue {
+  const primary = bybit.ok ? computeOiChange3dPct(bybit.rows, symbol, "bybit-oi") : missing("bybit-oi", bybit.reason);
+  if (primary.kind === "value") return primary;
+  if (coinalyzeOi.ok) {
+    const fallback = computeOiChange3dPct(coinalyzeOi.rows, symbol, "coinalyze-oi");
+    if (fallback.kind === "value") return fallback;
+  }
+  return primary;
+}
+
 // ── market-wide sources ─────────────────────────────────────────────────────────────────────
 
 function latestNRows(rows: readonly SourceRow[], key: string, field: string, n: number): SourceRow[] {
@@ -355,6 +373,7 @@ export function buildFeatures(
   const klines1d = resolveSource(snapshots, "bybit-klines-1d", decisionTime, staleness["bybit-klines-1d"]);
   const funding = resolveSource(snapshots, "bybit-funding", decisionTime, staleness["bybit-funding"]);
   const oi = resolveSource(snapshots, "bybit-oi", decisionTime, staleness["bybit-oi"]);
+  const coinalyzeOi = resolveSource(snapshots, "coinalyze-oi", decisionTime, staleness["coinalyze-oi"]);
   const btcEtf = resolveSource(snapshots, "farside-btc-etf", decisionTime, staleness["farside-btc-etf"]);
   const ethEtf = resolveSource(snapshots, "farside-eth-etf", decisionTime, staleness["farside-eth-etf"]);
   const stablecoins = resolveSource(snapshots, "defillama-stablecoins", decisionTime, staleness["defillama-stablecoins"]);
@@ -395,7 +414,7 @@ export function buildFeatures(
       fundingRatePercentile90d: funding.ok
         ? computeFundingRatePercentile90d(funding.rows, symbol, decisionTime, "bybit-funding")
         : missing("bybit-funding", funding.reason),
-      oiChange3dPct: oi.ok ? computeOiChange3dPct(oi.rows, symbol, "bybit-oi") : missing("bybit-oi", oi.reason),
+      oiChange3dPct: computeOiChange3dPctWithFallback(oi, coinalyzeOi, symbol),
       btcEtfNetFlowUsd1d,
       btcEtfNetFlowUsd5d,
       ethEtfNetFlowUsd1d,

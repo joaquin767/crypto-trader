@@ -26,7 +26,7 @@ import {
 import type { ExitKind, ManualTrade } from "../journal/types.ts";
 import { computeBreaker } from "../journal/breaker.ts";
 import type { BreakerConfig } from "../journal/breaker.ts";
-import { aggregate, liveView, reviewClosedTrade } from "../journal/trade-analytics.ts";
+import { aggregate, liveView, reviewClosedTrade, reviewsToCsv } from "../journal/trade-analytics.ts";
 import type { LiveTradeView } from "../journal/trade-analytics.ts";
 import { buildTradeChartData, chooseInterval, INTERVAL_MS } from "../journal/chart.ts";
 import type { ChartInterval, TradeChartData } from "../journal/chart.ts";
@@ -393,6 +393,18 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
       support.expectancyR !== null && oppose.expectancyR !== null &&
       oppose.expectancyR >= support.expectancyR;
     return c.json({ ...stats, aiStanceNoPredictiveValue });
+  });
+
+  // §5.16 item 3: one row per closed trade, both venues combined (a raw export, not a
+  // venue-filtered statistic) — reuses the same reviewOne cache /api/review and /api/stats do.
+  app.get("/api/reviews.csv", async (c) => {
+    const closed = journal.filter((t) => t.status === "closed");
+    const rows = await Promise.all(closed.map(async (t) => ({ trade: t, review: (await reviewOne(t)).review })));
+    const csv = reviewsToCsv(rows);
+    const date = new Date(deps.now()).toISOString().slice(0, 10);
+    c.header("Content-Type", "text/csv; charset=utf-8");
+    c.header("Content-Disposition", `attachment; filename="reviews-${date}.csv"`);
+    return c.body(csv);
   });
 
   app.post("/api/trades/:id/link", async (c) => {
