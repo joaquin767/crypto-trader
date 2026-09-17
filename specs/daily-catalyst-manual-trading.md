@@ -1485,7 +1485,9 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
   necessary filter, never sufficient on its own: **Gate D1 (forward paper) is the only truly out-of-sample test.** Mitigations:
   pre-registration (holdout runs require the rule to be committed; `rulesFileCommit` is recorded), the per-rule 3-run cap and the
   global Bonferroni alpha. Post-hoc tuning after a `no_edge` is visible in git history, not prevented.
-- A26: Backfilled FOMC rows use `availableAt = meeting time − 180 days` (the Fed publishes each year's schedule well ahead; exact
+- A26: Backfilled CPI release dates use `availableAt = release time − 60 days` (BLS publishes the year's schedule months ahead;
+  using the release instant itself hid every upcoming release, so `hoursToNextCpi` was missing on every backtest day), and a
+  backfilled schedule whose coverage extends past T is current at T for staleness. Backfilled FOMC rows use `availableAt = meeting time − 180 days` (the Fed publishes each year's schedule well ahead; exact
   publication dates aren't recorded). `hoursToNextFomc` only looks at the nearest future meeting, so this cannot change a feature
   value within the backtest window. `simulatePlan` derives decision time from the `planId` date prefix (`<date>T00:15:00Z`).
   The 2025-08-22 notation vote listed on the Fed calendar is excluded: it has no rate statement.

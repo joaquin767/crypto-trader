@@ -119,3 +119,28 @@ test("loadHistory returns an empty array for a missing directory", () => {
   const missing = join(tmpdir(), "history-store-test-does-not-exist-12345");
   assert.deepEqual(loadHistory(missing), []);
 });
+
+test("a CPI schedule backfilled with its 60-day lead time exposes the next release, so hoursToNextCpi has a value", () => {
+  const T = Date.parse("2025-03-03T00:15:00Z");
+  const release = (date: string) => Date.parse(`${date}T13:30:00Z`); // 08:30 ET during EST
+  const rows: SourceRow[] = ["2025-01-15", "2025-02-12", "2025-03-12", "2025-04-10"].map((d) => ({
+    key: "CPI", observedFor: Date.parse(`${d}T00:00:00Z`), availableAt: release(d) - 60 * DAY, field: "releaseDate", value: d,
+  }));
+  const file = historyFile({ sourceId: "fred-release-dates", rows, coverage: { from: rows[0]!.observedFor, to: rows.at(-1)!.observedFor } });
+
+  const [snap] = snapshotsAt([file], T);
+  assert.equal(snap!.status, "ok");
+  assert.equal(snap!.fetchedAt, T, "a schedule that extends past T is current at T");
+  const fv = buildFeatures([snap!], ["BTC/USDT"], T, DEFAULT_STALENESS_MS)[0]!;
+  const cpi = fv.features.hoursToNextCpi;
+  assert.equal(cpi.kind, "value", JSON.stringify(cpi));
+  if (cpi.kind === "value") assert.equal(cpi.value, (Date.parse("2025-03-12T12:30:00Z") - T) / 3_600_000); // 12 Mar is EDT (08:30 ET = 12:30 UTC)
+});
+
+test("a CPI schedule that ends before T still goes stale (no silent reuse)", () => {
+  const T = Date.parse("2025-06-01T00:15:00Z");
+  const rows: SourceRow[] = [{ key: "CPI", observedFor: Date.parse("2025-03-12T00:00:00Z"), availableAt: Date.parse("2025-01-11T00:00:00Z"), field: "releaseDate", value: "2025-03-12" }];
+  const file = historyFile({ sourceId: "fred-release-dates", rows, coverage: { from: rows[0]!.observedFor, to: rows[0]!.observedFor } });
+  const fv = buildFeatures(snapshotsAt([file], T), ["BTC/USDT"], T, DEFAULT_STALENESS_MS)[0]!;
+  assert.equal(fv.features.hoursToNextCpi.kind, "missing");
+});
