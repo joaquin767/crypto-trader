@@ -910,6 +910,80 @@ and the rule from `aiIdeaToRule`. `planId = <date>:ai-analyst-<hash8>:<symbol>`;
 `runAiAnalyst` drops the second as `over_limit`. Each AI rule is persisted write-once to `data/ai-rules/<planId>.json`
 so later reports can run `evaluateThesis` on open AI-origin trades; a missing file makes that trade's thesis `not_evaluable`.
 
+### 5.14 Trade chart & replay — Phase 3b (owner request 2026-09-16)
+
+A per-trade chart in the journal dashboard, for **live** and **closed** trades of either venue:
+- **Card:** direction and leverage, entry, close (or last price), state, P&L.
+- **Chart:** real price line, dashed Entry / SL / TP / Liquidation levels, entry and exit markers, and a
+  shaded **volatility range**.
+- **Replay:** a slider reveals the price candle by candle, with a play animation. Live trades follow the
+  newest candle.
+
+The range is **not a forecast**: it carries no direction and is computed only from data closed before entry.
+
+**Evidence.** The existing 1 h kline fetch requests `limit=200` without paging (`src/server/journal-server.ts:430`), while
+`maxHoldDays` allows 240 h, so MAE/MFE of long holds would be computed on truncated data. It is replaced by the paged fetch
+below for both reviews and charts.
+
+```ts
+// src/journal/chart.ts (pure) + src/journal/market-data.ts (I/O)
+export type ChartInterval = "15" | "60";
+
+/** I/O. Public Bybit /v5/market/kline, paged backwards with `end` until `startMs` is covered (≤ 1000 bars/request),
+ *  deduped by open time, ascending. Resolves null on any HTTP/shape error — never a partial series (P1). */
+export function fetchKlines(symbol: string, interval: ChartInterval | "D", startMs: number, endMs: number,
+  deps: Pick<AdapterDeps, "fetch" | "sleep">): Promise<Kline[] | null>;
+
+/** Pure. "15" when (exitTime ?? now) − firstEntry ≤ 48 h, else "60". */
+export function chooseInterval(firstEntryMs: number, endMs: number): ChartInterval;
+
+/** Pure. Daily σ (fraction) = sample stdev of the last 7 daily log returns using ONLY daily bars whose close time
+ *  (t + 24 h) ≤ entryTime. Fewer than 8 such bars → null (band omitted, never guessed). */
+export function dailySigmaBeforeEntry(dailyBars: readonly Kline[], entryTimeMs: number): number | null;
+
+/** Pure. For each t ≥ entryTime: d = (t − entryTime) / 24 h; upper_k = entry·exp(k·σ·√d), lower_k = entry·exp(−k·σ·√d), k ∈ {1, 2}. */
+export function volatilityBand(entryPrice: number, entryTimeMs: number, sigmaDaily: number, times: readonly number[]):
+  { t: number; upper1: number; lower1: number; upper2: number; lower2: number }[];
+
+/** Pure. Candles at or before cursor index are revealed; later ones hidden. cursor clamped to [0, candles.length − 1]. */
+export function revealCandles<T>(candles: readonly T[], cursor: number): T[];
+
+export interface TradeChartData {
+  tradeId: string; symbol: string; side: "long" | "short"; venue: ManualTradeVenue; status: "open" | "closed";
+  origin: "rules-file" | "ai-analyst" | null; ruleId: string | null;
+  leverage: number | null;                  // actualLeverage for bybit-live, plannedSnapshot.leverage for paper
+  interval: ChartInterval;
+  levels: { entry: number; stop: number | null; target: number | null; liquidation: number | null };
+  entryTime: number; exitTime: number | null; exitPrice: number | null;
+  candles: Kline[];                         // closed bars from firstEntry − 6 bars to (lastExit + 6 bars | now)
+  formingCandle: Kline | null;              // open trades only: the current, not-yet-closed bar (drawn dashed)
+  band: { sigmaDaily: number; points: ReturnType<typeof volatilityBand> } | null;
+  pnl: { kind: "realized" | "unrealized"; usd: number; basis: string } | null;
+  dataStatus: "ok" | "unavailable"; dataDetail: string;
+}
+```
+
+- **P&L.** Closed trades use the journal's `netPnlUsd`. Open trades use the direction-adjusted `(last price − avgEntry) × qty − fees + fundingUsd`.
+  - Last price = sync `markPrice` for `bybit-live` when not stale; otherwise the last **closed** candle's close.
+  - `basis` names which one was used, e.g. `"mark"` or `"last 15m close"`.
+- **Endpoint.** `GET /api/trades/:id/chart` → `TradeChartData`.
+  - 404 for an unknown id.
+  - Failed kline fetch → 200 with `dataStatus: "unavailable"`, `candles: []`, `band: null`. The UI shows the reason and never draws a line.
+  - Closed trades are cached in memory by `tradeId + updatedAt`.
+- **Live.** On each SSE `live`/`trade` event the UI refetches the open trade's chart. The slider stays pinned to the newest
+  candle unless the owner has dragged it back; a `LIVE` button re-pins it.
+- **Replay.** Play reveals 1 candle per 80 ms, starting from the entry candle. Pause, drag and restart are available.
+  `prefers-reduced-motion` disables the animation (jumps straight to the end).
+  Until the cursor reaches the exit candle of a closed trade, the exit marker, close price and P&L stay hidden; the card
+  shows the price at the cursor instead, so the replay can be reviewed without hindsight.
+- **Caching.** Closed-trade charts and reviews are cached by `tradeId + updatedAt` only when their kline fetch succeeded;
+  a failed fetch is retried on the next request instead of being pinned as unavailable.
+- **Channel tabs.** `Rules` / `AI` / `Both` filter the trade list by `origin`; `AI` shows an empty state until Phase 4b.
+- **Rendering.** Inline SVG, no new dependencies.
+  - Levels are labeled at the left edge: Entry, SL, TP; Liq only when present.
+  - The ±2σ band is drawn lighter than ±1σ. The legend reads `Real price`, `Volatility range ±1σ / ±2σ (not a forecast)`.
+  - Every dynamic string is HTML-escaped.
+
 ---
 
 ## 6. Acceptance criteria
@@ -1003,6 +1077,15 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 
 ### 6.7 Persona (P1)
 - [ ] AC-39 [manual]: `.claude/skills/crypto-fundamental-analyst/SKILL.md` exists, was generated through gentle-ai `skill-creator`, has valid frontmatter, and its instructions state: (a) only discuss rule outputs present in a report or proposed rule definitions in `research-rules.json` format; (b) cite §2.2 evidence IDs and strength for every claim; (c) never state buy/sell/size for anything not in a report's `plans`; (d) always include the §5.6 disclaimer. Owner runs it once on a real report and confirms (a)–(d) hold.
+
+### 6.7a Trade chart & replay (P1 — review tooling, not a capital gate)
+- [ ] AC-69: `dailySigmaBeforeEntry` on 8 daily closes [100,101,99,102,100,103,101,104] with all closes before entry equals the sample stdev of their 7 log returns (±1e-12); adding a 9th bar whose close time is after entry does not change the result; with 7 eligible bars it returns null.
+- [ ] AC-70: `volatilityBand(100, T, 0.02, [T, T + 4 d])` → at T all four bounds are 100; at T + 4 d `upper1 = 100·e^0.04`, `lower1 = 100·e^−0.04`, `upper2 = 100·e^0.08`, `lower2 = 100·e^−0.08` (±1e-9).
+- [ ] AC-71: `fetchKlines` over 400 hours of 1 h bars with a fake API serving ≤ 200 bars per page returns exactly 400 ascending, deduped bars; any page error or malformed bar returns null (never a partial series). `reviewClosedTrade` for a 240 h trade receives all 240 bars.
+- [ ] AC-72: `chooseInterval` → "15" for a 48 h span, "60" for 48 h + 1 ms.
+- [ ] AC-73: `GET /api/trades/:id/chart` → 404 for an unknown id; with the kline fetch failing → 200, `dataStatus:"unavailable"`, `candles: []`, `band: null`; for an open paper long (entry 100, qty 2, fees 0.2) with last closed candle 105 → `pnl = {kind:"unrealized", usd: 9.8, basis: "last 15m close"}`.
+- [ ] AC-74: `revealCandles(c, 3)` returns the first 4 candles; cursor −5 → first 1; cursor 999 → all.
+- [ ] AC-75 [manual]: With one closed and one open paper trade: the chart shows levels, markers and band; Play animates the closed trade from entry; dragging back on the open trade stops auto-follow until `LIVE` is pressed; a failed data fetch shows the reason instead of a line. Screenshot `docs/validation/trade-chart-<date>.png`.
 
 ### 6.8 AI analyst (P0 for the AI channel; the rules channel does not depend on it)
 All tests use a fake `AiClientPort`; no test calls the network.
@@ -1111,6 +1194,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 | **1 — Data foundation** | §4.1 adapters (bybit klines 1d/1h, funding, OI; farside BTC/ETH; fred release dates; macro-calendar manual JSON; defillama stablecoins; fear-greed; unlocks manual JSON), §4.2 snapshot store, §4.3 features per §5.3a/§5.3b, `scripts/snapshot-daily.ts`. AC-1..7, AC-7a. (`scripts/backfill-history.ts` and §4.8 history store move to Phase 4, next to their only consumer.) | P0 |
 | **2 — Rules, planner, report** | §4.4–4.6, `bybit-instruments` adapter, `ManualTradingConfig` (§5.11), `research:daily`, example `research-rules.json` (A10). Type-only stubs so the contract compiles before later phases: `ManualTrade`/`AiStance` types (implementation Phase 3), `AiAnalystSection` type (Phase 4b). Until Phase 3: `openTrades = []`, breaker not tripped, `liveClosedTradesForRule = 0`, `ladderResetByBreaker = false`. Until Phase 4b: `aiDisabledReason = "config"`. AC-8..19, AC-11a/b, AC-14a, AC-15a. | P0 |
 | **3 — Journal & dashboard** | §4.11–4.14, §5.8a (RestClient additions, reconstruction, funding, exit classification, linking, paper trades, analytics formulas, breaker, research:daily wiring, server hardening). **Modifies shipped Phase 2 code:** adds `maxHoldDays` to the `kind:"plan"` variant in `src/research/planner.ts`; every construction site and fixture (`planTrade`, `src/research/report.ts`, `tests/research-planner.test.ts`, `tests/research-report.test.ts`, `tests/research-daily.test.ts`) is updated in the same change, and `research:daily` switches from its fixed Phase 2 inputs to the journal (§5.8a wiring). AC-27..38, AC-55..68 (incl. 63a–d). | P0 |
+| **3b — Trade chart & replay** | §5.14: paged `fetchKlines` (replaces the 200-bar review fetch), `chart.ts`, `GET /api/trades/:id/chart`, SVG chart with replay/live follow and channel tabs in `journal.html`. AC-69..75. | P1 |
 | **4 — Daily backtest & gates** | §4.8 history store + `scripts/backfill-history.ts` (lags per §10.3), §4.9–4.10, `backtest:daily` dev/holdout/d1-check. AC-20..26, AC-26a..g. | P0 |
 | **4b — AI analyst** | §4.15–4.19, §5.13, `ai` config, report/Markdown integration, journal `aiStanceAtPlan`, `byOrigin`/`byAiStance`. AC-40..54. Depends on Phases 2–3. | P0 (AI channel only) |
 | **5 — Persona** | §4.7 via gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`. AC-39. | P1 |

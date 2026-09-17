@@ -17,6 +17,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 1 — Data foundation | `npm run snapshot:daily`: fetch sources, save point-in-time snapshots, compute features | ✅ Built |
 | 2 — Rules, planner, report | `npm run research:daily`: rules → sized trade plans → daily report | ✅ Built |
 | 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ✅ Built |
+| 3b — Trade chart & replay | Price chart per trade with plan levels, volatility range, live follow and candle-by-candle replay | ✅ Built |
 | 4 — Backtest & gates | `npm run backtest:daily`: Gate D0 (holdout) and Gate D1 (paper) verdicts | ⏳ Planned |
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas | ⏳ Planned |
 | 5 — Analyst persona | Interactive Claude Code skill to write and critique rules | ⏳ Planned |
@@ -181,11 +182,34 @@ and will be added here as each phase lands.
 | Panel | What you see | What you do there |
 |-------|--------------|-------------------|
 | Banners | paper-only mode · `STALE since <time>` (P&L blanked) · breaker tripped · funding sign unverified · sync warnings | Act on them before trusting numbers |
+| Trade chart | per trade: direction/leverage, entry, close, state, P&L; price line with Entry/SL/TP levels and a volatility range; replay slider | Review a trade candle by candle — see [Trade chart & replay](#trade-chart--replay) |
 | Live trades | mark price, unrealized P&L, distance to stop %, distance to liquidation %, funding, hours held, hours left before the max-hold exit, thesis state, alerts | Watch risk; close by hand on Bybit when a stop/target/expiry/invalidation says so |
 | Link to plan | unplanned positions | Pick the `planId` from that day's report. Linking is never automatic and is refused if symbol/side/timing don't match |
 | Paper trades | forms for entry and exit | Record what you *would* have done while a rule is still `experimental` |
 | Closed trades | planned vs actual, R-multiple, fees, funding, entry slippage, size deviation, MAE/MFE, exit kind, followed plan | Add notes; mark a discretionary exit as `thesis_invalidated` if that's why you closed |
 | Stats (per venue) | win rate, expectancy in R, max drawdown in R, adherence, per rule, rules vs AI, and by AI stance | This is what the gates read |
+
+### Trade chart & replay
+
+Pick a trade in the selector (open trades first). Tabs filter by channel: **Rules**, **AI** (empty
+until the AI analyst lands), **Both**.
+
+| Element | Meaning |
+|---------|---------|
+| White line | Real Bybit price (15-minute candles for holds up to 48 h, hourly after). A dashed tail is the candle still forming |
+| Dashed lines, labels on the left | **Entry**, **SL** (stop), **TP** (target) from the plan. Liquidation shows only if it falls inside the chart; otherwise it's listed as `off-scale` |
+| Amber / green-red dots | Entry, and exit (green if P&L ≥ 0) |
+| Shaded cone | **Volatility range ±1σ / ±2σ — not a forecast.** Built from daily volatility measured *before* entry and widening with time. It has no direction: it tells you whether price moved within its normal range or broke out of it |
+
+**Replaying a closed trade.** Press **Restart**, then **Play**, or drag the slider. Price is revealed
+candle by candle from entry. Until the replay reaches the exit, the card shows the price at the
+cursor and **hides the P&L and exit** — so you can ask "what would I have done here?" before seeing
+how it ended.
+
+**Following a live trade.** The chart refreshes with every sync and stays pinned to the newest
+candle. Drag back to study a moment and it stops following; press **LIVE** to jump back.
+
+If price data can't be loaded, the chart says why and draws nothing — it never fills the gap.
 
 ### How your fills become trades
 

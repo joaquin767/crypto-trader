@@ -1,5 +1,5 @@
-// Journal server tests — specs/daily-catalyst-manual-trading.md §5.12/§5.8a,
-// AC-27, AC-36, AC-66, AC-68.
+// Journal server tests — specs/daily-catalyst-manual-trading.md §5.12/§5.8a/§5.14,
+// AC-27, AC-36, AC-66, AC-68, AC-71, AC-73.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -44,7 +44,7 @@ function baseDeps(dir: string, overrides: Partial<JournalAppDeps> = {}, port = 3
     reportsRoot: join(dir, "reports"),
     rest: null,
     now: () => 1_700_000_000_000,
-    fetchKlines1h: async () => null,
+    fetchKlines: async () => null,
     ...overrides,
   };
 }
@@ -306,5 +306,130 @@ test("link: a plan already linked to another trade is refused with 409", async (
     });
     assert.equal(res.status, 409);
     void app;
+  });
+});
+
+// ── AC-73 / AC-71: trade chart endpoint ─────────────────────────────────────────────────────────
+
+function openPaperTrade(overrides: Partial<ManualTrade> = {}): ManualTrade {
+  return {
+    id: "trade-open", venue: "paper", symbol: "BTC/USDT", side: "long",
+    planId: null, ruleId: null, ruleHash: null, plannedSnapshot: null, aiStanceAtPlan: null,
+    entryFills: [{ execId: "e1", time: 1_700_000_000_000, price: 100, qty: 2, feeUsd: 0.2, side: "buy" }],
+    exitFills: [], actualLeverage: null, exchangeLiqPrice: null, fundingUsd: 0,
+    status: "open", exitKind: null, notes: "", createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    ...overrides,
+  };
+}
+
+test("AC-73: GET /api/trades/:id/chart returns 404 for an unknown trade id", async () => {
+  await withTempDir(async (dir) => {
+    const { app } = createJournalApp(baseDeps(dir, {}, 34600));
+    const res = await app.request("/api/trades/does-not-exist/chart", { headers: { Host: "127.0.0.1:34600" } });
+    assert.equal(res.status, 404);
+  });
+});
+
+test("AC-73: a failed kline fetch yields 200 with dataStatus unavailable, empty candles and no band", async () => {
+  await withTempDir(async (dir) => {
+    const trade = openPaperTrade();
+    saveManualJournal([trade], { path: join(dir, "manual-journal.json") });
+    const { app } = createJournalApp(baseDeps(dir, {
+      fetchKlines: async () => null,
+      now: () => trade.entryFills[0]!.time + 60_000,
+    }, 34601));
+    const res = await app.request(`/api/trades/${trade.id}/chart`, { headers: { Host: "127.0.0.1:34601" } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.dataStatus, "unavailable");
+    assert.deepEqual(body.candles, []);
+    assert.equal(body.band, null);
+  });
+});
+
+test("AC-73: an open paper long's chart reports unrealized P&L from the last closed candle", async () => {
+  await withTempDir(async (dir) => {
+    const entryTime = 1_700_000_000_000;
+    const trade = openPaperTrade({
+      entryFills: [{ execId: "e1", time: entryTime, price: 100, qty: 2, feeUsd: 0.2, side: "buy" }],
+    });
+    saveManualJournal([trade], { path: join(dir, "manual-journal.json") });
+    const now = entryTime + 35 * 60_000; // past the 2nd bar's close (entry+30min) -> not a forming candle
+    const fetchKlines: JournalAppDeps["fetchKlines"] = async (_symbol, interval) => {
+      if (interval === "D") return [];
+      return [
+        { t: entryTime, o: 100, h: 100, l: 100, c: 100, v: 1 },
+        { t: entryTime + 15 * 60_000, o: 100, h: 105, l: 100, c: 105, v: 1 },
+      ];
+    };
+    const { app } = createJournalApp(baseDeps(dir, { fetchKlines, now: () => now }, 34602));
+    const res = await app.request(`/api/trades/${trade.id}/chart`, { headers: { Host: "127.0.0.1:34602" } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.interval, "15");
+    assert.deepEqual(body.pnl, { kind: "unrealized", usd: 9.8, basis: "last 15m close" });
+  });
+});
+
+test("AC-71: reviewClosedTrade (via GET /api/review/:id) receives all bars for a 240h trade", async () => {
+  await withTempDir(async (dir) => {
+    const entryTime = 1_700_000_000_000;
+    const exitTime = entryTime + 240 * 3_600_000;
+    const trade: ManualTrade = {
+      id: "closed-1", venue: "paper", symbol: "BTC/USDT", side: "long",
+      planId: null, ruleId: null, ruleHash: null, plannedSnapshot: null, aiStanceAtPlan: null,
+      entryFills: [{ execId: "e1", time: entryTime, price: 100, qty: 1, feeUsd: 0, side: "buy" }],
+      exitFills: [{ execId: "x1", time: exitTime, price: 110, qty: 1, feeUsd: 0, side: "sell" }],
+      actualLeverage: null, exchangeLiqPrice: null, fundingUsd: 0,
+      status: "closed", exitKind: "target", notes: "", createdAt: entryTime, updatedAt: exitTime,
+    };
+    saveManualJournal([trade], { path: join(dir, "manual-journal.json") });
+    let receivedBarCount = 0;
+    const fetchKlines: JournalAppDeps["fetchKlines"] = async (_symbol, interval, start, end) => {
+      assert.equal(interval, "60");
+      const bars = [];
+      for (let t = start; t <= end; t += 3_600_000) bars.push({ t, o: 100, h: 100, l: 100, c: 100, v: 1 });
+      receivedBarCount = bars.length;
+      return bars;
+    };
+    const { app } = createJournalApp(baseDeps(dir, { fetchKlines, now: () => exitTime + 60_000 }, 34603));
+    const res = await app.request(`/api/review/${trade.id}`, { headers: { Host: "127.0.0.1:34603" } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.maeMfeAvailable, true);
+    assert.ok(receivedBarCount >= 240, `expected >= 240 bars, got ${receivedBarCount}`);
+  });
+});
+
+test("a closed trade's chart is not cached after a failed kline fetch: the next request retries and succeeds", async () => {
+  await withTempDir(async (dir) => {
+    const entryT = 1_700_000_000_000;
+    const exitT = entryT + 3 * 3_600_000;
+    const trade = openPaperTrade({
+      id: "trade-closed", status: "closed", exitKind: "discretionary", updatedAt: exitT,
+      exitFills: [{ execId: "x1", time: exitT, price: 110, qty: 2, feeUsd: 0.22, side: "sell" }],
+    });
+    saveManualJournal([trade], { path: join(dir, "manual-journal.json") });
+    let fail = true;
+    let calls = 0;
+    const bars = Array.from({ length: 40 }, (_, i) => {
+      const t = entryT - 6 * 900_000 + i * 900_000;
+      return { t, o: 100, h: 101, l: 99, c: 100 + i * 0.1, v: 1 };
+    });
+    const { app } = createJournalApp(baseDeps(dir, {
+      fetchKlines: async () => { calls++; return fail ? null : bars; },
+      now: () => exitT + 3_600_000,
+    }, 34610));
+    const first = await (await app.request(`/api/trades/${trade.id}/chart`, { headers: { Host: "127.0.0.1:34610" } })).json();
+    assert.equal(first.dataStatus, "unavailable");
+    fail = false;
+    const callsBefore = calls;
+    const second = await (await app.request(`/api/trades/${trade.id}/chart`, { headers: { Host: "127.0.0.1:34610" } })).json();
+    assert.equal(second.dataStatus, "ok");
+    assert.ok(calls > callsBefore, "second request must fetch again, not serve a cached failure");
+    // A successful closed-trade chart is cached: a third request makes no new fetch.
+    const callsAfterOk = calls;
+    await app.request(`/api/trades/${trade.id}/chart`, { headers: { Host: "127.0.0.1:34610" } });
+    assert.equal(calls, callsAfterOk);
   });
 });

@@ -27,11 +27,17 @@ import { computeBreaker } from "../journal/breaker.ts";
 import type { BreakerConfig } from "../journal/breaker.ts";
 import { aggregate, liveView, reviewClosedTrade } from "../journal/trade-analytics.ts";
 import type { LiveTradeView } from "../journal/trade-analytics.ts";
+import { buildTradeChartData, chooseInterval, INTERVAL_MS } from "../journal/chart.ts";
+import type { ChartInterval, TradeChartData } from "../journal/chart.ts";
+import { fetchKlines as fetchKlinesPublic, splitFormingCandle } from "../journal/market-data.ts";
+import { defaultAdapterDeps } from "../research/http.ts";
 import type { ThesisState } from "../research/rules.ts";
 import type { DailyReport } from "../research/report.ts";
 import type { TradePlan } from "../research/planner.ts";
 import type { Kline } from "../research/types.ts";
 import { DEFAULT_CIRCUIT_BREAKER_CONFIG } from "../risk/circuit-breaker.ts";
+
+const DAILY_LOOKBACK_DAYS = 15; // enough calendar days to have >= 8 daily bars before any entry
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -107,8 +113,9 @@ export interface JournalAppDeps {
    *  caller — `startJournalServer` is the one that enforces the AC-27 refusal-to-start rule). */
   rest: RestClient | null;
   now: () => number;
-  /** Public 1h klines for MAE/MFE (§5.9); null on any failure — never guessed (P1). */
-  fetchKlines1h: (symbol: string, startTimeMs: number, endTimeMs: number) => Promise<Kline[] | null>;
+  /** Paged public klines (§5.14) for MAE/MFE reviews and the trade chart; null on any
+   *  HTTP/shape/paging failure — never a partial series (P1, AC-71). */
+  fetchKlines: (symbol: string, interval: ChartInterval | "D", startMs: number, endMs: number) => Promise<Kline[] | null>;
 }
 
 export interface JournalAppHandle {
@@ -174,11 +181,63 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
     return result;
   }
 
+  // Closed-trade reviews are recomputed for /api/review and again for every /api/stats call; each needs
+  // a kline fetch, so successful reviews are cached by tradeId + updatedAt (failures are not cached).
+  const reviewCache = new Map<string, { updatedAt: number; value: { review: ReturnType<typeof reviewClosedTrade>; maeMfeAvailable: boolean } }>();
+
   async function reviewOne(t: ManualTrade): Promise<{ review: ReturnType<typeof reviewClosedTrade>; maeMfeAvailable: boolean }> {
+    const cached = reviewCache.get(t.id);
+    if (cached && cached.updatedAt === t.updatedAt) return cached.value;
     const from = t.entryFills.reduce((min, f) => Math.min(min, f.time), Number.POSITIVE_INFINITY);
     const to = t.exitFills.reduce((max, f) => Math.max(max, f.time), 0);
-    const klines = Number.isFinite(from) ? await deps.fetchKlines1h(t.symbol, from, to) : null;
-    return { review: reviewClosedTrade(t, klines ?? []), maeMfeAvailable: klines !== null };
+    const klines = Number.isFinite(from) ? await deps.fetchKlines(t.symbol, "60", from, to) : null;
+    const value = { review: reviewClosedTrade(t, klines ?? []), maeMfeAvailable: klines !== null };
+    if (t.status === "closed" && klines !== null) reviewCache.set(t.id, { updatedAt: t.updatedAt, value });
+    return value;
+  }
+
+  // ── Trade chart (§5.14) ──────────────────────────────────────────────────────────────────────
+  // Closed trades never change once exited, so their chart is cached by tradeId + updatedAt;
+  // open trades are always rebuilt (live mark price, forming candle).
+  const chartCache = new Map<string, { updatedAt: number; data: TradeChartData }>();
+
+  async function buildChartFor(t: ManualTrade): Promise<TradeChartData> {
+    const entryTime = t.entryFills.reduce((min, f) => Math.min(min, f.time), Number.POSITIVE_INFINITY);
+    const lastExit = t.exitFills.reduce((max, f) => Math.max(max, f.time), 0);
+    const endBound = t.status === "closed" && lastExit > 0 ? lastExit : deps.now();
+    const interval = chooseInterval(entryTime, endBound);
+    const barMs = INTERVAL_MS[interval];
+    const startMs = entryTime - 6 * barMs;
+    const endMs = endBound + 6 * barMs;
+
+    const rawCandles = await deps.fetchKlines(t.symbol, interval, startMs, endMs);
+    const dataOk = rawCandles !== null;
+    let candles = rawCandles ?? [];
+    let formingCandle: Kline | null = null;
+    if (dataOk && t.status === "open") {
+      const split = splitFormingCandle(candles, interval, deps.now());
+      candles = split.candles;
+      formingCandle = split.formingCandle;
+    }
+
+    let dailyBars: Kline[] = [];
+    if (dataOk) {
+      const dailyStart = entryTime - DAILY_LOOKBACK_DAYS * INTERVAL_MS.D;
+      dailyBars = (await deps.fetchKlines(t.symbol, "D", dailyStart, entryTime)) ?? [];
+    }
+
+    const stale = deps.now() - (lastSync?.syncedAt ?? 0) > deps.manual.staleAfterMs;
+    const pos = lastSync?.positions.find((p) => p.symbol === t.symbol) ?? null;
+
+    return buildTradeChartData(t, {
+      candles, formingCandle, dailyBars,
+      markPrice: stale ? null : pos?.markPrice ?? null,
+      markStale: stale,
+      now: deps.now(),
+      interval,
+      dataStatus: dataOk ? "ok" : "unavailable",
+      dataDetail: dataOk ? "" : "kline data unavailable — the chart cannot be drawn right now",
+    });
   }
 
   const app = new Hono();
@@ -245,6 +304,21 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
     const venue = c.req.query("venue");
     const trades = venue ? journal.filter((t) => t.venue === venue) : journal;
     return c.json(trades);
+  });
+
+  app.get("/api/trades/:id/chart", async (c) => {
+    const trade = journal.find((t) => t.id === c.req.param("id"));
+    if (!trade) return c.json({ error: "unknown trade id" }, 404);
+
+    if (trade.status === "closed") {
+      const cached = chartCache.get(trade.id);
+      if (cached && cached.updatedAt === trade.updatedAt) return c.json(cached.data);
+    }
+
+    const data = await buildChartFor(trade);
+    // Never cache a failed fetch: a transient network error would otherwise pin "unavailable" forever.
+    if (trade.status === "closed" && data.dataStatus === "ok") chartCache.set(trade.id, { updatedAt: trade.updatedAt, data });
+    return c.json(data);
   });
 
   app.get("/api/review/:tradeId", async (c) => {
@@ -424,26 +498,6 @@ function flagValue(argv: readonly string[], flag: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-async function fetchKlines1hPublic(symbol: string, startTimeMs: number, endTimeMs: number): Promise<Kline[] | null> {
-  try {
-    const bybitSymbol = appSymbolToBybit(symbol);
-    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${bybitSymbol}&interval=60&start=${startTimeMs}&end=${endTimeMs}&limit=200`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    const body = await res.json() as { retCode?: number; result?: { list?: unknown[] } };
-    if (body.retCode !== 0 || !Array.isArray(body.result?.list)) return null;
-    const klines: Kline[] = [];
-    for (const bar of body.result.list) {
-      if (!Array.isArray(bar) || bar.length < 6) return null;
-      const [t, o, h, l, cl, v] = (bar as string[]).map(Number);
-      if (![t, o, h, l, cl, v].every((n) => Number.isFinite(n))) return null;
-      klines.push({ t: t!, o: o!, h: h!, l: l!, c: cl!, v: v! });
-    }
-    return klines;
-  } catch {
-    return null;
-  }
-}
-
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const configPath = flagValue(argv, "--config") ?? "./config.json";
@@ -463,11 +517,13 @@ async function main(): Promise<void> {
       })
     : null;
 
+  const { fetch: publicFetch, sleep: publicSleep } = defaultAdapterDeps();
+  const publicMarketDataDeps = { fetch: publicFetch, sleep: publicSleep };
   try {
     await startJournalServer({
       config, manual, journalPath, reportsRoot, rest,
       now: () => Date.now(),
-      fetchKlines1h: fetchKlines1hPublic,
+      fetchKlines: (symbol, interval, startMs, endMs) => fetchKlinesPublic(symbol, interval, startMs, endMs, publicMarketDataDeps),
     });
   } catch (err) {
     if (err instanceof TradePermissionKeyError) {
