@@ -45,8 +45,8 @@ export interface DailyReport {
 
 function emptyAiSection(status: "pending" | "disabled", reason: string): AiAnalystSection {
   return {
-    status, reason, model: null, servedByModel: null, promptVersionHash: null,
-    costUsd: 0, monthToDateUsd: 0, regimeSummary: null,
+    status, reason, model: null, provider: null, servedByModel: null, promptVersionHash: null,
+    costUsd: 0, monthToDateUsd: 0, listCostUsd: 0, regimeSummary: null,
     assessments: [], plans: [], ideas: [], openTradeNotes: [], risks: [], dataGaps: [], rejected: [],
   };
 }
@@ -80,6 +80,14 @@ export function buildReport(input: {
    *  `effectiveMaxLeverage`'s `liveClosedTradesForRule`). Computed by the caller from the full
    *  journal (not just `openTrades`) — Phase 2 hardcoded 0 here; Phase 3 wires the real count. */
   liveClosedTradesByRule?: Record<string, number>;
+  /** Persisted AI-analyst rules (`data/ai-rules/<planId>.json`, §5.13), keyed by `ruleId`, for
+   *  currently open AI-origin trades — `research-rules.json`'s own rule set never contains an
+   *  "ai-analyst" rule (parseRuleSet rejects that origin), so an open AI-origin trade's thesis
+   *  can only be evaluated if the caller loads its persisted rule and passes it here. Missing
+   *  from this map (file never written, or not loaded) → `openTradeThesis.state: "not_evaluable"`
+   *  (AC-53), the same fallback already used for a missing FeatureVector. Phase 4b gap
+   *  resolution — see this file's own header for the analogous outcomes/plans one. */
+  aiRules?: Record<string, RuleDefinition>;
   aiDisabledReason: null | "config" | "cli-flag";
 }): DailyReport {
   const {
@@ -87,6 +95,7 @@ export function buildReport(input: {
     plannerConfig, breaker, openTrades, aiDisabledReason,
   } = input;
   const liveClosedTradesByRule = input.liveClosedTradesByRule ?? {};
+  const aiRules = input.aiRules ?? {};
 
   const sources = snapshots.map((s) => ({
     sourceId: s.sourceId, status: s.status, statusDetail: s.statusDetail, fetchedAt: s.fetchedAt, sha256: s.sha256,
@@ -131,7 +140,7 @@ export function buildReport(input: {
   const openTradeThesis: DailyReport["openTradeThesis"] = [];
   for (const trade of openTrades) {
     if (trade.status !== "open" || trade.ruleId === null) continue;
-    const rule = rulesById.get(trade.ruleId);
+    const rule = rulesById.get(trade.ruleId) ?? aiRules[trade.ruleId];
     const fv = features.find((f) => f.symbol === trade.symbol);
     if (!rule || !fv) {
       openTradeThesis.push({ tradeId: trade.id, ruleId: trade.ruleId, state: "not_evaluable", conditions: [] });
@@ -262,7 +271,12 @@ export function renderReportMarkdown(r: DailyReport): string {
     lines.push("");
     lines.push(`Status: ${r.aiAnalyst.status}${r.aiAnalyst.reason ? ` — ${r.aiAnalyst.reason}` : ""}`);
     if (r.aiAnalyst.model) lines.push(`Model: ${r.aiAnalyst.model}${r.aiAnalyst.servedByModel && r.aiAnalyst.servedByModel !== r.aiAnalyst.model ? ` (served by ${r.aiAnalyst.servedByModel})` : ""}`);
-    lines.push(`Cost: $${fmtNum(r.aiAnalyst.costUsd)} (month to date: $${fmtNum(r.aiAnalyst.monthToDateUsd)})`);
+    // provider "claude-cli" bills nothing per call (owner subscription) — costUsd is always 0
+    // there, so the list-price estimate (listCostUsd) is shown alongside it instead of hidden.
+    const costLine = r.aiAnalyst.provider === "claude-cli"
+      ? `Cost: $${fmtNum(r.aiAnalyst.costUsd)} (subscription; list-equivalent $${fmtNum(r.aiAnalyst.listCostUsd)})`
+      : `Cost: $${fmtNum(r.aiAnalyst.costUsd)}`;
+    lines.push(`${costLine} (month to date: $${fmtNum(r.aiAnalyst.monthToDateUsd)})`);
     lines.push("");
     if (r.aiAnalyst.regimeSummary) {
       lines.push("### Regime summary");

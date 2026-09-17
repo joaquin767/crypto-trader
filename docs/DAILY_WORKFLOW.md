@@ -19,7 +19,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ✅ Built |
 | 3b — Trade chart & replay | Price chart per trade with plan levels, volatility range, live follow and candle-by-candle replay | ✅ Built |
 | 4 — Backtest & gates | `npm run backfill` + `npm run backtest:daily`: dev backtests, Gate D0 (holdout) and Gate D1 (paper) verdicts | ✅ Built |
-| 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas | ⏳ Planned |
+| 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas, via the `claude-cli` subscription by default (or `anthropic-api`) | ✅ Built — AC-54/AC-54a live-smoke sign-off pending |
 | 5 — Analyst persona | Interactive Claude Code skill to write and critique rules | ⏳ Planned |
 
 This table is updated at the end of every phase.
@@ -161,6 +161,8 @@ If any check fails, stop: no live trade until it is fixed and the check passes a
 | `research-rules.json` | Your rule set. Ships with 3 `EXAMPLE` rules — replace them with your own (format below) | rules channel |
 | Read-only Bybit key | Create an API key with **read-only** permission (no Trade, no Withdraw) and export `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`. The journal refuses to start with any other key | live sync |
 | `manual.journalStartTime` | ISO time in `config.json` (e.g. `"2026-09-17T00:00:00Z"`). Only executions after it are journaled, so old auto-trader history stays out | live sync |
+| `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) | From `claude setup-token`, stored in the secrets file (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) — never in `config.json`. Set `config.ai.enabled: true` to turn the channel on (off by default) | AI analyst channel, default provider `claude-cli` — see [below](#ai-analyst-channel) |
+| `claude` CLI installed next to `node` | The systemd job has no `PATH`, so `claude` must sit in the same bin dir as the `node` used to run it (true by default for an nvm install) — or set `config.ai.cliPath` explicitly | AI analyst channel, provider `claude-cli` |
 
 Without the read-only key the dashboard runs in **paper-only mode** — useful for the whole paper phase (Gate D1).
 
@@ -181,7 +183,15 @@ Manual file formats:
 
 ```
 FRED_API_KEY=...
+CLAUDE_CODE_OAUTH_TOKEN=...
+ANTHROPIC_API_KEY=...
 ```
+
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) is one long token that wraps over two lines on
+screen — paste it whole on a single `KEY=value` line; pasting only the visible first line gives
+`401 OAuth access token is invalid` at run time. `ANTHROPIC_API_KEY` here is only needed as a
+fallback (provider `claude-cli` with no OAuth token) or when `config.ai.provider` is
+`"anthropic-api"`.
 
 - Interactive terminals load it from `~/.bashrc`:
   `set -a; [ -f ~/.config/crypto-trader/secrets.env ] && . ~/.config/crypto-trader/secrets.env; set +a`
@@ -248,8 +258,9 @@ If you skip the daily import, ETF rules simply show `not_evaluable` in that day'
 |---------|--------------|-----------|
 | `npm run snapshot:daily` | Fetch all sources for today, save snapshots, print sources + features as JSON | 0 written · 3 already exists (use `--revision N`) · 4 decision time in the future |
 | `npm run snapshot:daily -- --date 2026-09-15 --revision 1` | Re-snapshot a date as a new revision (backdated → scheduled decision time) | same |
-| `npm run research:daily` | Snapshot → features → rules → plans → `reports/<date>.json` + `reports/<date>.md` | 0 written · 2 invalid `research-rules.json` (all issues printed, nothing written) · 3 report exists (use `--refetch`) · 4 decision time in the future |
+| `npm run research:daily` | Snapshot → features → rules → plans → `reports/<date>.json` + `reports/<date>.md`, then the AI step if `config.ai.enabled` and `--no-ai` wasn't passed | 0 written · 2 invalid `research-rules.json` (all issues printed, nothing written) · 3 report exists (use `--refetch`), including a report left `aiAnalyst.status: "pending"` by a run that died before the AI step finished · 4 decision time in the future · 5 manual journal unreadable |
 | `npm run research:daily -- --refetch` | Re-run today as a new revision; nothing is overwritten | same |
+| `npm run research:daily -- --no-ai` | Skip the AI step for this run only (`aiAnalyst.status: "disabled"`, reason `--no-ai`); the rules channel is unaffected | same |
 | `npm run journal` | Start the dashboard at <http://127.0.0.1:3082> (local only) | exits non-zero if the Bybit key has trade/withdraw permission or can't be verified; exit 5 from `research:daily` if the journal file is unreadable |
 | `npm run backfill -- --from 2024-01-01 --to <yesterday>` | Build point-in-time history in `data/history/` for backtests | prints a per-source summary; failed sources are empty with a reason, never partial |
 | `npm run backtest:daily -- --rule <id> --mode dev` | Backtest a rule on the development period only (before 2025-09-16); free to repeat | 0 on completion |
@@ -281,8 +292,8 @@ flags **only in `dev` mode**; gate modes refuse them (see [Testing a rule](#test
 
 ### Trade chart & replay
 
-Pick a trade in the selector (open trades first). Tabs filter by channel: **Rules**, **AI** (empty
-until the AI analyst lands), **Both**.
+Pick a trade in the selector (open trades first). Tabs filter by channel: **Rules**, **AI** (trades
+linked to or recorded from an AI-origin plan — see [AI analyst channel](#ai-analyst-channel)), **Both**.
 
 | Element | Meaning |
 |---------|---------|
@@ -328,6 +339,126 @@ Resetting is a deliberate, written decision — review what happened before you 
 
 Until check 4 of [Before your first live trade](#before-your-first-live-trade) passes, every funding
 value shows `sign unverified`.
+
+---
+
+## AI analyst channel
+
+Once a day, right after the rules report is written, Claude reviews the same point-in-time snapshot:
+every rule's triggered/not-triggered outcome, every rule plan the planner produced, and your currently
+open trades. It writes its findings into the same report, under the heading
+**"AI analyst channel — forward-only, unvalidated."**
+
+**What it does:**
+- States a stance (`support` / `caution` / `oppose`) on each rule plan, with cited reasons.
+- Proposes up to `ai.maxIdeasPerDay` (default 3) of its own trade ideas — symbol, side, thesis,
+  invalidation conditions, stop/target multiples, max hold days.
+- Leaves a short note on each of your open trades, states regime-level risks and data gaps.
+
+**What it never does:**
+- Choose position size, leverage, or venue (paper vs. live) — those come from the same planner and
+  gates every rule plan goes through. An AI idea becomes a `TradePlan` exactly like a rule's, with
+  `origin: "ai-analyst"`.
+- Modify a rule plan. Its stance is recorded and shown next to the plan; the plan itself never changes.
+- State anything without a citation it can verify: every claim must point at a feature value present
+  in this run's data, or a URL its own web search actually returned this run. Anything else — a
+  mismatched value, an unretrieved URL, a reference to an unknown plan/trade, an idea with zero
+  citations, a numeric field out of range, or an idea past the daily cap — is dropped and listed under
+  `rejected` in the report, never shown as fact.
+- Get validated by history. Its ideas are `forwardOnly`: the model's training data reaches into this
+  system's backtest window, so no backtest of it would be honest. It only earns trust the same way a
+  rule does — Gate D1, forward, on paper.
+
+**Provider (`config.ai.provider`):** two ways to run the same analysis —
+
+| Provider | How it runs | Cost |
+|----------|-------------|------|
+| `"claude-cli"` (default) | Through the `claude` CLI already installed for this Claude Code session, under **your Claude subscription** | `costUsd` is always `0` (nothing is billed per call); `listCostUsd` records what the CLI itself estimates the call would cost at list price, for comparison only — it never counts against `monthlyBudgetUsd` |
+| `"anthropic-api"` | Directly via `@anthropic-ai/sdk`, pay-as-you-go | `costUsd` is the real, budget-gated spend — roughly **$9–28/month** at `claude-opus-5` list prices for one call/day (§13 A15), capped by `monthlyBudgetUsd` |
+
+Switching `provider` changes `promptVersionHash` (it's a genuine behaviour change — different
+execution path, different model-serving mechanics) and restarts the AI channel's Gate D1 track record.
+
+**Config (`config.ai`, all optional — every field has a default):**
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `false` | Turns the channel on. Off means every report shows `aiAnalyst.status: "disabled"` |
+| `provider` | `"claude-cli"` | `"claude-cli"` (subscription, via the local CLI) or `"anthropic-api"` (pay-as-you-go SDK) — see table above |
+| `cliPath` | `null` | Path to the `claude` executable, only used when `provider` is `"claude-cli"`. `null` auto-resolves to the `claude` binary next to the running `node` binary (nvm installs both in the same bin dir, and the systemd service has no `PATH`), falling back to the bare name `"claude"` resolved via `PATH` |
+| `model` | `"claude-opus-5"` | Model id |
+| `effort` | `"high"` | Reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`) |
+| `maxTokens` | `32000` | Max output tokens for the streamed request |
+| `webSearchMaxUses` | `5` | Max web searches per call; `0` disables the tool |
+| `maxIdeasPerDay` | `3` | Cap on new AI-origin ideas per day (0..3) |
+| `monthlyBudgetUsd` | `15` | Hard cap on month-to-date **real** spend (`costUsd`) before the call is skipped — never sees `provider: "claude-cli"` calls, since those always cost `0` |
+| `inputUsdPerMTok` / `outputUsdPerMTok` / `webSearchUsdPerRequest` | `5` / `25` / `0.01` | Pricing used to estimate `costUsd` under `provider: "anthropic-api"` only |
+| `channelStatus` | `"experimental"` | Set to `"paper-passed"` only after the AI channel passes its own Gate D1 |
+| `passedPromptHash` | `null` | The exact `promptVersionHash` that passed D1 — required when `channelStatus` is `"paper-passed"` |
+| `timeoutMs` | `600000` | Request/CLI-call timeout (the call is streamed and can take minutes) |
+
+**Credentials are never read from `config.json`.** For `provider: "claude-cli"` (default): from
+`CLAUDE_CODE_OAUTH_TOKEN` in the secrets file, or `ANTHROPIC_API_KEY` as a fallback — when the OAuth
+token is set, `ANTHROPIC_API_KEY` is deliberately removed from the CLI's environment so the
+subscription is always used and no API billing can happen by accident. For `provider: "anthropic-api"`:
+from `ANTHROPIC_API_KEY` (same place as `FRED_API_KEY`), or the SDK's own default credential chain. No
+credential for the active provider means the channel reports `aiAnalyst.status: "unavailable"`, reason
+`no_api_key` — the run still exits 0 and the rules report is untouched. A `claude` CLI that isn't
+installed, or isn't logged in, behaves the same way: `unavailable`, exit code unaffected.
+
+Get the OAuth token once with `claude setup-token` and paste the whole thing into the secrets file —
+it's long and wraps over two lines on screen, but it's one token; pasting only the visible first line
+gives `401 OAuth access token is invalid` at run time, not a helpful "truncated" error.
+
+**Budget ledger:** every call attempt (success or failure, whenever token usage is known) appends one
+line to `data/ai-usage.jsonl` — time, model, usage, estimated cost, and outcome. This file is
+committed (it's the audit trail behind the AI channel's cost, §13 A15) — never delete lines from it.
+Month-to-date spend is checked **before** every call; over budget skips the call entirely
+(`aiAnalyst.status: "skipped_budget"`, zero cost, nothing sent).
+
+**`--no-ai` and `--refetch`:** `--no-ai` skips the AI step for one run only (`aiAnalyst.status:
+"disabled"`, reason `--no-ai`); it never touches `config.ai.enabled`. If the process dies between
+writing the rules report and finishing the AI step, the report is left `aiAnalyst.status: "pending"`
+(the Markdown says "AI analyst: did not complete") and the next run for that date exits 3 until you
+pass `--refetch`, which re-runs the AI step and appends a second ledger line.
+
+**Gating the AI channel (§8.4):** the whole channel is gated as one rule per exact prompt
+configuration — id `ai-analyst-<hash8>`, where the hash covers the system prompt text, output schema,
+model, effort, `maxTokens`, `webSearchMaxUses` and `maxIdeasPerDay` (pricing, budget, timeout,
+`channelStatus` and `passedPromptHash` don't affect the hash, so changing only those never resets the
+track record). Changing anything that *does* change the hash restarts the AI channel's Gate D1 count
+at zero. Run its D1 check the same way as any rule's, using that id:
+
+```bash
+npm run backtest:daily -- --rule ai-analyst-<hash8> --mode d1-check
+```
+
+It requires **60 closed paper trades from that exact hash's ideas over at least 45 days**, positive
+expectancy, and ≥ 90% adherence — the AI's own idea-quality bar is stricter than a rule's, because it
+never went through Gate D0. Only after that do you set `config.ai.channelStatus: "paper-passed"` and
+`config.ai.passedPromptHash` to that exact hash; until then every AI plan is `leverage: 1`,
+`venueIntent: "paper"`, regardless of what the AI proposes.
+
+The AI's *stance on rule plans* never gates anything — it's measured, not enforced. The dashboard's
+"By AI stance" stats answer "does the AI's opinion predict outcomes?"; if, after 30+ closed rule trades
+per stance bucket, `oppose` trades do no worse than `support` trades in expectancy, the dashboard shows
+**"AI stance has no measured predictive value"** so you stop reading meaning into a stance that isn't
+earning it.
+
+**Cost, honestly (§13 A15):** the owner explicitly asked for this — Claude participating in every
+daily call is a deliberate choice, not a default. Under `provider: "anthropic-api"`, estimated cost
+per call is roughly $0.20–$0.60 (≈30–60k input tokens, 5–15k output, ≤5 searches), i.e. **$9–28/month**
+at one call/day — real money relative to this account's size; `byOrigin`/`byAiStance` exist so you can
+tell, in numbers, whether the channel is earning it back. Under `provider: "claude-cli"` (default),
+nothing is billed per call — `listCostUsd` still records what the same call would have cost at list
+price, so switching providers later doesn't lose that visibility. Nothing in this system lowers
+`effort` or switches models or providers on its own — that decision is yours.
+
+**Run it inside the point-in-time window.** Like the rules channel, the AI channel reads the same
+`decisionTime`-gated snapshot — a run made hours after 00:15 UTC still works, but sources whose
+availability is their own fetch time (fear & greed, stablecoin supply, the FRED/CPI schedule, the
+Farside ETF-flow import) will show `missing` if they weren't fetched inside the window, same as for
+any rule. A late AI run is honest, just data-thin — never back-dated.
 
 ---
 

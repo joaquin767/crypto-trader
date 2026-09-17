@@ -5,8 +5,11 @@
 > fixes (open-trade counter, disable-reason contract, gate-reset field list, `aiIdeaToRule` fields,
 > `RestClient.getApiKeyInfo` ownership, 429 AC) were applied after acceptance.
 
-Status: **Revision 2 — accepted spec. Phases 1–2 implemented (PR #1); Phase 3 contract (§5.8a, AC-55..68) under
-implementation; Phases 4, 4b, 5 not implemented.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
+Status: **Revision 2 — accepted spec. Phases 1–4 implemented; Phase 4b (AI analyst channel) implemented,
+defaulting to the `claude-cli` provider (the owner's Claude subscription via the locally installed CLI, no
+per-call API billing) with `anthropic-api` as the pay-as-you-go alternative (§4.15–4.19, §5.13, §6.8
+AC-40..53/AC-40a..c all green; AC-54/AC-54a are the manual live-smoke checks and stay for the owner);
+Phase 5 (interactive persona) not implemented.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
 the owner's request: Claude participates in each daily recommendation.
 
 Owner (every module this spec creates or changes):
@@ -921,6 +924,8 @@ export interface ManualTradingConfig {
 
 export interface AiAnalystConfig {
   enabled: boolean;               // default false until the owner turns it on
+  provider: "claude-cli" | "anthropic-api"; // default "claude-cli" (owner's subscription, via the local CLI); "anthropic-api" pays per call via @anthropic-ai/sdk
+  cliPath: string | null;         // default null: resolves join(dirname(process.execPath), "claude") if it exists, else "claude" (PATH lookup). Only consulted when provider is "claude-cli"
   model: string;                  // default "claude-opus-5"
   effort: "low" | "medium" | "high" | "xhigh" | "max";  // default "high"
   maxTokens: number;              // default 32000 (request is streamed)
@@ -934,7 +939,9 @@ export interface AiAnalystConfig {
   passedPromptHash: string | null;                  // the full promptVersionHash that passed D1; required non-null when channelStatus is "paper-passed"
   timeoutMs: number;              // default 600_000
 }
-// Config gains `ai?: Partial<AiAnalystConfig>`; API key read from ANTHROPIC_API_KEY (or SDK default credential chain), never from config.json.
+// Config gains `ai?: Partial<AiAnalystConfig>`; credential read from CLAUDE_CODE_OAUTH_TOKEN or
+// ANTHROPIC_API_KEY (provider "claude-cli"), or from ANTHROPIC_API_KEY / the SDK default credential
+// chain (provider "anthropic-api") — never from config.json, either way.
 ```
 
 ### 5.12 CLIs and scripts (`package.json`)
@@ -998,18 +1005,49 @@ export interface AiAnalystInput {
 
 export type AiCallResult =
   | { kind: "ok"; output: AiAnalystOutput; webResults: { url: string; title: string; pageAge: string | null }[];
-      usage: { inputTokens: number; outputTokens: number; webSearchRequests: number }; servedByModel: string; rawResponsePath: string }
+      usage: { inputTokens: number; outputTokens: number; webSearchRequests: number }; servedByModel: string; rawResponsePath: string;
+      listCostUsd?: number }   // the provider's own list-price estimate, when it reports one (claude-cli's total_cost_usd); undefined for anthropic-api
   | { kind: "failed"; reason: "no_api_key" | "api_error" | "rate_limited" | "timeout" | "refusal" | "max_tokens" | "schema_invalid";
       detail: string; usage: { inputTokens: number; outputTokens: number; webSearchRequests: number } | null };
 
 /** Port. Implementations MUST resolve (never reject). */
 export interface AiClientPort { analyze(input: AiAnalystInput): Promise<AiCallResult>; }
 
-/** src/research/ai/anthropic-client.ts. Uses @anthropic-ai/sdk streaming request with: model/effort/maxTokens from cfg,
- *  thinking {type:"adaptive"}, structured output format from the zod schema, tool web_search_20260209 with
- *  max_uses = webSearchMaxUses (omitted when 0), refusal fallback fallbacks:"default" (beta server-side-fallback-2026-07-01).
- *  Checks stop_reason before reading content. Writes the full raw response to data/snapshots/<date>/ai-analyst.raw.json (write-once). */
+/** src/research/ai/anthropic-client.ts (provider "anthropic-api"). Uses @anthropic-ai/sdk streaming request with:
+ *  model/effort/maxTokens from cfg, thinking {type:"adaptive"}, structured output format from the zod schema, tool
+ *  web_search_20260209 with max_uses = webSearchMaxUses (omitted when 0), refusal fallback fallbacks:"default"
+ *  (beta server-side-fallback-2026-07-01). Checks stop_reason before reading content. Writes the full raw response
+ *  to data/snapshots/<date>/ai-analyst.raw.json (write-once, shared helper src/research/ai/raw-response.ts). */
 export function createAnthropicAiClient(cfg: AiAnalystConfig, snapshotRoot: string): AiClientPort;
+
+/** src/research/ai/claude-cli-client.ts (provider "claude-cli", the default). Runs the same analysis through the
+ *  locally installed `claude` CLI under the owner's subscription instead of the Anthropic API. Credential check
+ *  before spawning: CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, else `failed: no_api_key`; when the OAuth token is
+ *  set, ANTHROPIC_API_KEY is deleted from the child's environment so the subscription is always used. The user
+ *  content (same JSON the SDK adapter sends) is written to the child's stdin; cwd is an empty temp dir removed
+ *  after. Invocation (args array, no shell):
+ *  `-p --output-format stream-json --verbose --no-session-persistence --setting-sources "" --permission-mode dontAsk
+ *  --max-turns <2 + 2×webSearchMaxUses> --model <cfg.model> --effort <cfg.effort> --json-schema <the JSON schema
+ *  string> --system-prompt <input.systemPrompt>`, plus `--tools WebSearch --allowedTools WebSearch` when
+ *  webSearchMaxUses > 0 (else `--tools ""`) — `--allowedTools WebSearch` is required for the CLI to actually use the
+ *  tool under `--permission-mode dontAsk`. `--bare` is never passed (it ignores the OAuth token). The child is
+ *  killed after cfg.timeoutMs → `failed: timeout`; a spawn error (ENOENT etc.) → `failed: api_error`.
+ *  Output is JSONL: one event per line, a terminal `result` event (not necessarily the last line — trailing
+ *  `system` events can follow it) carries `subtype`, `is_error`, `structured_output`, `result` (string),
+ *  `total_cost_usd` (the CLI's own list-price estimate, returned as `listCostUsd`) and `modelUsage` (one entry per
+ *  model actually used). Web search results come from every `user` event whose `tool_use_result` is an object with
+ *  `results[]`: each `results[N].content[]` item is `{title, url}` (the "Links: [...]" string form elsewhere in the
+ *  event is not parsed — the object form is authoritative). Usage sums every `modelUsage[*]` entry:
+ *  `inputTokens + cacheReadInputTokens + cacheCreationInputTokens` → inputTokens, `outputTokens` → outputTokens,
+ *  `webSearchRequests` → webSearchRequests (the terminal event's top-level `usage.server_tool_use.
+ *  web_search_requests` is NOT used — it stays 0 even when a search ran). `servedByModel` = `modelUsage` keys
+ *  joined by ",". Result mapping: `subtype "success"` + `is_error false` + `structured_output` present → zod
+ *  safeParse (schema_invalid on failure) → ok. `subtype "error_max_structured_output_retries"` → schema_invalid;
+ *  `"error_max_turns"` → max_tokens (closest union member). `is_error true` with the result text matching /401|auth/i
+ *  → api_error ("authentication failed — check CLAUDE_CODE_OAUTH_TOKEN"), /429|rate limit/i → rate_limited,
+ *  /refus/i → refusal, else api_error. A non-zero exit with no result event → api_error with the last stderr line.
+ *  Every stdout event is written, as a JSON array, write-once to the same raw-response path as the SDK adapter. */
+export function createClaudeCliAiClient(cfg: AiAnalystConfig, snapshotRoot: string): AiClientPort;
 
 export interface AiRejectedItem {
   path: string;                     // e.g. "ideas[1]", "planAssessments[0].reasons[2]"
@@ -1025,9 +1063,10 @@ export interface AiRejectedItem {
 export function verifyAiOutput(out: AiAnalystOutput, input: AiAnalystInput, webResults: readonly { url: string }[], maxIdeas: number):
   { output: AiAnalystOutput; rejected: AiRejectedItem[] };
 
-/** SHA-256 over canonical JSON of { systemPrompt, outputJsonSchema, model, effort, maxTokens, webSearchMaxUses, maxIdeasPerDay }.
- *  Every setting that changes AI behaviour is included, so changing any of them requires a fresh Gate D1 (§8.4).
- *  Budget, pricing, timeout and channelStatus/passedPromptHash are excluded (they do not change the output).
+/** SHA-256 over canonical JSON of { systemPrompt, outputJsonSchema, model, effort, maxTokens, webSearchMaxUses, maxIdeasPerDay, provider }.
+ *  Every setting that changes AI behaviour is included, so changing any of them requires a fresh Gate D1 (§8.4) —
+ *  `provider` is included because switching between claude-cli and anthropic-api is itself a behaviour change.
+ *  Budget, pricing, cliPath, timeout and channelStatus/passedPromptHash are excluded (they do not change the output).
  *  First 8 hex chars form the AI rule id `ai-analyst-<hash8>`. */
 export function promptVersionHash(systemPrompt: string, outputJsonSchema: string, cfg: AiAnalystConfig): string;
 
@@ -1042,8 +1081,10 @@ export interface AiAnalystSection {
   // "pending": written by buildReport when ai.enabled, before the AI call; replaced by attachAiAnalyst. A report left
   // "pending" means the process died mid-run; the Markdown then shows "AI analyst: did not complete".
   reason: string;                          // empty only when status is "ok"
-  model: string | null; servedByModel: string | null; promptVersionHash: string | null;
-  costUsd: number; monthToDateUsd: number;
+  model: string | null; provider: "claude-cli" | "anthropic-api" | null; servedByModel: string | null; promptVersionHash: string | null;
+  costUsd: number;                         // real API spend; 0 under provider "claude-cli" (the subscription bills separately)
+  monthToDateUsd: number;
+  listCostUsd: number;                     // the provider's own list-price estimate; equals costUsd under "anthropic-api"
   regimeSummary: string | null;
   assessments: AiPlanAssessment[];         // verified only
   plans: TradePlan[];                      // origin "ai-analyst", produced by planTrade from aiIdeaToRule(...)
@@ -1053,12 +1094,19 @@ export interface AiAnalystSection {
   rejected: AiRejectedItem[];
 }
 
-/** Budget ledger data/ai-usage.jsonl: one line per call attempt {time, dateUtc, model, usage, costUsd, resultKind}. */
+/** Budget ledger data/ai-usage.jsonl: one line per call attempt {time, dateUtc, model, usage, costUsd, listCostUsd, resultKind}.
+ *  monthToDateSpendUsd sums only costUsd (real spend), so provider "claude-cli" calls (costUsd 0) never count
+ *  against monthlyBudgetUsd; listCostUsd is informational only. */
 export function monthToDateSpendUsd(ledgerPath: string, now: number): number;   // missing file → 0; unparseable line → throws
 export function estimateCallCostUsd(usage: { inputTokens: number; outputTokens: number; webSearchRequests: number }, cfg: AiAnalystConfig): number;
+// runAiAnalyst computes costUsd = cfg.provider === "claude-cli" ? 0 : estimateCallCostUsd(usage, cfg), and
+// listCostUsd = result.listCostUsd ?? costUsd (so the anthropic-api adapter, which never sets listCostUsd, gets
+// listCostUsd === costUsd).
 
 /** Orchestrates: budget check → analyze → append ledger line (even on failure, when usage is known) → verify → plan ideas.
- *  Never throws for API/verification problems; returns a section with status "unavailable" and reason instead.
+ *  Never throws for API/verification/ledger/persistence problems; returns a section with status "unavailable" and
+ *  reason instead (e.g. "ledger_write_failed: ...", "ai_rule_persist_failed: ..." — a plan whose rule could not be
+ *  persisted write-once is never returned, fail closed).
  *  AI plans use the same PlannerConfig, open-trade count (rule plans count toward maxOpenManualTrades first) and breaker state. */
 export function runAiAnalyst(input: AiAnalystInput, port: AiClientPort, cfg: AiAnalystConfig, planner: {
   cfg: PlannerConfig; openTradeCount: number; breakerTripped: boolean; dateUtc: string;
@@ -1273,23 +1321,27 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 
 ### 6.8 AI analyst (P0 for the AI channel; the rules channel does not depend on it)
 All tests use a fake `AiClientPort`; no test calls the network.
-- [ ] AC-40: Given the port returns each `failed` reason in turn, when `runAiAnalyst` runs, then `status === "unavailable"`, `reason` contains the failure reason, `plans` and `assessments` are empty, and the rules report written before the call is byte-identical afterward except for the `aiAnalyst` section.
-- [ ] AC-41: Given AI enabled and a fake port returning a valid output, then every rule plan in the final report deep-equals the same plan from a run with `--no-ai` (AI never modifies rule plans).
-- [ ] AC-42: Given an idea citing `{kind:"feature", symbol:"BTC/USDT", feature:"fundingRate8hAvg3d", value: 0.0002}` while the FeatureVector value is `0.0003`, then the idea is absent from `ideas`/`plans` and `rejected` contains `{path:"ideas[0]", reason:"unverifiable_feature"}`.
-- [ ] AC-43: Given an idea citing a web URL not present in `webResults`, then it is rejected with `unverifiable_web`; given the URL present, it is kept.
-- [ ] AC-44: Given an assessment for a `planId` not in `rulePlans`, then it is rejected `unknown_plan`; given an idea on a symbol not in `configSymbols`, then `symbol_not_configured`; given an idea with zero refs, then `no_evidence`.
-- [ ] AC-45: Given 5 verified ideas and `maxIdeasPerDay = 3`, then exactly the first 3 remain and 2 items are rejected `over_limit`.
-- [ ] AC-46: Given `ai.channelStatus = "experimental"`, or `"paper-passed"` with `passedPromptHash` ≠ the current hash, then every AI plan has `origin:"ai-analyst"`, `leverage: 1`, `venueIntent:"paper"`.
-- [ ] AC-47: Given `monthToDateSpendUsd >= monthlyBudgetUsd`, then the fake port's `analyze` call count is 0 and `status === "skipped_budget"`.
-- [ ] AC-48: Given a `failed` result carrying usage, then one ledger line is appended with that usage and `resultKind:"failed"`.
-- [ ] AC-49: Given any change to the system prompt text, output schema, model, effort, maxTokens, webSearchMaxUses, or maxIdeasPerDay, then `promptVersionHash` changes; given a change only to monthlyBudgetUsd, pricing fields, timeoutMs, channelStatus or passedPromptHash, it is identical.
-- [ ] AC-49a: Given `aiDisabledReason: null`, when `buildReport` runs, then `aiAnalyst.status === "pending"` and `reason === ""`; given `"config"`, then `"disabled"` with reason `"ai.enabled is false"`; given `"cli-flag"`, then `"disabled"` with reason `"--no-ai"`.
-- [ ] AC-49b: Given a report file for today whose `aiAnalyst.status === "pending"` and no `--refetch`, when `research:daily` runs, then it exits 3 and prints `AI step incomplete for <date>; rerun with --refetch`.
-- [ ] AC-50: Given closed rule-origin reviews with AI stances [support +1R, support +2R, oppose −1R, none +0.5R], then `byAiStance.support = {closed:2, expectancyR:1.5, winRate:1}`, `byAiStance.oppose = {closed:1, expectancyR:-1, winRate:0}`, `byAiStance.caution.closed = 0`; AI-origin reviews do not appear in `byAiStance`.
-- [ ] AC-51: Given no `ANTHROPIC_API_KEY` and no SDK credential, then `research:daily` exits 0 with `aiAnalyst.status === "unavailable"`, reason `no_api_key`.
-- [ ] AC-52: `renderReportMarkdown` output contains the heading `AI analyst channel — forward-only, unvalidated` exactly once when `aiAnalyst.status !== "disabled"`, and every AI plan appears only under it.
-- [ ] AC-53: Given an open AI-origin trade whose `data/ai-rules/<planId>.json` is missing, then its `openTradeThesis.state === "not_evaluable"`.
+- [x] AC-40: Given the port returns each `failed` reason in turn, when `runAiAnalyst` runs, then `status === "unavailable"`, `reason` contains the failure reason, `plans` and `assessments` are empty, and the rules report written before the call is byte-identical afterward except for the `aiAnalyst` section.
+- [x] AC-40a: `createClaudeCliAiClient`, given a fake `deps.spawn` replaying a real recorded CLI stream (`tests/fixtures/research/claude-cli-stream.jsonl`), returns `ok` with `structured_output` parsed, `webResults` extracted from every `tool_use_result.results[].content[]` in order, usage summed from `modelUsage` (never the terminal event's `usage.server_tool_use.web_search_requests`), `servedByModel` the `modelUsage` keys joined by `,`, `listCostUsd` from `total_cost_usd`, and the raw event array written once (a second call for the same date does not overwrite it). *(`tests/ai-claude-cli-client.test.ts`, "ok: replays the recorded fixture...")*
+- [x] AC-40b: `createClaudeCliAiClient`'s spawned args include `--json-schema` with the exact output-schema string, `--model`/`--effort` from cfg, `--allowedTools WebSearch` (with `--tools WebSearch`) when `webSearchMaxUses > 0` else `--tools ""` (and no `--allowedTools`), and never `--bare`; the spawned child's env has `ANTHROPIC_API_KEY` removed when `CLAUDE_CODE_OAUTH_TOKEN` is set. *(`tests/ai-claude-cli-client.test.ts`, the two "args:" tests)*
+- [x] AC-40c: `createClaudeCliAiClient` maps `subtype: "error_max_structured_output_retries"` → `schema_invalid`, `"error_max_turns"` → `max_tokens`, `is_error: true` with result text matching `/401|auth/i` / `/429|rate limit/i` / `/refus/i` → `api_error` (naming `CLAUDE_CODE_OAUTH_TOKEN`) / `rate_limited` / `refusal`; a `structured_output` failing the zod schema → `schema_invalid`; a timeout kills the child and resolves `timeout`; a spawn `error` event, no credential, and an unwritable `snapshotRoot` all resolve (never reject) with `no_api_key`/`api_error` as appropriate, and no credential means `deps.spawn` is never called. *(`tests/ai-claude-cli-client.test.ts`, all remaining tests)*
+- [x] AC-41: Given AI enabled and a fake port returning a valid output, then every rule plan in the final report deep-equals the same plan from a run with `--no-ai` (AI never modifies rule plans).
+- [x] AC-42: Given an idea citing `{kind:"feature", symbol:"BTC/USDT", feature:"fundingRate8hAvg3d", value: 0.0002}` while the FeatureVector value is `0.0003`, then the idea is absent from `ideas`/`plans` and `rejected` contains `{path:"ideas[0]", reason:"unverifiable_feature"}`.
+- [x] AC-43: Given an idea citing a web URL not present in `webResults`, then it is rejected with `unverifiable_web`; given the URL present, it is kept.
+- [x] AC-44: Given an assessment for a `planId` not in `rulePlans`, then it is rejected `unknown_plan`; given an idea on a symbol not in `configSymbols`, then `symbol_not_configured`; given an idea with zero refs, then `no_evidence`.
+- [x] AC-45: Given 5 verified ideas and `maxIdeasPerDay = 3`, then exactly the first 3 remain and 2 items are rejected `over_limit`.
+- [x] AC-46: Given `ai.channelStatus = "experimental"`, or `"paper-passed"` with `passedPromptHash` ≠ the current hash, then every AI plan has `origin:"ai-analyst"`, `leverage: 1`, `venueIntent:"paper"`.
+- [x] AC-47: Given `monthToDateSpendUsd >= monthlyBudgetUsd`, then the fake port's `analyze` call count is 0 and `status === "skipped_budget"`.
+- [x] AC-48: Given a `failed` result carrying usage, then one ledger line is appended with that usage and `resultKind:"failed"`.
+- [x] AC-49: Given any change to the system prompt text, output schema, model, effort, maxTokens, webSearchMaxUses, maxIdeasPerDay, or `provider`, then `promptVersionHash` changes; given a change only to monthlyBudgetUsd, pricing fields, `cliPath`, timeoutMs, channelStatus or passedPromptHash, it is identical.
+- [x] AC-49a: Given `aiDisabledReason: null`, when `buildReport` runs, then `aiAnalyst.status === "pending"` and `reason === ""`; given `"config"`, then `"disabled"` with reason `"ai.enabled is false"`; given `"cli-flag"`, then `"disabled"` with reason `"--no-ai"`.
+- [x] AC-49b: Given a report file for today whose `aiAnalyst.status === "pending"` and no `--refetch`, when `research:daily` runs, then it exits 3 and prints `AI step incomplete for <date>; rerun with --refetch`.
+- [x] AC-50: Given closed rule-origin reviews with AI stances [support +1R, support +2R, oppose −1R, none +0.5R], then `byAiStance.support = {closed:2, expectancyR:1.5, winRate:1}`, `byAiStance.oppose = {closed:1, expectancyR:-1, winRate:0}`, `byAiStance.caution.closed = 0`; AI-origin reviews do not appear in `byAiStance`.
+- [x] AC-51: Given no `ANTHROPIC_API_KEY` and no SDK credential, then `research:daily` exits 0 with `aiAnalyst.status === "unavailable"`, reason `no_api_key`.
+- [x] AC-52: `renderReportMarkdown` output contains the heading `AI analyst channel — forward-only, unvalidated` exactly once when `aiAnalyst.status !== "disabled"`, and every AI plan appears only under it.
+- [x] AC-53: Given an open AI-origin trade whose `data/ai-rules/<planId>.json` is missing, then its `openTradeThesis.state === "not_evaluable"`.
 - [ ] AC-54 [manual]: One live call with a real key on a real day's snapshot: response parses, `rawResponsePath` exists, ledger cost within ±20% of the Anthropic console's reported cost for that request (this also verifies `webSearchUsdPerRequest`, A16); owner reads the AI section and signs off in `docs/validation/ai-analyst-smoke-<date>.md`.
+- [ ] AC-54a [manual, claude-cli]: One live CLI run on a real day's snapshot: structured output parses, raw file exists, `listCostUsd` recorded, owner reads the AI section and signs off in `docs/validation/ai-analyst-smoke-<date>.md`.
 
 ---
 
@@ -1323,6 +1375,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 | Klines missing inside a simulated trade | Sim returns `unfilled` with reason; counted in report as data gap, not as a trade. | Closed |
 | AI: API error, 429 after SDK retries (default 2), timeout, `refusal` after fallback, `max_tokens`, schema-invalid | `aiAnalyst.status: "unavailable"` with reason; no AI plans or assessments; rules report untouched; exit code unaffected. | Closed |
 | AI: no API key | Same as above, reason `no_api_key`. | Closed |
+| AI (provider `claude-cli`): `claude` executable missing, or spawns but not logged in / no usable credential | `aiAnalyst.status: "unavailable"`, reason `no_api_key` (missing credential, detected before spawning) or `api_error` (spawn failure, e.g. `ENOENT`); exit code unaffected; the CLI is never spawned when no credential is present. | Closed |
 | Process killed after the rules report is written, before `attachAiAnalyst` | Report stays with `aiAnalyst.status: "pending"` (Markdown: `AI analyst: did not complete`); rule plans remain valid; next run for that date exits 3 until `--refetch` (AC-49b), which re-runs the AI step and appends a second ledger line. | Closed |
 | AI: month-to-date spend ≥ budget, or ledger unparseable | No API call; `skipped_budget` (or `unavailable: ledger_unreadable`). | Closed |
 | AI: cites a feature value that differs from the snapshot, a URL it did not retrieve, an unknown plan/trade, or no evidence | Item dropped and listed in `rejected`; never shown as fact. | Closed |
@@ -1399,13 +1452,24 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - Everything else: HTTP via global `fetch`; hashing via `node:crypto`; HTML table parsing hand-written with fixtures; seeded PRNG implemented inline (mulberry32). Existing deps unchanged: `hono ^4`, `@hono/node-server ^1`, `bybit-official-ts-sdk ^0.1.0`.
 - SDK usage (method names, beta flags, fallback + structured-output combination) is taken from the official SDK docs at implementation time, not from this spec's prose; if refusal fallback cannot be combined with structured output parsing, fallback is dropped and a refusal is handled as `failed: refusal` (§13 A17).
 - Chart.js from CDN is acceptable in `journal.html` (same as the existing dashboard).
+- The default AI provider (`claude-cli`) is an **external tool, not an npm dependency**: the locally
+  installed `claude` CLI, version `>= 2.1.x` (verified against `2.1.274`). It is spawned via
+  `node:child_process`, never imported as a package; gate §12.10's import restriction covers only
+  `@anthropic-ai/sdk`/`zod` and does not apply to `src/research/ai/claude-cli-client.ts`.
 
 ### 10.2 Environment & external limits
 - Tests must live directly in `tests/` (glob `tests/*.test.ts` is non-recursive, E11). Tests never hit the network: adapters are tested against recorded fixtures in `tests/fixtures/research/`.
 - FRED requires `FRED_API_KEY` env var; missing key → source `unavailable` (not a crash). Limit 120 req/min.
 - Bybit read-only key via `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`; distinct env names from the auto-trader's keys so the two cannot be confused.
 - Coinalyze free API: 40 req/min, requires key `COINALYZE_API_KEY` (Phase 6 only).
-- Anthropic API: credential from `ANTHROPIC_API_KEY` or the SDK's default credential chain; never written to config, logs, reports, or snapshots. One call per day (plus SDK retries). Requests may take minutes: streamed, `timeoutMs` 600 000. Web search tool type `web_search_20260209`. The job must not run the AI step more than once per date unless `--refetch` (then the ledger records both calls).
+- AI credentials: never written to config, logs, reports, or snapshots. Provider `claude-cli` (default):
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), falling back to `ANTHROPIC_API_KEY` if unset —
+  when the OAuth token IS set, `ANTHROPIC_API_KEY` is removed from the spawned CLI's environment so the
+  subscription is always used. Provider `anthropic-api`: `ANTHROPIC_API_KEY` or the SDK's default
+  credential chain. One call per day (plus retries). Requests may take minutes: streamed/spawned,
+  `timeoutMs` 600 000. Web search tool type `web_search_20260209` (anthropic-api) / CLI tool
+  `WebSearch` with `--allowedTools WebSearch` (claude-cli). The job must not run the AI step more than
+  once per date unless `--refetch` (then the ledger records both calls).
 - `data/ai-usage.jsonl` and `data/ai-rules/` are committed (audit trail); `data/snapshots/*/ai-analyst.raw.json` is gitignored like other snapshots.
 - Farside may block non-browser clients; if so, adapter returns `unavailable` and the owner may drop a manual CSV at `data/manual/farside-<btc|eth>.csv` which the adapter reads with `availableAt = file mtime`.
 - Bybit public market endpoints: stay under 10 req/s (reuse `src/bybit/rate-limiter.ts`).
@@ -1457,7 +1521,7 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 9. **[manual, Phase 4]** Owner review and sign-off of each `gate-d0-*.json` and `gate-d1-*.json` before editing a rule's `status`.
 10. `rg -l "@anthropic-ai/sdk|from \"zod\"" src scripts` — lists only files under `src/research/ai/`.
 11. `rg -n "ANTHROPIC_API_KEY|sk-ant-" reports data/ai-usage.jsonl data/ai-rules` — returns nothing (no credential leakage).
-12. **[manual, Phase 4b]** AC-54 live smoke, plus 7 consecutive daily runs with AI enabled where the owner confirms each AI stance's cited feature values against the report by hand for at least one assessment per day.
+12. **[manual, Phase 4b]** AC-54 (anthropic-api) and/or AC-54a (claude-cli) live smoke, plus 7 consecutive daily runs with AI enabled where the owner confirms each AI stance's cited feature values against the report by hand for at least one assessment per day.
 13. **[manual, Phase 3]** Funding sign check: hold one small real position through a funding settlement, compare the journal's `fundingUsd` sign with Bybit's transaction log (positive funding rate + long = paid). Only then set `manual.fundingSignVerified: true`. (The read-only-key checks are item 8.)
 
 ---

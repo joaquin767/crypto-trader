@@ -1,0 +1,39 @@
+{
+  "id": "ai-analyst-cf9500cb",
+  "version": 1,
+  "description": "Relative-strength long in the stronger of the two configured names, against clean rather than crowded positioning. SOL/USDT held its weekly drawdown to return7d -2.8472906403940845 versus APT's return7d -11.654974489795912, and bounced with return1d 1.859312054539819 from close 98.61. Positioning supports rather than fights this: fundingRate8hAvg3d is negative at -0.0000075211111111111104 (perp longs are being paid) and oiChange3dPct is -3.24812276540305, i.e. open interest has been shrinking into the dip — a de-leveraged book with no long crowding (fundingRatePercentile90d 56.666666666666664, nowhere near an extreme). The catalyst layer is SOL-specific: the SEC's Sept 5, 2026 naming of SOL as a Core ETF Asset and reported SOL ETF inflows of $153.87M, described as the strongest week since October 2025, give SOL an idiosyncratic bid that APT and the broader tape lack. This is explicitly a modest-conviction, coincident-flow trade, not a claim that flows predict returns: the broad ETF complex saw net outflows on Sept 16 ($296M BTC, $224M ETH), which is the main thing arguing against it. Sized for a wide stop given realizedVol7d 67.2842618514587 and atr14d 4.522857142857144.",
+  "evidence": [],
+  "status": "experimental",
+  "symbols": [
+    "SOL/USDT"
+  ],
+  "side": "long",
+  "entryWhenAll": [],
+  "invalidateWhenAny": [
+    {
+      "feature": "close",
+      "op": "<",
+      "value": 92
+    },
+    {
+      "feature": "return1d",
+      "op": "<",
+      "value": -6
+    },
+    {
+      "feature": "fundingRatePercentile90d",
+      "op": ">",
+      "value": 90
+    },
+    {
+      "feature": "realizedVol7d",
+      "op": ">",
+      "value": 110
+    }
+  ],
+  "stopAtrMultiple": 1.5,
+  "targetRMultiple": 2,
+  "maxHoldDays": 7,
+  "forwardOnly": true,
+  "origin": "ai-analyst"
+}

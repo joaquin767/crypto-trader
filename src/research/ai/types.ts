@@ -1,12 +1,15 @@
 // AI analyst types — specs/daily-catalyst-manual-trading.md §5.13.
 //
-// Phase 2 stub: types only, no behavior. The AI analyst itself (client, verification,
-// promptVersionHash, aiIdeaToRule, runAiAnalyst) is Phase 4b. These types exist now only so
-// src/journal/types.ts (ManualTrade.aiStanceAtPlan) and src/research/report.ts
-// (DailyReport.aiAnalyst) compile against their final shape ahead of time (§9 Phase 2 row).
+// Originally a Phase 2 stub (types only) so src/journal/types.ts (ManualTrade.aiStanceAtPlan)
+// and src/research/report.ts (DailyReport.aiAnalyst) could compile against their final shape
+// ahead of time (§9 Phase 2 row). Phase 4b adds the port/input/result types the AI analyst
+// itself needs (client, verification, promptVersionHash, aiIdeaToRule, runAiAnalyst — all in
+// src/research/ai/analyst.ts, src/research/ai/verify.ts, src/research/ai/anthropic-client.ts).
+// This file stays free of `@anthropic-ai/sdk`/`zod` imports (gate §12.10 — see
+// src/research/ai/output-schema.ts and src/research/ai/anthropic-client.ts for those).
 
-import type { Condition } from "../rules.ts";
-import type { FeatureName } from "../types.ts";
+import type { Condition, RuleOutcome, ThesisState } from "../rules.ts";
+import type { FeatureName, FeatureVector, SourceStatus } from "../types.ts";
 import type { TradePlan } from "../planner.ts";
 
 export type AiStance = "support" | "caution" | "oppose";
@@ -59,10 +62,16 @@ export interface AiAnalystSection {
   // shows "AI analyst: did not complete".
   reason: string; // empty only when status is "ok"
   model: string | null;
+  /** Which adapter ran this call; `null` for "pending"/"disabled" (no call was made). */
+  provider: "claude-cli" | "anthropic-api" | null;
   servedByModel: string | null;
   promptVersionHash: string | null;
-  costUsd: number;
+  costUsd: number; // real API spend only — 0 under provider "claude-cli" (the subscription bills separately)
   monthToDateUsd: number;
+  /** The provider's own list-price estimate for this call, informational only: under
+   *  provider "claude-cli" this is the CLI's `total_cost_usd` (what the call would have cost at
+   *  list price if it had been billed per-call); under "anthropic-api" it equals `costUsd`. */
+  listCostUsd: number;
   regimeSummary: string | null;
   assessments: AiPlanAssessment[]; // verified only
   plans: TradePlan[]; // origin "ai-analyst", produced by planTrade from aiIdeaToRule(...)
@@ -73,8 +82,68 @@ export interface AiAnalystSection {
   rejected: AiRejectedItem[];
 }
 
+/** Input to one AI analyst call, built by src/research/ai/analyst.ts's
+ *  `buildAiAnalystInput` from the day's report/features/journal. `sources`/`features`/
+ *  `outcomes` mirror `DailyReport`'s own shapes without importing report.ts (which itself
+ *  imports this file — see file header). `rulePlans` is origin "rules-file" only. */
+export interface AiAnalystInput {
+  dateUtc: string;
+  decisionTime: number;
+  promptVersionHash: string;
+  systemPrompt: string;
+  sources: { sourceId: string; status: SourceStatus; statusDetail: string; fetchedAt: number; sha256: string }[];
+  features: FeatureVector[];
+  outcomes: RuleOutcome[];
+  rulePlans: TradePlan[]; // origin "rules-file" only
+  openTrades: {
+    tradeId: string;
+    symbol: string;
+    side: "long" | "short";
+    ruleId: string | null;
+    thesis: ThesisState;
+    heldHours: number;
+    unrealisedR: number | null;
+  }[];
+  configSymbols: string[];
+}
+
+export type AiCallResult =
+  | {
+      kind: "ok";
+      output: AiAnalystOutput;
+      webResults: { url: string; title: string; pageAge: string | null }[];
+      usage: { inputTokens: number; outputTokens: number; webSearchRequests: number };
+      servedByModel: string;
+      rawResponsePath: string;
+      /** The provider's own list-price cost estimate for this call, when it reports one (the
+       *  claude-cli adapter's `total_cost_usd`). The Anthropic API adapter leaves this
+       *  undefined — `runAiAnalyst` falls back to its own `estimateCallCostUsd` in that case. */
+      listCostUsd?: number;
+    }
+  | {
+      kind: "failed";
+      reason: "no_api_key" | "api_error" | "rate_limited" | "timeout" | "refusal" | "max_tokens" | "schema_invalid";
+      detail: string;
+      usage: { inputTokens: number; outputTokens: number; webSearchRequests: number } | null;
+    };
+
+/** Port. Implementations MUST resolve (never reject) — see src/research/ai/anthropic-client.ts. */
+export interface AiClientPort {
+  analyze(input: AiAnalystInput): Promise<AiCallResult>;
+}
+
 export interface AiAnalystConfig {
   enabled: boolean; // default false until the owner turns it on
+  /** default "claude-cli" — runs through the locally installed Claude Code CLI under the
+   *  owner's subscription (no per-call API billing); "anthropic-api" is the pay-as-you-go
+   *  alternative via @anthropic-ai/sdk. A provider switch is a behaviour change (§5.13) and is
+   *  hashed into `promptVersionHash`. */
+  provider: "claude-cli" | "anthropic-api";
+  /** Path to the `claude` executable, only consulted when `provider` is "claude-cli". `null`
+   *  (default) auto-resolves: `<dirname(process.execPath)>/claude` if it exists (nvm installs
+   *  node and claude in the same bin dir, and the systemd service has no PATH), else the bare
+   *  string `"claude"` (resolved via PATH by the OS at spawn time). */
+  cliPath: string | null;
   model: string; // default "claude-opus-5"
   effort: "low" | "medium" | "high" | "xhigh" | "max"; // default "high"
   maxTokens: number; // default 32000 (request is streamed)

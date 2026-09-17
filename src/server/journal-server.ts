@@ -334,7 +334,18 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
     const closed = journal.filter((t) => t.venue === venue && t.status === "closed")
       .sort((a, b) => lastExit(a) - lastExit(b));
     const reviews = await Promise.all(closed.map(async (t) => (await reviewOne(t)).review));
-    return c.json(aggregate(reviews, venue as ManualTrade["venue"]));
+    const stats = aggregate(reviews, venue as ManualTrade["venue"]);
+    // §8.4: "if, after >= 30 closed rule-origin trades per stance bucket,
+    // byAiStance.oppose.expectancyR >= byAiStance.support.expectancyR, the dashboard shows
+    // 'AI stance has no measured predictive value' on every AI stance." Not part of
+    // AggregateStats itself (§5.9's exact contract) — computed here and added to the HTTP
+    // response only, since it's a dashboard presentation flag, not an analytics figure.
+    const { support, oppose } = stats.byAiStance;
+    const aiStanceNoPredictiveValue =
+      support.closed >= 30 && oppose.closed >= 30 &&
+      support.expectancyR !== null && oppose.expectancyR !== null &&
+      oppose.expectancyR >= support.expectancyR;
+    return c.json({ ...stats, aiStanceNoPredictiveValue });
   });
 
   app.post("/api/trades/:id/link", async (c) => {
