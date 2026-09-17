@@ -52,6 +52,7 @@ import { DEFAULT_CIRCUIT_BREAKER_CONFIG } from "../src/risk/circuit-breaker.ts";
 import { computeBreaker } from "../src/journal/breaker.ts";
 import { JournalUnreadableError, loadManualJournal } from "../src/journal/manual-journal.ts";
 import type { ManualTrade } from "../src/journal/types.ts";
+import { dateFromPlanId, loadEffectiveDecision } from "../src/decision/decisions-store.ts";
 import type { AiAnalystConfig, AiAnalystSection, AiClientPort } from "../src/research/ai/types.ts";
 import { AI_OUTPUT_JSON_SCHEMA } from "../src/research/ai/output-schema.ts";
 import { buildAiAnalystInput, promptVersionHash, runAiAnalyst } from "../src/research/ai/analyst.ts";
@@ -76,6 +77,7 @@ export interface ResearchDailyArgs {
   aiLedgerPath: string;
   aiRulesRoot: string;
   promptPath: string;
+  decisionsRoot: string;
 }
 
 function flagValue(argv: readonly string[], flag: string): string | undefined {
@@ -100,6 +102,7 @@ export function parseResearchDailyArgs(argv: readonly string[], now: number): Re
     aiLedgerPath: flagValue(argv, "--ai-ledger-path") ?? "data/ai-usage.jsonl",
     aiRulesRoot: flagValue(argv, "--ai-rules-root") ?? "data/ai-rules",
     promptPath: flagValue(argv, "--prompt-path") ?? "prompts/ai-analyst.md",
+    decisionsRoot: flagValue(argv, "--decisions-root") ?? "data/decisions",
   };
 }
 
@@ -290,11 +293,24 @@ export async function runResearchDaily(
   const aiRules: Record<string, RuleDefinition> = {};
   for (const t of openTrades) {
     if (t.ruleId === null || t.planId === null) continue;
+    if (t.ruleId.startsWith("persona-")) continue; // persona-origin: loaded from data/decisions/ below
     try {
       aiRules[t.ruleId] = JSON.parse(readFileSync(join(args.aiRulesRoot, `${t.planId}.json`), "utf-8")) as RuleDefinition;
     } catch {
       // missing or corrupt -> not_evaluable, handled by buildReport's own fallback
     }
+  }
+
+  // §5.8a revision-3 paragraph: an open persona-origin trade's rule for `evaluateThesis` lives in
+  // the decision file's `personaRule`, not in data/ai-rules/ — a missing/unreadable file leaves
+  // it out of this map, and buildReport's own fallback then reports "not_evaluable" (AC-118).
+  const personaRules: Record<string, RuleDefinition> = {};
+  for (const t of openTrades) {
+    if (t.ruleId === null || t.planId === null || !t.ruleId.startsWith("persona-")) continue;
+    const date = dateFromPlanId(t.planId);
+    if (date === null) continue;
+    const decision = loadEffectiveDecision(args.decisionsRoot, date);
+    if (decision?.personaRule) personaRules[t.ruleId] = decision.personaRule;
   }
 
   const report = buildReport({
@@ -310,6 +326,7 @@ export async function runResearchDaily(
     openTrades,
     liveClosedTradesByRule,
     aiRules,
+    personaRules,
     aiDisabledReason,
   });
   const markdown = renderReportMarkdown(report);

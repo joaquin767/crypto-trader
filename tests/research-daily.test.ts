@@ -105,6 +105,7 @@ function makeArgs(dir: string, overrides: Partial<ResearchDailyArgs> = {}): Rese
     aiLedgerPath: join(dir, "ai-usage.jsonl"),
     aiRulesRoot: join(dir, "ai-rules"),
     promptPath: join(dir, "prompt.md"),
+    decisionsRoot: join(dir, "decisions"),
     ...overrides,
   };
 }
@@ -322,6 +323,82 @@ test("AC-65: 2 open journal trades and maxOpenManualTrades 3 leave room for at m
     assert.equal(result.exitCode, 0);
     const plans = result.report!.plans.filter((p) => p.kind === "plan");
     assert.ok(plans.length <= 1, `expected at most 1 plan, got ${plans.length}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── AC-118 (revision 3): persona thesis loaded from data/decisions/ ────────────────────────────
+
+function personaOpenTrade(id: string, planId: string, ruleId: string): ManualTrade {
+  return {
+    id, venue: "paper", symbol: "BTC/USDT", side: "long", planId, ruleId, ruleHash: ruleId.padEnd(64, "0"),
+    plannedSnapshot: null, aiStanceAtPlan: null, entryFills: [], exitFills: [],
+    actualLeverage: null, exchangeLiqPrice: null, fundingUsd: 0,
+    status: "open", exitKind: null, notes: "", createdAt: NOW, updatedAt: NOW,
+  };
+}
+
+function writePersonaDecisionFixture(decisionsRoot: string, date: string, ruleId: string): void {
+  mkdirSync(decisionsRoot, { recursive: true });
+  const personaRule = {
+    id: ruleId, version: 1, description: "d", evidence: [], status: "experimental",
+    symbols: ["BTC/USDT"], side: "long", entryWhenAll: [],
+    invalidateWhenAny: [{ feature: "close", op: ">", value: 0 }], // priceDataFetchStub's close=100 -> always triggered
+    stopAtrMultiple: 2, targetRMultiple: 2, maxHoldDays: 5, forwardOnly: true, origin: "persona",
+  };
+  const decision = {
+    schemaVersion: 1, dateUtc: date, revision: 0, decidedAt: NOW - 86_400_000,
+    skillHash: ruleId.padEnd(64, "0"), reportPath: `reports/${date}.json`, reportSha256: "x", reportDecisionTime: NOW - 86_400_000,
+    input: { dateUtc: date, choice: { kind: "no-trade", reason: "unused" }, stances: [], news: [], rationale: "r" },
+    validation: { ok: true, rejections: [], unverifiedWebRefs: [] },
+    plan: null, personaRule, basedOnPlanId: null, basedOnRuleKey: null, ownerProtocol: null,
+    ownerTimeZone: "America/Argentina/Buenos_Aires",
+    disclaimer: "Generated analysis for the owner's review. Not investment advice.",
+  };
+  writeFileSync(join(decisionsRoot, `${date}.json`), JSON.stringify(decision));
+}
+
+test("AC-118: an open persona-origin trade's thesis is loaded from data/decisions/<date>.json's personaRule", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir);
+    const ruleId = "persona-abcd1234";
+    const planId = "2026-09-15:persona-abcd1234:BTC/USDT";
+    writeFileSync(args.journalPath, JSON.stringify([personaOpenTrade("pt1", planId, ruleId)]));
+    writePersonaDecisionFixture(args.decisionsRoot, "2026-09-15", ruleId);
+
+    const deps = fakeDeps({
+      readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()),
+      fetch: priceDataFetchStub(),
+    });
+    const result = await runResearchDaily(args, deps);
+    assert.equal(result.exitCode, 0, result.message);
+    assert.equal(result.report!.openTradeThesis.length, 1);
+    assert.equal(result.report!.openTradeThesis[0]!.tradeId, "pt1");
+    assert.equal(result.report!.openTradeThesis[0]!.state, "invalidated");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-118: a missing decision file yields not_evaluable, never a guess", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir);
+    const ruleId = "persona-abcd1234";
+    const planId = "2026-09-15:persona-abcd1234:BTC/USDT";
+    writeFileSync(args.journalPath, JSON.stringify([personaOpenTrade("pt1", planId, ruleId)]));
+    // No data/decisions/2026-09-15.json written at all.
+
+    const deps = fakeDeps({
+      readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()),
+      fetch: priceDataFetchStub(),
+    });
+    const result = await runResearchDaily(args, deps);
+    assert.equal(result.exitCode, 0, result.message);
+    assert.equal(result.report!.openTradeThesis.length, 1);
+    assert.equal(result.report!.openTradeThesis[0]!.state, "not_evaluable");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

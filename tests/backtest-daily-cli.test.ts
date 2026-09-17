@@ -186,6 +186,17 @@ test("AC-86: holdout mode for an ai-analyst-* id exits 1 and appends no ledger l
   });
 });
 
+test("§8.5/§5.10a 'AI ids in d1-check': a persona-* id is treated like an ai-analyst-* id — holdout mode refuses it, forwardOnly", async () => {
+  await withTempDir(async (dir) => {
+    writeRulesFile(dir, [validRule()]);
+    const args = makeArgs(dir, { rule: "persona-3f9a1c2b" });
+    const result = await runBacktestDaily(args, fakeDeps(dir));
+    assert.equal(result.exitCode, 1);
+    assert.match(result.message ?? "", /forwardOnly/);
+    assert.equal(existsSync(args.ledgerPath), false);
+  });
+});
+
 test("AC-86: for an eligible rule, the ledger line exists even if simulation then throws", async () => {
   await withTempDir(async (dir) => {
     writeRulesFile(dir, [validRule()]);

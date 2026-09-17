@@ -25,17 +25,19 @@ export interface RuleDefinition {
   id: string; // /^[a-z0-9-]{3,48}$/
   version: number; // integer >= 1, bumped on any change
   description: string;
-  evidence: string[]; // IDs from §2.2, e.g. ["X1"]; may be empty only if status is "experimental" or origin is "ai-analyst"
+  evidence: string[]; // IDs from §2.2, e.g. ["X1"]; may be empty only if status is "experimental" or origin is "ai-analyst"/"persona"
   status: "experimental" | "holdout-passed" | "paper-passed" | "retired";
   symbols: string[]; // subset of config.symbols
   side: "long" | "short";
-  entryWhenAll: Condition[]; // length >= 1 for origin "rules-file"; empty for origin "ai-analyst"
+  entryWhenAll: Condition[]; // length >= 1 for origin "rules-file"; empty for origin "ai-analyst" and "persona"
   invalidateWhenAny: Condition[]; // thesis invalidation, re-checked while a trade is open
   stopAtrMultiple: number; // (0, 10]
   targetRMultiple: number; // (0, 20]
   maxHoldDays: number; // integer 1..10
   forwardOnly: boolean; // true if any feature lacks point-in-time history (§10.3)
-  origin: "rules-file" | "ai-analyst"; // parseRuleSet requires "rules-file"; "ai-analyst" rules are built only by aiIdeaToRule (§5.13)
+  // parseRuleSet requires "rules-file"; "ai-analyst" rules are built only by aiIdeaToRule (§5.13);
+  // "persona" rules only by personaIdeaToRule / reportPlanToPersonaRule (§5.15, revision 3)
+  origin: "rules-file" | "ai-analyst" | "persona";
 }
 
 export interface RuleSet {

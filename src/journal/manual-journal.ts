@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { AiStance } from "../research/ai/types.ts";
 import type { TradePlan } from "../research/planner.ts";
 import type { ExitKind, Fill, ManualTrade } from "./types.ts";
+import type { SyncResult } from "./exchange-sync.ts";
 
 export type { ManualTrade, ManualTradeVenue, ExitKind, Fill } from "./types.ts";
 
@@ -160,6 +161,45 @@ export function recordPaperEntry(
     createdAt: time,
     updatedAt: time,
   };
+}
+
+// ── Sync-freshness sidecar (revision 3, §5.15) ──────────────────────────────────────────────────
+//
+// `manual-journal.json` itself carries no sync timestamp — `ManualTrade.updatedAt` is the only
+// persisted time, and `SyncResult.syncedAt` otherwise lives only in the journal server's process
+// memory (src/server/journal-server.ts). `decide` runs as a separate CLI and needs to know how
+// fresh the journal is before treating "no journal event since X" as meaningful (`--revise`'s
+// "already acted on" checks) — so the journal server writes this small sidecar after every sync
+// attempt, and `decide` reads it. Declared here (not in src/decision/) because it lives next to
+// the journal it describes; src/decision/ only reads it.
+
+export interface JournalSyncStatus {
+  syncedAt: number;
+  status: SyncResult["status"];
+  error: string | null;
+  liveSync: "enabled" | "disabled";
+}
+
+/** "<journalPath minus .json>.sync.json", i.e. "./manual-journal.sync.json" by default (§5.15). */
+export function defaultSyncStatusPath(journalPath?: string): string {
+  const live = journalPath ?? defaultManualJournalPath();
+  return live.endsWith(".json") ? `${live.slice(0, -".json".length)}.sync.json` : `${live}.sync.json`;
+}
+
+/** Missing file → null. Unparseable → throws (fail closed, §5.15: "never treated as fresh"). */
+export function readSyncStatus(opts?: { path?: string }): JournalSyncStatus | null {
+  const path = opts?.path ?? defaultSyncStatusPath();
+  if (!existsSync(path)) return null;
+  return JSON.parse(readFileSync(path, "utf-8")) as JournalSyncStatus;
+}
+
+/** Called by the journal server only, after every sync attempt (including the paper-only
+ *  branch). Atomic write (temp + rename) so a reader never observes a half-written file. */
+export function writeSyncStatus(s: JournalSyncStatus, opts?: { path?: string }): void {
+  const path = opts?.path ?? defaultSyncStatusPath();
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(s, null, 2));
+  renameSync(tmp, path);
 }
 
 /** Pure. `recordPaperExit`: same fee rule as entry, owner-supplied `exitKind`; funding stays 0

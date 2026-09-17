@@ -85,14 +85,21 @@ export function readSnapshots(dateUtc: string, opts?: { rootDir?: string }): Sou
   const snapshots: SourceSnapshot[] = [];
   for (const { file } of latestPerSource.values()) {
     const path = join(dir, file);
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as SourceSnapshot;
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<SourceSnapshot> | unknown[] | null;
+    // The date directory also holds files that are not source snapshots — the AI channel's
+    // write-once `ai-analyst.raw.json` (§5.13, an array of CLI/SDK events). Those have no
+    // `sourceId`/`rows` and are skipped rather than failing the SHA check (found when the first
+    // `decide` run crashed on the raw file left by that morning's AI step).
+    if (parsed === null || Array.isArray(parsed) || typeof parsed.sourceId !== "string" || !Array.isArray(parsed.rows)) {
+      continue;
+    }
     const expected = sha256OfRows(parsed.rows);
     if (parsed.sha256 !== expected) {
       throw new Error(
         `Snapshot SHA-256 mismatch for "${path}": recorded ${parsed.sha256}, computed ${expected} — file was modified after being written.`,
       );
     }
-    snapshots.push(parsed);
+    snapshots.push(parsed as SourceSnapshot);
   }
   return snapshots;
 }

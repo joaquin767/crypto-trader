@@ -21,6 +21,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 4 — Backtest & gates | `npm run backfill` + `npm run backtest:daily`: dev backtests, Gate D0 (holdout) and Gate D1 (paper) verdicts | ✅ Built |
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas, via the `claude-cli` subscription by default (or `anthropic-api`) | ✅ Built — AC-54/AC-54a live-smoke sign-off pending |
 | 5 — Analyst persona | Interactive Claude Code skill to discuss reports and write or critique rules | ✅ Built — AC-39 owner check pending |
+| 6 — Persona decision channel | `npm run decide`: the persona picks today's plan (or none), the CLI validates/sizes/records it and writes a Plan Report telling you exactly what to place and when to come back | ✅ Built — AC-116 owner supervised cycle pending |
 
 This table is updated at the end of every phase.
 
@@ -266,6 +267,9 @@ If you skip the daily import, ETF rules simply show `not_evaluable` in that day'
 | `npm run backtest:daily -- --rule <id> --mode dev` | Backtest a rule on the development period only (before 2025-09-16); free to repeat | 0 on completion |
 | `npm run backtest:daily -- --rule <id> --mode holdout` | **Gate D0.** Uses 1 of the rule's 3 attempts, recorded before it runs | 0 only for `edge_confirmed` · 1 otherwise or refused |
 | `npm run backtest:daily -- --rule <id> --mode d1-check` | **Gate D1** from your paper trades | 0 only for `paper_passed` |
+| `npm run decide -- --date <date>` | Persona decision: validates the JSON block on stdin against the report, sizes it, writes `data/decisions/<date>.json` + `reports/<date>.decision.md` | 0 written · 2 validation failed (rejections printed) · 3 no report for the date, or already decided (use `--revise`) · 4 bad `--date` · 5 journal/rules/skill unreadable, or a stale journal blocking `--revise` |
+| `npm run decide -- --mode manage --date <date> --trade <id>` | Per-trade manage decision (`hold` / `tighten-stop` / `close-now`) | same codes, keyed by `(date, tradeId)` |
+| `npm run decide -- --mode review --date <date> --trade <id>` | Per-trade closed-trade review (R, exit kind, adherence restated; verdict + lesson are yours) | same codes |
 | `npm run verify` | Typecheck + full test suite | non-zero on failure |
 
 Both research commands accept `--snapshot-root DIR` and `--reports-root DIR` to write somewhere other
@@ -478,7 +482,7 @@ It loads the same `prompts/ai-analyst.md` the batch analyst uses, so both speak 
 | Restates a report's `outcomes`, `plans` and `aiAnalyst` as they are and comments on them | Invents an outcome, a plan, or a number that isn't in the report |
 | Cites a §2.2 evidence ID (`X1`–`X14`) with its strength for every claim, or says `no evidence in §2.2` | Upgrades weak evidence to sound convincing |
 | Returns a proposed rule as a JSON block in `research-rules.json` format (`status: experimental`) | Writes to `reports/`, `data/`, `research-rules.json` or `config.json` — you paste the rule yourself and bump `version` on edits |
-| Ends every reply with the report disclaimer | States buy/sell/size/leverage/venue for anything not already in a report's `plans` |
+| Ends every reply with the report disclaimer | States a size, leverage, venue, stop or target it computed itself — every number is restated from the report or a Plan Report `npm run decide` produced |
 
 **How it stays current and methodical** (skill 1.1):
 
@@ -499,6 +503,61 @@ other rule. **AC-39 owner check:** run it once on a real report and confirm the 
 held; `tests/persona-skill.test.ts` checks the mechanical half (file, frontmatter, references, the four
 statements).
 
+## The daily decision (persona channel)
+
+Since revision 3, the persona is also the decision layer: each day it picks exactly one of a report
+plan, an idea of its own, or no trade — and `npm run decide` is the **only** thing that ever writes
+that choice to disk. The persona never states a size, leverage, venue, stop or target it computed
+itself; every number in the Plan Report comes from the same `planTrade` the rules and AI channels use.
+
+**Your routine, end to end:**
+
+1. `npm run research:daily` writes today's report, as before.
+2. Open the persona and ask for "today's decision." It reads the report, checks news under its own
+   protocol, gives a stance on every plan, and emits one `DailyDecisionInput` JSON block.
+3. It runs `npm run decide -- --date <date>` for you (or you paste the command). On a rejection, it
+   shows every `<code> <path>: <detail>` line and re-emits a corrected block — nothing is recorded
+   until the CLI exits 0.
+4. Read `reports/<date>.decision.md` — the **Plan Report**. Section 1 says exactly what to place (or
+   `**No trade today.**` and why); section 2 says exactly when to come back.
+5. Place the order yourself (or record the paper entry) inside the printed **execute window**
+   (`decidedAt` → `decidedAt + persona.executionWindowMs`, default 6h) and only if the mark is inside
+   the printed **gap band** (`referencePrice ± persona.maxEntryGapAtr × atr14d`, default 0.25×ATR).
+
+**Coming back — two cases, both named in section 2 of the Plan Report:**
+
+| Case | You do |
+|------|--------|
+| Position closed | Record the exit (paper: `POST /api/paper/exit`; live: let the sync pick it up), then at the next report ask the persona for `review closed trade` for that trade — one `npm run decide -- --mode review --date <date> --trade <id>` call, one artifact |
+| Position still open | At the next report ask the persona for `manage open position` for that trade — one `npm run decide -- --mode manage --date <date> --trade <id>` call, one artifact. Two open positions mean two separate calls, never a combined one |
+
+**Config** (`config.persona`, all optional, spec §5.11):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `executionWindowMs` | 21 600 000 (6h) | How long the execute window stays open after `decidedAt` |
+| `maxEntryGapAtr` | 0.25 | Gap-rule multiple of `atr14d`; entering outside it is not a discount, it's a different trade |
+| `channelStatus` | `"experimental"` | Set to `"paper-passed"` yourself once the persona channel's own Gate D1 passes |
+| `passedSkillHash` | `null` | The `skillHash` that passed D1; required once `channelStatus` is `"paper-passed"` |
+| `ownerTimeZone` | `"America/Argentina/Buenos_Aires"` | The Plan Report's second clock column |
+| `decisionsRoot` | `"data/decisions"` | Where decision/manage/review artifacts are written (committed) |
+| `skillRoot` | `.claude/skills/crypto-fundamental-analyst` | The `skillHash` input root — **editing anything under it, or `prompts/ai-analyst.md`, restarts the persona channel's Gate D1 at zero** |
+
+**Symbols are BTC + ETH only (A27).** `config.symbols` is now `["BTC/USDT", "ETH/USDT"]` — the two
+instruments with ETF-flow features and the deepest books. `daysToNextUnlock` / `nextUnlockPctOfFloat`
+are permanently 999 / 0 for both, so no rule or idea may lean on the unlock family. This is a shared
+config value: **the 5-minute auto-trader (`src/main.ts`) reads the same field**, so its tradeable
+universe silently narrows to BTC + ETH too (A33) — accepted because the scalper has a confirmed
+negative edge and is slated for retirement (Phase 8), not because the two systems were meant to share
+a symbol list.
+
+**Gating.** The persona channel is gated as one `forwardOnly` rule per `skillHash` (`persona-<hash8>`)
+— it never takes Gate D0 (the model's training data overlaps the holdout, same reason the AI channel
+skips it), and needs 60 closed paper trades over 45+ days for Gate D1
+(`npm run backtest:daily -- --rule persona-<hash8> --mode d1-check`). Until it passes, every persona
+plan is paper, leverage 1x — a persona decision that *picks* a rule plan does not inherit that rule's
+own gates; it carries the persona channel's.
+
 ## Writing rules
 
 A rule fires when **all** `entryWhenAll` conditions hold. If any feature it references is missing, the
@@ -511,7 +570,7 @@ rule is `not_evaluable` — it never fires on partial data.
   "description": "Long when 5-day BTC ETF inflows are strong and price is trending up",
   "evidence": ["X1"],
   "status": "experimental",
-  "symbols": ["SOL/USDT"],
+  "symbols": ["BTC/USDT"],
   "side": "long",
   "entryWhenAll": [
     { "feature": "btcEtfNetFlowUsd5d", "op": ">", "value": 500000000 },
@@ -575,3 +634,5 @@ Exact formulas: spec §5.3a. Evidence strength behind each data family: spec §2
 - [ ] Leverage and size match the plan; liquidation is beyond the stop
 - [ ] You linked the position to its `planId` in the journal
 - [ ] You know the invalidation conditions and the expiry time
+- [ ] For a persona decision: you are inside the printed execute window and the mark is inside the gap band
+- [ ] For a persona decision: `npm run decide` exited 0 before you take the Plan Report as final

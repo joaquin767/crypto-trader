@@ -19,6 +19,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function review(overrides: Partial<D1Review> = {}): D1Review {
   return {
     tradeId: "t", ruleId: "rule-a", ruleHash: "hash-a", origin: "rules-file", aiStanceAtPlan: null,
+    basedOnRuleKey: null,
     plannedRiskUsd: 10, netPnlUsd: 3, feesUsd: 0, fundingUsd: 0, rMultiple: 0.3,
     entrySlippagePct: null, sizeDeviationPct: null, maePct: 0, mfePct: 0,
     exitKind: "time", followedPlan: true, venue: "paper",

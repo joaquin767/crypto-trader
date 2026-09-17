@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,7 @@ import { createJournalApp, startJournalServer } from "../src/server/journal-serv
 import type { JournalAppDeps } from "../src/server/journal-server.ts";
 import { TradePermissionKeyError } from "../src/journal/exchange-sync.ts";
 import { saveManualJournal } from "../src/journal/manual-journal.ts";
+import type { JournalSyncStatus } from "../src/journal/manual-journal.ts";
 import type { ManualTrade } from "../src/journal/types.ts";
 import { mkdirSync } from "node:fs";
 import { DEFAULT_MANUAL_TRADING_CONFIG } from "../src/config.ts";
@@ -42,6 +43,8 @@ function baseDeps(dir: string, overrides: Partial<JournalAppDeps> = {}, port = 3
     manual: { ...DEFAULT_MANUAL_TRADING_CONFIG, journalPort: port },
     journalPath: join(dir, "manual-journal.json"),
     reportsRoot: join(dir, "reports"),
+    decisionsRoot: join(dir, "decisions"),
+    syncStatusPath: join(dir, "manual-journal.sync.json"),
     rest: null,
     now: () => 1_700_000_000_000,
     fetchKlines: async () => null,
@@ -104,6 +107,32 @@ test("AC-68: no read-only key — the server starts, serves GET /, and /api/stat
     assert.equal(state.status, 200);
     const body = await state.json();
     assert.equal(body.liveSync, "disabled");
+  });
+});
+
+// ── §5.15 revision 3: sync-freshness sidecar ─────────────────────────────────────────────────────
+
+test("syncOnce writes manual-journal.sync.json after every attempt, including the paper-only branch", async () => {
+  await withTempDir(async (dir) => {
+    const syncStatusPath = join(dir, "manual-journal.sync.json");
+    const { syncOnce } = createJournalApp(baseDeps(dir, { rest: null, syncStatusPath }, 34574));
+    assert.equal(existsSync(syncStatusPath), false);
+    await syncOnce();
+    assert.equal(existsSync(syncStatusPath), true);
+    const status = JSON.parse(readFileSync(syncStatusPath, "utf-8")) as JournalSyncStatus;
+    assert.equal(status.liveSync, "disabled");
+    assert.equal(status.status, "failed"); // no read-only key configured
+  });
+});
+
+test("syncOnce writes liveSync 'enabled' with the real sync result when a rest client is configured", async () => {
+  await withTempDir(async (dir) => {
+    const syncStatusPath = join(dir, "manual-journal.sync.json");
+    const rest = fakeRest({ getExecutions: async () => ({ list: [], nextPageCursor: "" }) });
+    const { syncOnce } = createJournalApp(baseDeps(dir, { rest, syncStatusPath, config: { ...baseConfig(), symbols: ["BTC/USDT"] } }, 34575));
+    await syncOnce();
+    const status = JSON.parse(readFileSync(syncStatusPath, "utf-8")) as JournalSyncStatus;
+    assert.equal(status.liveSync, "enabled");
   });
 });
 
@@ -235,6 +264,77 @@ test("a planId whose date part is not YYYY-MM-DD (e.g. '.*' or '(') is rejected 
       assert.equal(res.status, 409, `planId ${bad}`);
       assert.equal(trade.planId, null);
     }
+  });
+});
+
+// ── AC-117: persona planId resolution from data/decisions/ (revision 3) ─────────────────────────
+
+const PERSONA_PLAN_ID = "2026-09-16:persona-3f9a1c2b:BTC/USDT";
+
+function writePersonaDecision(dir: string, overrides: { executeUntil?: number } = {}): void {
+  mkdirSync(join(dir, "decisions"), { recursive: true });
+  const plan = {
+    kind: "plan", planId: PERSONA_PLAN_ID, ruleId: "persona-3f9a1c2b", ruleHash: "h".repeat(64), origin: "persona",
+    symbol: "BTC/USDT", side: "long", referencePrice: 60000, stopPrice: 58000, targetPrice: 64000,
+    expiresAt: DECISION + 12 * 3_600_000, quantity: 0.0005, notionalUsd: 30, riskUsd: 1, leverage: 1, marginUsd: 30,
+    estLiquidationPrice: 300, liqToStopRatio: 29.85, estRoundTripFeeUsd: 0.033, venueIntent: "paper", maxHoldDays: 5,
+  };
+  const decision = {
+    schemaVersion: 1, dateUtc: "2026-09-16", revision: 0, decidedAt: DECISION + 1_800_000,
+    skillHash: "h".repeat(64), reportPath: "reports/2026-09-16.json", reportSha256: "x", reportDecisionTime: DECISION,
+    input: { dateUtc: "2026-09-16", choice: { kind: "no-trade", reason: "unused" }, stances: [], news: [], rationale: "r" },
+    validation: { ok: true, rejections: [], unverifiedWebRefs: [] },
+    plan, personaRule: null, basedOnPlanId: null, basedOnRuleKey: null,
+    ownerProtocol: {
+      decidedAt: DECISION + 1_800_000, executeFrom: DECISION + 1_800_000,
+      executeUntil: overrides.executeUntil ?? DECISION + 1_800_000 + 21_600_000,
+      referencePrice: 60000, atr14d: 1000, maxEntryGapAbs: 250, entryBand: [59750, 60250],
+      venueIntent: "paper", leverage: 1, marginMode: "isolated", orders: [], recordVia: "paper-api",
+      timeExitOnOrBefore: DECISION + 5 * 86_400_000, nextReportAt: DECISION + 86_400_000,
+      ownerTimeZone: "America/Argentina/Buenos_Aires",
+    },
+    ownerTimeZone: "America/Argentina/Buenos_Aires",
+    disclaimer: "Generated analysis for the owner's review. Not investment advice.",
+  };
+  writeFileSync(join(dir, "decisions", "2026-09-16.json"), JSON.stringify(decision));
+}
+
+test("AC-117: a persona-* planId links from data/decisions/, inside the decision's own execute window", async () => {
+  await withTempDir(async (dir) => {
+    writePersonaDecision(dir);
+    writeLinkFixtures(dir, { entryFills: [{ execId: "e1", time: DECISION + 1_800_000 + 1000, price: 60000, qty: 0.0005, feeUsd: 0, side: "buy" }] });
+    const { res, trade } = await postLink(dir, 34595, PERSONA_PLAN_ID);
+    assert.equal(res.status, 200);
+    assert.equal(trade.planId, PERSONA_PLAN_ID);
+    assert.equal(trade.aiStanceAtPlan, null);
+  });
+});
+
+test("AC-117: entering after the decision's executeUntil is refused with 409", async () => {
+  await withTempDir(async (dir) => {
+    writePersonaDecision(dir);
+    writeLinkFixtures(dir, { entryFills: [{ execId: "e1", time: DECISION + 1_800_000 + 21_600_000 + 1000, price: 60000, qty: 0.0005, feeUsd: 0, side: "buy" }] });
+    const { res, trade } = await postLink(dir, 34596, PERSONA_PLAN_ID);
+    assert.equal(res.status, 409);
+    assert.equal(trade.planId, null);
+  });
+});
+
+test("AC-117: a persona-* planId with no decision file on disk is 404, never looked up in reports/", async () => {
+  await withTempDir(async (dir) => {
+    writeLinkFixtures(dir, {}); // writes reports/2026-09-16.json but no data/decisions/
+    const { res } = await postLink(dir, 34597, PERSONA_PLAN_ID);
+    assert.equal(res.status, 404);
+  });
+});
+
+test("AC-117: POST /api/paper/entry with a persona-* planId records a paper trade against it", async () => {
+  await withTempDir(async (dir) => {
+    writePersonaDecision(dir);
+    const now = DECISION + 1_800_000 + 1000;
+    const { res, getState } = await paperEntry(dir, 34598, now, { planId: PERSONA_PLAN_ID, fillPrice: 60000, time: now });
+    assert.equal(res.status, 200);
+    assert.equal(getState().journal.filter((t) => t.venue === "paper" && t.planId === PERSONA_PLAN_ID).length, 1);
   });
 });
 

@@ -20,7 +20,8 @@ import { appSymbolToBybit } from "../bybit/adapters.ts";
 import { assertReadOnlyKey, syncFromExchange, TradePermissionKeyError } from "../journal/exchange-sync.ts";
 import type { SyncResult } from "../journal/exchange-sync.ts";
 import {
-  linkTradeToPlan, loadManualJournal, recordPaperEntry, recordPaperExit, saveManualJournal,
+  defaultSyncStatusPath, linkTradeToPlan, loadManualJournal, recordPaperEntry, recordPaperExit,
+  saveManualJournal, writeSyncStatus,
 } from "../journal/manual-journal.ts";
 import type { ExitKind, ManualTrade } from "../journal/types.ts";
 import { computeBreaker } from "../journal/breaker.ts";
@@ -35,6 +36,8 @@ import type { ThesisState } from "../research/rules.ts";
 import type { DailyReport } from "../research/report.ts";
 import type { TradePlan } from "../research/planner.ts";
 import type { Kline } from "../research/types.ts";
+import type { AiStance } from "../research/ai/types.ts";
+import { dateFromPlanId, loadEffectiveDecision } from "../decision/decisions-store.ts";
 import { DEFAULT_CIRCUIT_BREAKER_CONFIG } from "../risk/circuit-breaker.ts";
 
 const DAILY_LOOKBACK_DAYS = 15; // enough calendar days to have >= 8 daily bars before any entry
@@ -102,6 +105,36 @@ function findPlan(report: DailyReport, planId: string): Extract<TradePlan, { kin
   return (plan as Extract<TradePlan, { kind: "plan" }> | undefined) ?? null;
 }
 
+// ── Revision 3: persona planId resolution from data/decisions/ (§5.8a revision-3 paragraph) ────
+//
+// A `persona-*` planId is never in any report — it names a decision the CLI wrote to
+// data/decisions/<date>.json, so it is resolved there instead, and its entry window is the
+// decision's own execute window (decidedAt -> ownerProtocol.executeUntil), not the report's 12h
+// expiresAt.
+
+/** planId = `${dateUtc}:${ruleId}:${symbol}` (§5.5) — a persona-origin ruleId always looks like
+ *  `persona-<hash8>`. */
+function planIdIsPersona(planId: string): boolean {
+  const middle = planId.split(":")[1];
+  return typeof middle === "string" && middle.startsWith("persona-");
+}
+
+interface ResolvedPersonaPlan {
+  plan: Extract<TradePlan, { kind: "plan" }>;
+  windowFrom: number; // decision.decidedAt
+  windowUntil: number; // decision.ownerProtocol.executeUntil
+}
+
+/** Loads the effective decision for the planId's date and matches its own `plan.planId`. Null
+ *  when the decision file, its plan, or its owner protocol is absent (AC-117: 404 either way). */
+function resolvePersonaPlan(decisionsRoot: string, planId: string): ResolvedPersonaPlan | null {
+  const date = dateFromPlanId(planId);
+  if (date === null) return null;
+  const decision = loadEffectiveDecision(decisionsRoot, date);
+  if (!decision || decision.plan === null || decision.plan.planId !== planId || decision.ownerProtocol === null) return null;
+  return { plan: decision.plan, windowFrom: decision.decidedAt, windowUntil: decision.ownerProtocol.executeUntil };
+}
+
 // ── App factory ──────────────────────────────────────────────────────────────────────────────────
 
 export interface JournalAppDeps {
@@ -109,6 +142,10 @@ export interface JournalAppDeps {
   manual: ManualTradingConfig;
   journalPath: string;
   reportsRoot: string;
+  /** Revision 3 (§5.8a): root for `data/decisions/`, used to resolve a `persona-*` planId. */
+  decisionsRoot: string;
+  /** Revision 3 (§5.15): sidecar path `writeSyncStatus` writes after every sync attempt. */
+  syncStatusPath: string;
   /** null => paper-only mode (no read-only key configured, or verification was skipped by the
    *  caller — `startJournalServer` is the one that enforces the AC-27 refusal-to-start rule). */
   rest: RestClient | null;
@@ -165,6 +202,10 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
         syncedAt: deps.now(), status: "failed", error: "paper-only mode: no read-only key configured",
         newFills: 0, positions: [], warnings: [],
       };
+      writeSyncStatus(
+        { syncedAt: lastSync.syncedAt, status: lastSync.status, error: lastSync.error, liveSync: "disabled" },
+        { path: deps.syncStatusPath },
+      );
       return lastSync;
     }
     const journalStartTimeMs = deps.manual.journalStartTime === null ? null : Date.parse(deps.manual.journalStartTime);
@@ -177,6 +218,12 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
       persist();
       broadcast("trade", { journal });
     }
+    // Revision 3 sync-freshness sidecar (§5.15): written after EVERY sync attempt, ok or failed,
+    // so `decide --revise` can tell a stale journal from a fresh one without a network call.
+    writeSyncStatus(
+      { syncedAt: result.syncedAt, status: result.status, error: result.error, liveSync: "enabled" },
+      { path: deps.syncStatusPath },
+    );
     broadcast("live", result);
     return result;
   }
@@ -354,14 +401,34 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
     const trade = journal.find((t) => t.id === c.req.param("id"));
     if (!trade) return c.json({ error: "unknown trade id" }, 404);
 
-    const report = reportForPlanId(deps.reportsRoot, body.planId);
-    const plan = report ? findPlan(report, body.planId) : null;
-    if (!report || !plan) return c.json({ error: "unknown plan id" }, 409);
+    let plan: Extract<TradePlan, { kind: "plan" }>;
+    let windowFrom: number;
+    let windowUntil: number;
+    let aiStance: AiStance | null;
+
+    // Revision 3: a persona-* planId is never looked up in reports/<date>.json (AC-117) — it is
+    // resolved from data/decisions/ and its window is the decision's own execute window.
+    if (planIdIsPersona(body.planId)) {
+      const resolved = resolvePersonaPlan(deps.decisionsRoot, body.planId);
+      if (!resolved) return c.json({ error: "unknown plan id" }, 404);
+      plan = resolved.plan;
+      windowFrom = resolved.windowFrom;
+      windowUntil = resolved.windowUntil;
+      aiStance = null; // the batch AI channel never assesses a persona plan
+    } else {
+      const report = reportForPlanId(deps.reportsRoot, body.planId);
+      const foundPlan = report ? findPlan(report, body.planId) : null;
+      if (!report || !foundPlan) return c.json({ error: "unknown plan id" }, 409);
+      plan = foundPlan;
+      windowFrom = report.decisionTime;
+      windowUntil = foundPlan.expiresAt;
+      aiStance = report.aiAnalyst.assessments.find((a) => a.planId === foundPlan.planId)?.stance ?? null;
+    }
 
     const firstEntry = trade.entryFills.reduce((min, f) => Math.min(min, f.time), Number.POSITIVE_INFINITY);
     if (
       plan.symbol !== trade.symbol || plan.side !== trade.side ||
-      !(firstEntry >= report.decisionTime && firstEntry <= plan.expiresAt)
+      !(firstEntry >= windowFrom && firstEntry <= windowUntil)
     ) {
       return c.json({ error: "plan does not match this trade (symbol/side/entry-time window)" }, 409);
     }
@@ -371,7 +438,6 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
       return c.json({ error: `plan ${plan.planId} is already linked to trade ${alreadyLinked.id}` }, 409);
     }
 
-    const aiStance = report.aiAnalyst.assessments.find((a) => a.planId === plan.planId)?.stance ?? null;
     const updated = linkTradeToPlan(trade, plan, aiStance, deps.now());
     journal = journal.map((t) => (t.id === updated.id ? updated : t));
     persist();
@@ -384,21 +450,39 @@ export function createJournalApp(deps: JournalAppDeps): JournalAppHandle {
     if (!body || typeof body.planId !== "string" || !isPositiveFinite(body.fillPrice) || typeof body.time !== "number") {
       return c.json({ error: "body must be { planId: string; fillPrice: number > 0; time: number }" }, 400);
     }
-    const report = reportForPlanId(deps.reportsRoot, body.planId);
-    const plan = report ? findPlan(report, body.planId) : null;
-    if (!report || !plan) return c.json({ error: "unknown plan id" }, 404);
+
+    let plan: Extract<TradePlan, { kind: "plan" }>;
+    let windowFrom: number;
+    let windowUntil: number;
+    let aiStance: AiStance | null;
+
+    if (planIdIsPersona(body.planId)) {
+      const resolved = resolvePersonaPlan(deps.decisionsRoot, body.planId);
+      if (!resolved) return c.json({ error: "unknown plan id" }, 404);
+      plan = resolved.plan;
+      windowFrom = resolved.windowFrom;
+      windowUntil = resolved.windowUntil;
+      aiStance = null;
+    } else {
+      const report = reportForPlanId(deps.reportsRoot, body.planId);
+      const foundPlan = report ? findPlan(report, body.planId) : null;
+      if (!report || !foundPlan) return c.json({ error: "unknown plan id" }, 404);
+      plan = foundPlan;
+      windowFrom = report.decisionTime;
+      windowUntil = foundPlan.expiresAt;
+      aiStance = report.aiAnalyst.assessments.find((a) => a.planId === foundPlan.planId)?.stance ?? null;
+    }
 
     // Paper results feed Gate D1, so they must be recorded as decisions happen: no backdating
     // (hindsight), only inside the plan's entry window, and one paper trade per plan.
     const timeError = paperTimeError(body.time, deps.now());
     if (timeError) return c.json({ error: timeError }, 409);
-    if (body.time < report.decisionTime || body.time > plan.expiresAt) {
-      return c.json({ error: "paper entry time is outside the plan's entry window (decision time → expiresAt)" }, 409);
+    if (body.time < windowFrom || body.time > windowUntil) {
+      return c.json({ error: "paper entry time is outside the plan's entry window" }, 409);
     }
     const existing = journal.find((t) => t.planId === plan.planId);
     if (existing) return c.json({ error: `plan ${plan.planId} already has trade ${existing.id}` }, 409);
 
-    const aiStance = report.aiAnalyst.assessments.find((a) => a.planId === plan.planId)?.stance ?? null;
     const trade = recordPaperEntry(plan, aiStance, body.fillPrice, body.time);
     journal = [...journal, trade];
     persist();
@@ -514,6 +598,8 @@ async function main(): Promise<void> {
   const configPath = flagValue(argv, "--config") ?? "./config.json";
   const journalPath = flagValue(argv, "--journal-path") ?? "./manual-journal.json";
   const reportsRoot = flagValue(argv, "--reports-root") ?? "reports";
+  const decisionsRoot = flagValue(argv, "--decisions-root") ?? "data/decisions";
+  const syncStatusPath = flagValue(argv, "--sync-status-path") ?? defaultSyncStatusPath(journalPath);
 
   const config = loadConfig(configPath);
   const manual = resolveManualTradingConfig(config);
@@ -532,7 +618,7 @@ async function main(): Promise<void> {
   const publicMarketDataDeps = { fetch: publicFetch, sleep: publicSleep };
   try {
     await startJournalServer({
-      config, manual, journalPath, reportsRoot, rest,
+      config, manual, journalPath, reportsRoot, decisionsRoot, syncStatusPath, rest,
       now: () => Date.now(),
       fetchKlines: (symbol, interval, startMs, endMs) => fetchKlinesPublic(symbol, interval, startMs, endMs, publicMarketDataDeps),
     });

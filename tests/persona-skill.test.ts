@@ -63,9 +63,15 @@ test("AC-39 (b): cites §2.2 evidence IDs and strength for every claim", () => {
   assert.match(body, /§2\.2 evidence ID \(`X1`–`X14`\) with its strength/);
 });
 
-test("AC-39 (c): never states buy/sell/size for anything not in a report's plans", () => {
+test("AC-39 (c) [revision 3 amendment]: never states size/leverage/venue/stop/target/quantity the persona itself computed", () => {
   const { body } = readSkill();
-  assert.match(body, /Never state buy, sell, size, leverage, or venue for anything not in the report's `plans`/);
+  assert.match(body, /Never state size, leverage, venue, stop price, target price or quantity that the persona itself computed/);
+  assert.match(body, /restate a plan's numbers only from the report or a Plan Report the CLI produced/);
+});
+
+test("AC-39 (a) [revision 3 amendment]: allows the persona's decision block as a further output", () => {
+  const { body } = readSkill();
+  assert.match(body, /DailyDecisionInput.*ManageInput.*ReviewInput/);
 });
 
 test("AC-39 (d): always includes the §5.6 disclaimer literal", () => {
@@ -127,4 +133,40 @@ test("hardening: staleness is stated first and every plan gets a stance that cha
   assert.match(body, /`expiresAt` has passed/);
   assert.match(body, /stance \(`support` \/ `caution` \/ `oppose`\)[^|]*AI plans included; the stance changes nothing/);
   assert.match(body, /## Output Contract[\s\S]*`Staleness`, `Evidence`[\s\S]*`News`[\s\S]*`Assessment`/);
+});
+
+test("AC-121: the skill states the D1 reset in the exact literal sentence", () => {
+  const { body } = readSkill();
+  assert.match(body, /Editing this skill restarts the persona channel's Gate D1 at zero\./);
+});
+
+test("revision 3: the three decision gates are present in the Decision Gates table", () => {
+  const { body } = readSkill();
+  assert.match(body, /\| Decide today's plan \|/);
+  assert.match(body, /\| Manage open position \|/);
+  assert.match(body, /\| Review closed trade \|/);
+});
+
+test("revision 3: decide today's plan cites the exact npm run decide invocation", () => {
+  const { body } = readSkill();
+  assert.match(body, /npm run decide -- --date <date>/);
+});
+
+test("revision 3: manage/review gates name the mandatory --trade flag and copy thesis verbatim", () => {
+  const { body } = readSkill();
+  assert.match(body, /--mode manage --trade <id>/);
+  assert.match(body, /--mode review --trade <id>/);
+  assert.match(body, /`openTradeThesis\.state`/);
+  assert.match(body, /verbatim/);
+});
+
+test("revision 3: references/decision-protocol.md exists and covers the block shapes, commands and one-call-per-trade rule", () => {
+  const protocol = readFileSync(join(SKILL_DIR, "references/decision-protocol.md"), "utf-8");
+  assert.match(protocol, /DailyDecisionInput/);
+  assert.match(protocol, /ManageInput/);
+  assert.match(protocol, /ReviewInput/);
+  assert.match(protocol, /npm run decide -- --date <date>/);
+  assert.match(protocol, /npm run decide -- --mode manage --date <date> --trade <tradeId>/);
+  assert.match(protocol, /npm run decide -- --mode review --date <date> --trade <tradeId>/);
+  assert.match(protocol, /thesis.*MUST be copied verbatim/s);
 });
