@@ -818,7 +818,13 @@ export function replayRule(opts: ReplayOptions): ReplayResult;
 - **Costs:** every exit price is adjusted adversely by `slippageBps`. Fees: taker 0.055% of notional per side.
 - **Funding:** for each funding row with `entryTime < ts ≤ exitTime`, `fundingUsd −= side · rate · qty · markAt(ts)`, where `side` is +1 long / −1 short and `markAt(ts)` is the close of the 1h bar containing `ts`. AC-21's numbers use notional directly.
 - **R:** `netPnlUsd = gross − fees + fundingUsd`, `rMultiple = netPnlUsd / plan.riskUsd`.
-- **Unfilled** (never guessed): no bar at or after decision time, a missing bar before exit (gap > 1h in the series), or any needed bar beyond `cutoffMs`.
+- **Exit time:** a gap through a level at the open exits at that bar's open time; an intrabar stop/target touch exits at the bar's
+  **close** time (the fill happened somewhere inside the hour, so any funding settlement in that hour is charged — conservative).
+- **Funding completeness:** the symbol's funding history must cover the hold — from the last settlement at or before entry to the
+  first at or after exit, with no two consecutive settlements more than 8 h + 1 min apart (the longest Bybit interval). A settlement
+  inside the hold with no 1h bar to price it is never skipped. Either case → `unfilled` with reason containing `gap`.
+- **Unfilled** (never guessed): no bar at or after decision time, a missing bar before exit (gap > 1h in the series), any needed bar
+  beyond `cutoffMs`, or incomplete funding as above.
 
 #### Statistics — `src/backtest-daily/stats.ts` (pure)
 
@@ -1472,6 +1478,10 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
   necessary filter, never sufficient on its own: **Gate D1 (forward paper) is the only truly out-of-sample test.** Mitigations:
   pre-registration (holdout runs require the rule to be committed; `rulesFileCommit` is recorded), the per-rule 3-run cap and the
   global Bonferroni alpha. Post-hoc tuning after a `no_edge` is visible in git history, not prevented.
+- A26: Backfilled FOMC rows use `availableAt = meeting time − 180 days` (the Fed publishes each year's schedule well ahead; exact
+  publication dates aren't recorded). `hoursToNextFomc` only looks at the nearest future meeting, so this cannot change a feature
+  value within the backtest window. `simulatePlan` derives decision time from the `planId` date prefix (`<date>T00:15:00Z`).
+  The 2025-08-22 notation vote listed on the Fed calendar is excluded: it has no rate statement.
 - A25: Pooling trades by decision day assumes trades from different days are independent enough for a day-level bootstrap. Multi-day
   holds overlapping across days still share market moves; D0 accepts that residual optimism because D1 re-tests forward.
 

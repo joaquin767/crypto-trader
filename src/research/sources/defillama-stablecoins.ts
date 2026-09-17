@@ -15,6 +15,26 @@ interface DefillamaChartPoint {
   totalCirculatingUSD?: { peggedUSD?: number };
 }
 
+export type StablecoinPoint = { dateSeconds: number; totalUsd: number };
+
+/** Pure. Parses the DefiLlama `stablecoincharts/all` array (the whole history in one response).
+ *  Shared by the live adapter (below) and scripts/backfill-history.ts. */
+export function parseStablecoinChart(parsed: unknown): { kind: "ok"; points: StablecoinPoint[] } | { kind: "invalid"; detail: string } {
+  if (!Array.isArray(parsed)) {
+    return { kind: "invalid", detail: "expected a JSON array from DefiLlama stablecoincharts" };
+  }
+  const points: StablecoinPoint[] = [];
+  for (const point of parsed as DefillamaChartPoint[]) {
+    const dateSeconds = Number(point.date);
+    const total = point.totalCirculatingUSD?.peggedUSD;
+    if (!Number.isFinite(dateSeconds) || typeof total !== "number" || !Number.isFinite(total)) {
+      return { kind: "invalid", detail: `malformed stablecoin chart point: ${JSON.stringify(point)}` };
+    }
+    points.push({ dateSeconds, totalUsd: total });
+  }
+  return { kind: "ok", points };
+}
+
 export function createDefillamaStablecoinsAdapter(deps: AdapterDeps): SourceAdapter {
   return {
     id: "defillama-stablecoins",
@@ -30,19 +50,12 @@ export function createDefillamaStablecoinsAdapter(deps: AdapterDeps): SourceAdap
       } catch {
         return invalidSnapshot("defillama-stablecoins", fetchedAt, "non-JSON response from DefiLlama stablecoincharts");
       }
-      if (!Array.isArray(parsed)) {
-        return invalidSnapshot("defillama-stablecoins", fetchedAt, "expected a JSON array from DefiLlama stablecoincharts");
-      }
+      const chart = parseStablecoinChart(parsed);
+      if (chart.kind === "invalid") return invalidSnapshot("defillama-stablecoins", fetchedAt, chart.detail);
 
-      const rows: SourceRow[] = [];
-      for (const point of parsed as DefillamaChartPoint[]) {
-        const dateSeconds = Number(point.date);
-        const total = point.totalCirculatingUSD?.peggedUSD;
-        if (!Number.isFinite(dateSeconds) || typeof total !== "number" || !Number.isFinite(total)) {
-          return invalidSnapshot("defillama-stablecoins", fetchedAt, `malformed stablecoin chart point: ${JSON.stringify(point)}`);
-        }
-        rows.push({ key: "ALL", observedFor: dateSeconds * 1000, availableAt: fetchedAt, field: "totalSupplyUsd", value: total });
-      }
+      const rows: SourceRow[] = chart.points.map((p) => (
+        { key: "ALL", observedFor: p.dateSeconds * 1000, availableAt: fetchedAt, field: "totalSupplyUsd", value: p.totalUsd }
+      ));
       return okSnapshot("defillama-stablecoins", fetchedAt, rows);
     },
   };

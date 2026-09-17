@@ -30,6 +30,38 @@ interface LotSizeFilter {
   minNotionalValue?: string;
 }
 
+/** Pure. Parses one instruments-info `result.list` for its `lotSizeFilter`. Shared by the live
+ *  adapter (below) and scripts/backfill-history.ts (A20: backfills use the CURRENT filters for
+ *  the whole window). */
+export function parseInstrumentsList(
+  list: unknown,
+  symbol: string,
+  fetchedAt: number,
+): { kind: "ok"; rows: SourceRow[] } | { kind: "invalid"; detail: string } {
+  if (!Array.isArray(list)) {
+    return { kind: "invalid", detail: `expected an array of instruments for ${symbol}` };
+  }
+  const entry = (list as { lotSizeFilter?: LotSizeFilter }[])[0];
+  const filter = entry?.lotSizeFilter;
+  if (!filter) {
+    return { kind: "invalid", detail: `instruments-info response for ${symbol} has no lotSizeFilter` };
+  }
+
+  const minOrderQty = Number(filter.minOrderQty);
+  const qtyStep = Number(filter.qtyStep);
+  const minNotionalValue = Number(filter.minNotionalValue);
+  if (!Number.isFinite(minOrderQty) || !Number.isFinite(qtyStep) || !Number.isFinite(minNotionalValue)) {
+    return { kind: "invalid", detail: `non-numeric lotSizeFilter for ${symbol}: ${JSON.stringify(filter)}` };
+  }
+
+  const rows: SourceRow[] = [
+    { key: symbol, observedFor: fetchedAt, availableAt: fetchedAt, field: "minOrderQty", value: minOrderQty },
+    { key: symbol, observedFor: fetchedAt, availableAt: fetchedAt, field: "qtyStep", value: qtyStep },
+    { key: symbol, observedFor: fetchedAt, availableAt: fetchedAt, field: "minNotionalValue", value: minNotionalValue },
+  ];
+  return { kind: "ok", rows };
+}
+
 async function fetchInstrumentForSymbol(
   symbol: string,
   fetchedAt: number,
@@ -57,25 +89,7 @@ async function fetchInstrumentForSymbol(
     };
   }
 
-  const entry = (body.result.list as { lotSizeFilter?: LotSizeFilter }[])[0];
-  const filter = entry?.lotSizeFilter;
-  if (!filter) {
-    return { kind: "invalid", detail: `instruments-info response for ${symbol} has no lotSizeFilter` };
-  }
-
-  const minOrderQty = Number(filter.minOrderQty);
-  const qtyStep = Number(filter.qtyStep);
-  const minNotionalValue = Number(filter.minNotionalValue);
-  if (!Number.isFinite(minOrderQty) || !Number.isFinite(qtyStep) || !Number.isFinite(minNotionalValue)) {
-    return { kind: "invalid", detail: `non-numeric lotSizeFilter for ${symbol}: ${JSON.stringify(filter)}` };
-  }
-
-  const rows: SourceRow[] = [
-    { key: symbol, observedFor: fetchedAt, availableAt: fetchedAt, field: "minOrderQty", value: minOrderQty },
-    { key: symbol, observedFor: fetchedAt, availableAt: fetchedAt, field: "qtyStep", value: qtyStep },
-    { key: symbol, observedFor: fetchedAt, availableAt: fetchedAt, field: "minNotionalValue", value: minNotionalValue },
-  ];
-  return { kind: "ok", rows };
+  return parseInstrumentsList(body.result.list, symbol, fetchedAt);
 }
 
 export function createBybitInstrumentsAdapter(deps: AdapterDeps): SourceAdapter {

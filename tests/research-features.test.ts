@@ -151,10 +151,12 @@ test("§5.3a fundingRate8hAvg3d: mean of settlements in (T-72h, T]", () => {
 test("§5.3a fundingRatePercentile90d: 100 x count(rate <= latest) / count, over >=90 rows", () => {
   const rows: SourceRow[] = Array.from({ length: 90 }, (_, idx) => {
     const i = idx + 1; // 1..90, i=90 is the latest settlement in time
+    // Daily spacing so the oldest row (i=1, T-89d) sits within 24h of the 90d window start
+    // (T-90d) — satisfies the §5.3a contiguity requirement for this feature.
     return {
       key: "BTC/USDT",
-      observedFor: T - (90 - i) * HOUR,
-      availableAt: T - (90 - i) * HOUR,
+      observedFor: T - (90 - i) * DAY,
+      availableAt: T - (90 - i) * DAY,
       field: "fundingRate",
       value: 91 - i, // latest (i=90) has the smallest value (1) — only itself is <= itself
     } satisfies SourceRow;
@@ -304,6 +306,74 @@ test("§5.3a daysToNextUnlock/nextUnlockPctOfFloat: nearest upcoming unlock for 
   assert.equal(pct.kind, "value");
   if (days.kind === "value") assert.equal(days.value, 30);
   if (pct.kind === "value") assert.equal(pct.value, 2.5);
+});
+
+// ── AC-95: contiguity ────────────────────────────────────────────────────────────────────────
+
+function buildDailyKlineRowsWithGap(
+  symbol: string,
+  closesNewestFirst: readonly number[],
+  t0: number,
+  gapAfterIndex: number,
+): SourceRow[] {
+  const rows: SourceRow[] = [];
+  closesNewestFirst.forEach((c, i) => {
+    const extra = i > gapAfterIndex ? DAY : 0; // everything older than the gap is pushed back one more day
+    const t = t0 - i * DAY - extra;
+    const availableAt = t + DAY;
+    const h = c + 5, l = c - 5;
+    rows.push(
+      { key: symbol, observedFor: t, availableAt, field: "open", value: c },
+      { key: symbol, observedFor: t, availableAt, field: "high", value: h },
+      { key: symbol, observedFor: t, availableAt, field: "low", value: l },
+      { key: symbol, observedFor: t, availableAt, field: "close", value: c },
+      { key: symbol, observedFor: t, availableAt, field: "volume", value: 1000 },
+    );
+  });
+  return rows;
+}
+
+test("AC-95: atr14d missing (gap in daily bars) with one missing day inside the last 15 bars", () => {
+  const closes = CLOSES.slice(0, 15); // exactly the 15 bars atr14d needs
+  const rows = buildDailyKlineRowsWithGap("BTC/USDT", closes, T0, 7); // gap between bar 7 and bar 8
+  const snapshots = [snapshot({ sourceId: "bybit-klines-1d", rows })];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.atr14d;
+  assert.equal(f.kind, "missing");
+  if (f.kind === "missing") assert.equal(f.reason, "gap in daily bars");
+});
+
+test("AC-95: atr14d is a value when the same 15 bars have no gap", () => {
+  const closes = CLOSES.slice(0, 15);
+  const rows = buildDailyKlineRows("BTC/USDT", closes, T0);
+  const snapshots = [snapshot({ sourceId: "bybit-klines-1d", rows })];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  assert.equal(fv!.features.atr14d.kind, "value");
+});
+
+test("AC-95: stablecoinSupplyChange7dPct missing (gap) when the comparison row is 30h older than its target", () => {
+  const rows: SourceRow[] = [
+    { key: "ALL", observedFor: T, availableAt: T, field: "totalSupplyUsd", value: 110 },
+    // target = T - 7d; this row sits 30h before the target, exceeding the 24h contiguity tolerance.
+    { key: "ALL", observedFor: T - 7 * DAY - 30 * HOUR, availableAt: T, field: "totalSupplyUsd", value: 100 },
+  ];
+  const snapshots = [snapshot({ sourceId: "defillama-stablecoins", rows })];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.stablecoinSupplyChange7dPct;
+  assert.equal(f.kind, "missing");
+  if (f.kind === "missing") assert.equal(f.reason, "gap");
+});
+
+test("AC-95: btcEtfNetFlowUsd5d missing (gap) when the 5 rows span 10 calendar days", () => {
+  const offsets = [10, 7, 5, 2, 0]; // days back from T — span is 10 days, over the 9-day tolerance
+  const rows: SourceRow[] = offsets.map((d, i) => ({
+    key: "BTC", observedFor: T - d * DAY, availableAt: T, field: "netFlowUsd", value: 10 * (i + 1),
+  }));
+  const snapshots = [snapshot({ sourceId: "farside-btc-etf", rows })];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.btcEtfNetFlowUsd5d;
+  assert.equal(f.kind, "missing");
+  if (f.kind === "missing") assert.equal(f.reason, "gap");
 });
 
 test("every one of the 17 feature names is always produced (value or missing) with no snapshots at all", () => {

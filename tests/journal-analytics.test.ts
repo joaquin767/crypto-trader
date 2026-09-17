@@ -128,7 +128,7 @@ test("reviewClosedTrade: unplanned trade has null plannedRiskUsd/rMultiple", () 
 
 function review(overrides: Partial<ClosedTradeReview> = {}): ClosedTradeReview {
   return {
-    tradeId: "t", ruleId: "r1", origin: "rules-file", aiStanceAtPlan: null,
+    tradeId: "t", ruleId: "r1", ruleHash: "hash12345678", origin: "rules-file", aiStanceAtPlan: null,
     plannedRiskUsd: 1, netPnlUsd: 0, feesUsd: 0, fundingUsd: 0, rMultiple: 0,
     entrySlippagePct: null, sizeDeviationPct: null, maePct: 0, mfePct: 0,
     exitKind: "target", followedPlan: true,
@@ -160,6 +160,21 @@ test("AC-50: byAiStance groups rule-origin trades by AI stance, excludes AI-orig
   // the AI-origin review never appears in any byAiStance bucket
   const totalStanceClosed = Object.values(stats.byAiStance).reduce((sum, b) => sum + b.closed, 0);
   assert.equal(totalStanceClosed, 4);
+});
+
+test("§5.9 byRule keys by <ruleId>@<first 8 chars of ruleHash>, so rule versions never blend", () => {
+  const reviews: ClosedTradeReview[] = [
+    review({ tradeId: "a", ruleId: "r1", ruleHash: "aaaaaaaa11111111", netPnlUsd: 1, rMultiple: 1 }),
+    review({ tradeId: "b", ruleId: "r1", ruleHash: "aaaaaaaa11111111", netPnlUsd: 3, rMultiple: 3 }),
+    review({ tradeId: "c", ruleId: "r1", ruleHash: "bbbbbbbb22222222", netPnlUsd: -1, rMultiple: -1 }),
+    review({ tradeId: "d", ruleId: null, ruleHash: null, netPnlUsd: 100, rMultiple: 100 }), // unplanned, skipped
+  ];
+  const stats = aggregate(reviews, "paper");
+  assert.deepEqual(Object.keys(stats.byRule).sort(), ["r1@aaaaaaaa", "r1@bbbbbbbb"].sort());
+  assert.equal(stats.byRule["r1@aaaaaaaa"]!.closed, 2);
+  assert.equal(stats.byRule["r1@aaaaaaaa"]!.netPnlUsd, 4);
+  assert.equal(stats.byRule["r1@bbbbbbbb"]!.closed, 1);
+  assert.equal(stats.byRule["r1@bbbbbbbb"]!.netPnlUsd, -1);
 });
 
 test("aggregate: byOrigin separates rules-file from ai-analyst", () => {

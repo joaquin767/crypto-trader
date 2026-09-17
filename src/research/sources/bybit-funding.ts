@@ -23,6 +23,27 @@ interface BybitFundingResponse {
   result?: { list?: unknown[] };
 }
 
+export type FundingEntry = { ts: number; rate: number };
+
+/** Pure. Parses one page's `result.list` of `{ fundingRate, fundingRateTimestamp }` entries.
+ *  Shared by the live adapter (below) and scripts/backfill-history.ts, so both trust the exact
+ *  same numeric validation. */
+export function parseFundingEntries(list: unknown, symbol: string): { kind: "ok"; entries: FundingEntry[] } | { kind: "invalid"; detail: string } {
+  if (!Array.isArray(list)) {
+    return { kind: "invalid", detail: `expected an array of funding entries for ${symbol}` };
+  }
+  const entries: FundingEntry[] = [];
+  for (const item of list as { fundingRate?: string; fundingRateTimestamp?: string }[]) {
+    const ts = Number(item.fundingRateTimestamp);
+    const rate = Number(item.fundingRate);
+    if (!Number.isFinite(ts) || !Number.isFinite(rate)) {
+      return { kind: "invalid", detail: `non-numeric funding entry for ${symbol}: ${JSON.stringify(item)}` };
+    }
+    entries.push({ ts, rate });
+  }
+  return { kind: "ok", entries };
+}
+
 async function fetchFundingForSymbol(
   symbol: string,
   decisionTime: number,
@@ -58,16 +79,13 @@ async function fetchFundingForSymbol(
       };
     }
 
-    const list = body.result.list as { fundingRate?: string; fundingRateTimestamp?: string }[];
+    const list = body.result.list ?? [];
     if (list.length === 0) break;
+    const parsedPage = parseFundingEntries(list, symbol);
+    if (parsedPage.kind === "invalid") return parsedPage;
 
     let minTs = Number.POSITIVE_INFINITY;
-    for (const item of list) {
-      const ts = Number(item.fundingRateTimestamp);
-      const rate = Number(item.fundingRate);
-      if (!Number.isFinite(ts) || !Number.isFinite(rate)) {
-        return { kind: "invalid", detail: `non-numeric funding entry for ${symbol}: ${JSON.stringify(item)}` };
-      }
+    for (const { ts, rate } of parsedPage.entries) {
       if (ts < minTs) minTs = ts;
       if (seen.has(ts)) continue;
       seen.add(ts);
