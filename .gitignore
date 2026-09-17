@@ -57,6 +57,10 @@ data/validation/folds/
 data/snapshots/
 reports/
 
+# Backfilled backtest history (specs/daily-catalyst-manual-trading.md §5.10a) — regenerate with
+# `npm run backfill`; large and derived from public data, not committed.
+data/history/
+
 # Manual trading journal (specs/daily-catalyst-manual-trading.md §5.7/§10.2) — real trade data,
 # not a template; never committed.
 manual-journal.json*

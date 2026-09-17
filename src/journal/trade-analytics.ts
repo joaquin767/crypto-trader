@@ -145,6 +145,7 @@ export function liveView(
 export interface ClosedTradeReview {
   tradeId: string;
   ruleId: string | null;
+  ruleHash: string | null;
   origin: "rules-file" | "ai-analyst" | null;
   aiStanceAtPlan: AiStance | null;
   plannedRiskUsd: number | null;
@@ -211,6 +212,7 @@ export function reviewClosedTrade(t: ManualTrade, klines1h: readonly Kline[]): C
   return {
     tradeId: t.id,
     ruleId: t.ruleId,
+    ruleHash: t.ruleHash,
     origin: plan?.origin ?? null,
     aiStanceAtPlan: t.aiStanceAtPlan,
     plannedRiskUsd,
@@ -237,6 +239,7 @@ export interface AggregateStats {
   totalNetPnlUsd: number;
   maxDrawdownR: number | null;
   adherenceRate: number | null;
+  /** key "<ruleId>@<first 8 chars of ruleHash>" so rule versions never blend (§5.9). */
   byRule: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;
   byOrigin: Record<"rules-file" | "ai-analyst", { closed: number; expectancyR: number | null; netPnlUsd: number }>;
   byAiStance: Record<AiStance | "none", { closed: number; expectancyR: number | null; winRate: number | null }>;
@@ -298,12 +301,15 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
   };
 
   for (const r of reviews) {
-    if (r.ruleId !== null) {
-      const b = ruleBuckets.get(r.ruleId) ?? bucket();
+    // Unplanned trades (no ruleId) are skipped, as before; a ruleId without a hash (should not
+    // happen for a linked trade) is skipped too since the key requires both (§5.9).
+    if (r.ruleId !== null && r.ruleHash !== null) {
+      const key = `${r.ruleId}@${r.ruleHash.slice(0, 8)}`;
+      const b = ruleBuckets.get(key) ?? bucket();
       b.closed += 1;
       b.netPnlUsd += r.netPnlUsd;
       if (r.rMultiple !== null) b.rs.push(r.rMultiple);
-      ruleBuckets.set(r.ruleId, b);
+      ruleBuckets.set(key, b);
     }
     if (r.origin !== null) {
       const b = originBuckets[r.origin];
@@ -321,8 +327,8 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
     }
   }
 
-  for (const [ruleId, b] of ruleBuckets) {
-    byRule[ruleId] = { closed: b.closed, expectancyR: mean(b.rs), netPnlUsd: b.netPnlUsd };
+  for (const [key, b] of ruleBuckets) {
+    byRule[key] = { closed: b.closed, expectancyR: mean(b.rs), netPnlUsd: b.netPnlUsd };
   }
   for (const origin of ["rules-file", "ai-analyst"] as const) {
     const b = originBuckets[origin];

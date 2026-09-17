@@ -14,6 +14,27 @@ interface FearGreedResponse {
   data?: { value?: string; timestamp?: string }[];
 }
 
+export type FearGreedEntry = { value: number; timestampS: number };
+
+/** Pure. Parses alternative.me's `data[]` array. Shared by the live adapter (below) and
+ *  scripts/backfill-history.ts. */
+export function parseFearGreedList(parsed: unknown): { kind: "ok"; entries: FearGreedEntry[] } | { kind: "invalid"; detail: string } {
+  const body = parsed as FearGreedResponse;
+  if (!Array.isArray(body.data)) {
+    return { kind: "invalid", detail: "unexpected fear & greed response shape (no data[])" };
+  }
+  const entries: FearGreedEntry[] = [];
+  for (const entry of body.data) {
+    const value = Number(entry.value);
+    const timestampS = Number(entry.timestamp);
+    if (!Number.isFinite(value) || !Number.isFinite(timestampS)) {
+      return { kind: "invalid", detail: `malformed fear & greed entry: ${JSON.stringify(entry)}` };
+    }
+    entries.push({ value, timestampS });
+  }
+  return { kind: "ok", entries };
+}
+
 export function createFearGreedAdapter(deps: AdapterDeps): SourceAdapter {
   return {
     id: "fear-greed",
@@ -30,20 +51,12 @@ export function createFearGreedAdapter(deps: AdapterDeps): SourceAdapter {
         return invalidSnapshot("fear-greed", fetchedAt, "non-JSON response from alternative.me fng");
       }
 
-      const body = parsed as FearGreedResponse;
-      if (!Array.isArray(body.data)) {
-        return invalidSnapshot("fear-greed", fetchedAt, "unexpected fear & greed response shape (no data[])");
-      }
+      const list = parseFearGreedList(parsed);
+      if (list.kind === "invalid") return invalidSnapshot("fear-greed", fetchedAt, list.detail);
 
-      const rows: SourceRow[] = [];
-      for (const entry of body.data) {
-        const value = Number(entry.value);
-        const timestampS = Number(entry.timestamp);
-        if (!Number.isFinite(value) || !Number.isFinite(timestampS)) {
-          return invalidSnapshot("fear-greed", fetchedAt, `malformed fear & greed entry: ${JSON.stringify(entry)}`);
-        }
-        rows.push({ key: "BTC", observedFor: timestampS * 1000, availableAt: fetchedAt, field: "fearGreedIndex", value });
-      }
+      const rows: SourceRow[] = list.entries.map((e) => (
+        { key: "BTC", observedFor: e.timestampS * 1000, availableAt: fetchedAt, field: "fearGreedIndex", value: e.value }
+      ));
       return okSnapshot("fear-greed", fetchedAt, rows);
     },
   };

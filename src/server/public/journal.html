@@ -303,13 +303,20 @@ async function renderClosedTrades(trades) {
 
 function statsTable(stats) {
   const row = (label, v) => `<tr><td>${esc(label)}</td><td class="mono">${esc(v)}</td></tr>`;
-  const group = (title, obj, cols) => {
+  const group = (title, obj, cols, keyFmt) => {
     const entries = Object.entries(obj || {});
     if (entries.length === 0) return "";
+    const label = keyFmt || ((k) => k);
     return `<h3 style="margin-top:10px">${esc(title)}</h3><div class="table-wrap"><table>
       <tr><th></th>${cols.map((c) => `<th>${esc(c.label)}</th>`).join("")}</tr>
-      ${entries.map(([k, v]) => `<tr><td>${esc(k)}</td>${cols.map((c) => `<td class="mono">${esc(c.fmt(v[c.key]))}</td>`).join("")}</tr>`).join("")}
+      ${entries.map(([k, v]) => `<tr><td>${esc(label(k))}</td>${cols.map((c) => `<td class="mono">${esc(c.fmt(v[c.key]))}</td>`).join("")}</tr>`).join("")}
     </table></div>`;
+  };
+  // byRule keys are "<ruleId>@<ruleHash first 8 chars>" (§5.9) so rule versions never blend;
+  // shown as "ruleId (hash8)" instead of the raw key.
+  const ruleKeyLabel = (k) => {
+    const at = k.lastIndexOf("@");
+    return at === -1 ? k : `${k.slice(0, at)} (${k.slice(at + 1)})`;
   };
   const r2 = (n) => fmt(n, 2);
   const share = (n) => (n === null || n === undefined ? "—" : `${fmt(n * 100, 1)}%`);
@@ -321,7 +328,7 @@ function statsTable(stats) {
       ${row("max drawdown (R)", r2(stats.maxDrawdownR))}
       ${row("plan adherence", share(stats.adherenceRate))}
     </table>
-    ${group("By rule", stats.byRule, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }])}
+    ${group("By rule", stats.byRule, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }], ruleKeyLabel)}
     ${group("Rules vs AI", stats.byOrigin, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "netPnlUsd", label: "net USD", fmt }])}
     ${group("By AI stance (rule trades)", stats.byAiStance, [{ key: "closed", label: "closed", fmt: String }, { key: "expectancyR", label: "exp. R", fmt: r2 }, { key: "winRate", label: "win", fmt: share }])}`;
 }

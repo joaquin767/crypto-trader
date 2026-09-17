@@ -301,6 +301,14 @@ A feature is `missing` when its minimum input count is not met.
 | `daysToNextUnlock` | days to the first unlock of the symbol's base asset after `T` within 90 days; **999** if none (known absence, not missing) | file `asOf` ≤ 7d old | unlocks-manual |
 | `nextUnlockPctOfFloat` | `pctOfCirculating` of that unlock; **0** if none within 90 days | as above | unlocks-manual |
 
+**Contiguity (fail closed; added in Phase 4 after the critique found backfilled gaps would pass silently).** Minimum input
+counts are not enough when history can have holes:
+- `return1d`, `return7d`, `atr14d`, `realizedVol7d`: the N required daily bars must be consecutive (each `t` = previous `t` + 24 h); otherwise `missing` with reason `gap in daily bars`.
+- `oiChange3dPct` and `stablecoinSupplyChange7dPct`: the "at or before" comparison row must be no more than 24 h older than its target time; otherwise `missing` (`gap`).
+- `fundingRatePercentile90d`: the oldest row in the window must be within 24 h of the window start; otherwise `missing` (`gap`).
+- `btcEtfNetFlowUsd5d`: the 5 rows must span at most 9 calendar days (weekends and US holidays allowed); otherwise `missing` (`gap`).
+This applies to live runs too: `src/research/features.ts` is changed in Phase 4.
+
 `availableAt` per adapter: exchange data = bar close / settlement time / OI timestamp; farside, defillama, fear-greed,
 unlocks-manual = snapshot `fetchedAt` (conservative); macro-calendar-manual = `Date.parse(asOf)`; fred-release-dates = `fetchedAt`.
 
@@ -648,7 +656,7 @@ export interface LiveTradeView {
 }
 
 export interface ClosedTradeReview {
-  tradeId: string; ruleId: string | null; origin: "rules-file" | "ai-analyst" | null; aiStanceAtPlan: AiStance | null;
+  tradeId: string; ruleId: string | null; ruleHash: string | null; origin: "rules-file" | "ai-analyst" | null; aiStanceAtPlan: AiStance | null;
   plannedRiskUsd: number | null; netPnlUsd: number; feesUsd: number; fundingUsd: number;
   rMultiple: number | null;                  // netPnlUsd / plannedRiskUsd; null if unplanned
   entrySlippagePct: number | null;           // vs plannedSnapshot.referencePrice, signed adverse-positive
@@ -661,7 +669,7 @@ export interface AggregateStats {
   venue: ManualTradeVenue; closedTrades: number; winRate: number | null;
   expectancyR: number | null; totalNetPnlUsd: number; maxDrawdownR: number | null;
   adherenceRate: number | null;              // planned & followedPlan / closedTrades
-  byRule: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;
+  byRule: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;   // key "<ruleId>@<first 8 chars of ruleHash>" so rule versions never blend
   byOrigin: Record<"rules-file" | "ai-analyst", { closed: number; expectancyR: number | null; netPnlUsd: number }>;
   /** Rule-origin trades only, grouped by the AI's stance on their plan. Answers "does the AI's opinion predict outcomes?" */
   byAiStance: Record<AiStance | "none", { closed: number; expectancyR: number | null; winRate: number | null }>;
@@ -674,40 +682,61 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
 
 ### 5.10 Daily backtest and Gate D0 — `src/backtest-daily/`
 
-```ts
-export interface SimTrade { planId: string; ruleId: string; symbol: string; entryTime: number; exitTime: number;
-  exitKind: "stop" | "target" | "time"; netPnlUsd: number; riskUsd: number; rMultiple: number; fundingUsd: number; feesUsd: number; }
+Canonical declarations (§5.10a gives the normative behavior behind each):
 
-/** Pure. Entry at open of first 1h bar after decisionTime. If stop and target are both inside one 1h bar, stop wins (conservative).
- *  Funding applied at each 00/08/16 UTC settlement held through, from bybit-funding history. */
-export function simulatePlan(plan: Extract<TradePlan, { kind: "plan" }>, klines1h: readonly Kline[], funding: readonly SourceRow[], maxHoldDays: number): SimTrade | { kind: "unfilled"; reason: string };
+```ts
+export interface SimTrade { planId: string; ruleId: string; symbol: string; decisionDay: string; entryTime: number; exitTime: number;
+  entryPrice: number; exitPrice: number; exitKind: "stop" | "target" | "time";
+  netPnlUsd: number; riskUsd: number; rMultiple: number; fundingUsd: number; feesUsd: number; }
+
+/** Pure. See §5.10a "Simulation". */
+export function simulatePlan(plan: Extract<TradePlan, { kind: "plan" }>, klines1h: readonly Kline[], funding: readonly SourceRow[],
+  maxHoldDays: number, slippageBps: number, cutoffMs: number): SimTrade | { kind: "unfilled"; reason: string };
+
+/** Fixed in code, not CLI-configurable. Changing either is a reviewed code change. */
+export const HOLDOUT_START_MS: number;   // Date.parse("2025-09-16T00:00:00Z")
+export const HOLDOUT_END_MS: number;     // Date.parse("2026-09-15T23:59:59.999Z")
+
+export interface LedgerEntry { time: number; ruleId: string; ruleHash: string; rulesFileCommit: string; command: string;
+  holdoutStart: number; holdoutEnd: number; seed: number; slippageBps: number; }
 
 export interface GateD0Report {
-  schemaVersion: 1; generatedAt: number; command: string; ruleId: string; ruleHash: string;
-  holdoutStart: number; holdoutEnd: number; holdoutEvaluationIndex: number;   // 1-based, from ledger
-  closedTrades: number; meanR: number; bootstrapCi90: [number, number];
-  permutationPValue: number; alpha: number;                                    // alpha = 0.10 / holdoutEvaluationIndex
-  topSymbolShare: number; maxDrawdownR: number; seed: number;
-  verdict: "edge_confirmed" | "no_edge" | "insufficient_data" | "holdout_exhausted";
+  schemaVersion: 2; generatedAt: number; command: string; ruleId: string; ruleHash: string; rulesFileCommit: string;
+  holdoutStart: number; holdoutEnd: number;
+  ruleEvaluationIndex: number;              // 1-based count of ledger entries for this ruleId, including this run
+  globalEvaluationIndex: number;            // 1-based count of ALL ledger entries for this holdout window, including this run
+  alpha: number;                            // 0.10 / globalEvaluationIndex
+  closedTrades: number; decisionDaysWithTrades: number; meanR: number; bootstrapCi90: [number, number];
+  permutationPValue: number; permutationRunsCompleted: number;
+  topSymbolShare: number; maxDrawdownR: number; seed: number; slippageBps: number; unfilledCount: number;
+  holdoutTradeR: number[];                  // per-trade R in exit-time order — Gate D1 input (with holdoutTradeDays)
+  holdoutTradeDays: string[];               // decisionDay per trade, index-aligned with holdoutTradeR (clusters for D1)
+  symbols: { symbol: string; firstKlineTime: number }[];
+  historyCoverage: Record<string, { from: number; to: number; rows: number }>;
+  verdict: "edge_confirmed" | "no_edge" | "insufficient_data" | "holdout_exhausted" | "refused";
   verdictReason: string;
 }
 
-export function runGateD0(trades: readonly SimTrade[], opts: { ruleId: string; ruleHash: string; holdoutStart: number; holdoutEnd: number;
-  ledgerPath: string; seed: number; resamples: number; permutationTrades: readonly SimTrade[][] ; command: string; now: number }): GateD0Report;
+/** Pure given its inputs; ledger I/O happens in the CLI before this is called (see ledger rules in §5.10a). */
+export function runGateD0(trades: readonly SimTrade[], permutation: { meanRs: readonly number[]; runsAttempted: number },
+  opts: { ruleId: string; ruleHash: string; rulesFileCommit: string; ruleSymbolCount: number;
+    ruleEvaluationIndex: number; globalEvaluationIndex: number; seed: number; resamples: number; slippageBps: number;
+    unfilledCount: number; symbols: GateD0Report["symbols"]; historyCoverage: GateD0Report["historyCoverage"];
+    command: string; now: number }): GateD0Report;
 ```
 
 `runGateD0` verdict order (first match decides):
-1. ledger already has 3 holdout evaluations for this `ruleId` (any hash) → `holdout_exhausted`;
-2. `closedTrades < 30` → `insufficient_data`;
+1. `ruleEvaluationIndex > 3` → `holdout_exhausted`;
+2. `closedTrades < 30` or `decisionDaysWithTrades < 20` → `insufficient_data`;
+2b. `permutationRunsCompleted < 900` → `insufficient_data`;
 3. `meanR <= 0` → `no_edge`;
-4. `bootstrapCi90[0] <= 0` → `no_edge`;
+4. `bootstrapCi90[0] <= 0` (day-clustered bootstrap, §5.10a) → `no_edge`;
 5. `permutationPValue > alpha` → `no_edge`;
 6. `topSymbolShare > 0.60` (only when the rule has ≥2 symbols) → `no_edge`;
 7. `maxDrawdownR > 10` → `no_edge`;
 8. else `edge_confirmed`.
 
-Every call appends one line to `data/validation/daily/holdout-ledger.jsonl` **before** computing the
-verdict, so a run that crashes still consumes budget.
+The ledger line is appended **before** simulation starts (§5.10a), so a run that crashes still consumes budget.
 
 ```ts
 export interface GateD1Report {
@@ -720,17 +749,144 @@ export interface GateD1Report {
 }
 
 /** Pure. Reviews must all be venue "paper" and ruleId-matching (throws Error otherwise).
- *  d0HoldoutR = per-trade R from the rule's passing gate-d0 artifact (ignored if forwardOnly). */
+ *  d0Holdout = holdoutTradeR + holdoutTradeDays from the rule's passing gate-d0 artifact (ignored if forwardOnly). */
 export function runGateD1(reviews: readonly ClosedTradeReview[], opts: { ruleId: string; ruleHash: string; forwardOnly: boolean;
-  firstPaperEntryTime: number; now: number; d0HoldoutR: readonly number[] | null; unexplainedIncompleteDays: number;
+  firstPaperEntryTime: number; now: number; d0Holdout: { r: readonly number[]; days: readonly string[] } | null; unexplainedIncompleteDays: number;
   seed: number; resamples: number; command: string }): GateD1Report;
 ```
 
+### 5.10a Backtest data, simulation and statistics (normative, Phase 4)
+
+This section closes contract gaps found before implementation. Where it is more specific than §5.10, §8 or §10.3, it wins.
+
+**Evidence that shapes it:**
+- The repo has no seeded PRNG (`rg "mulberry|PRNG" src` finds nothing).
+- Funding settlement times are per row (`fundingRateTimestamp`, `src/research/sources/bybit-funding.ts:66`), not fixed 00/08/16 UTC.
+- The existing concentration metric counts **positive** P&L only (`src/strategy/walkforward.ts:409-414`).
+- The seeded macro calendar only covers the rest of 2026 (`data/manual/macro-calendar.json`).
+- Farside answers HTTP 403 to Node (Phase 1 live smoke).
+
+#### History store — `src/backtest-daily/history-store.ts`
+
+```ts
+/** One file per source: data/history/<sourceId>.json (gitignored), rows with availableAt set per §10.3. */
+export interface HistoryFile { sourceId: SourceId; builtAt: number; coverage: { from: number; to: number }; rows: SourceRow[]; }
+
+/** Pure. Point-in-time view at decision time T: for each source, rows with availableAt ≤ T.
+ *  The snapshot's fetchedAt = the newest such row's availableAt (NOT T), so buildFeatures' staleness check
+ *  flags gaps in history exactly as it would live. No rows ≤ T → status "unavailable", detail "no history before T".
+ *  Manual sources (macro calendar, unlocks) get an _meta asOf row equal to T's UTC date (schedules are known ahead, §10.3). */
+export function snapshotsAt(history: readonly HistoryFile[], decisionTime: number): SourceSnapshot[];
+```
+
+- `scripts/backfill-history.ts` (`npm run backfill -- --from 2024-01-01 --to <date>`) builds the files for `config.symbols`:
+  - Bybit 1d and 1h klines (paged via `fetchKlines`, §5.14)
+  - Bybit funding (paged by `endTime`)
+  - Bybit instruments (current filters, A20)
+  - DefiLlama stablecoins, Fear & Greed
+  - FRED CPI release dates (needs `FRED_API_KEY`)
+  - FOMC statement times from `data/manual/fomc-history.json`, committed: 2024–2026 meetings, each citing the federalreserve.gov calendar page it was taken from
+  - Farside **only** from the owner CSVs `data/manual/farside-<btc|eth>.csv`
+- **Failures:** a source that cannot be backfilled is written with `rows: []` and its reason in the backfill summary. Features that need it are `missing`, and rules using them are `not_evaluable` on every day. Nothing is synthesized.
+- **Symbols (A8):** each Bybit history file records the symbol's first kline time; days before it have no data for that symbol.
+
+#### Replay loop — `src/backtest-daily/replay.ts`
+
+```ts
+export interface ReplayOptions { rule: RuleDefinition; history: readonly HistoryFile[]; plannerConfig: PlannerConfig;
+  firstDecisionDay: string; lastDecisionDay: string;  // inclusive, UTC dates; decision time = <day>T00:15:00Z
+  cutoffMs: number;                                   // simulation may not read any 1h bar with t + 1h > cutoffMs
+  slippageBps: number; }                              // per side, default 5 (§8.1 costs + A21)
+export interface ReplayResult { trades: SimTrade[]; unfilled: { day: string; symbol: string; reason: string }[];
+  outcomes: { day: string; symbol: string; result: RuleOutcome["result"] }[]; eligibleDays: Record<string, string[]>; }
+/** Pure. For each decision day and each rule symbol: snapshotsAt → buildFeatures → evaluateRule → planTrade
+ *  (openTradeCount 0, breaker not tripped, liveClosedTradesForRule 0, ladderReset true, instrument from history) → simulatePlan.
+ *  One open simulated trade per rule+symbol: a trigger while that symbol's previous sim trade is still open is skipped
+ *  (recorded as unfilled "position already open"). eligibleDays[symbol] = days whose 1h bars cover decision day through
+ *  decision + maxHoldDays within cutoffMs — used by the permutation control. */
+export function replayRule(opts: ReplayOptions): ReplayResult;
+```
+
+#### Simulation — `simulatePlan` (canonical signature in §5.10)
+
+- **Entry:** the open of the first 1h bar with `t ≥ decisionTime`, adjusted adversely by `slippageBps` (long pays more).
+  Quantity, stop and target come from the plan: levels are **not** re-anchored to the fill.
+- **Bars:** each bar after entry, starting with the entry bar itself, is checked in order.
+  - **Gap through a level at the open:** long `o ≤ stop` → exit at `o` (worse than the stop), `stop`. Long `o ≥ target` → exit at `target` (no gap bonus), `target`. Short mirrored.
+  - **Inside the bar:** `l ≤ stop` and `h ≥ target` → `stop` (AC-20). Only `l ≤ stop` → exit at `stop`. Only `h ≥ target` → exit at `target`.
+- **Time exit:** at the close of the last bar with `t + 1h ≤ entryBarTime + maxHoldDays·24h`.
+- **Costs:** every exit price is adjusted adversely by `slippageBps`. Fees: taker 0.055% of notional per side.
+- **Funding:** for each funding row with `entryTime < ts ≤ exitTime`, `fundingUsd −= side · rate · qty · markAt(ts)`, where `side` is +1 long / −1 short and `markAt(ts)` is the close of the 1h bar containing `ts`. AC-21's numbers use notional directly.
+- **R:** `netPnlUsd = gross − fees + fundingUsd`, `rMultiple = netPnlUsd / plan.riskUsd`.
+- **Exit time:** a gap through a level at the open exits at that bar's open time; an intrabar stop/target touch exits at the bar's
+  **close** time (the fill happened somewhere inside the hour, so any funding settlement in that hour is charged — conservative).
+- **Funding completeness:** the symbol's funding history must cover the hold — from the last settlement at or before entry to the
+  first at or after exit, with no two consecutive settlements more than 8 h + 1 min apart (the longest Bybit interval). A settlement
+  inside the hold with no 1h bar to price it is never skipped. Either case → `unfilled` with reason containing `gap`.
+- **Unfilled** (never guessed): no bar at or after decision time, a missing bar before exit (gap > 1h in the series), any needed bar
+  beyond `cutoffMs`, or incomplete funding as above.
+
+#### Statistics — `src/backtest-daily/stats.ts` (pure)
+
+- **PRNG:** `mulberry32(seed)`, returning floats in [0, 1). The default seed is 20260917 and is recorded in every artifact.
+- **Clusters.** Observed trades are grouped by `decisionDay`; a cluster is all trades opened from the same decision day (they share
+  that day's market-wide features and are correlated). `decisionDaysWithTrades` = number of clusters.
+- **Bootstrap (day-clustered):** `resamples` (10 000) times, draw as many clusters as observed, with replacement, and take the mean R
+  over all trades in the drawn clusters. The CI90 is `[percentile(means, 0.05), percentile(means, 0.95)]` using `percentile` from
+  `src/strategy/walkforward.ts:109`. Per-trade i.i.d. resampling is not allowed: it would understate uncertainty for correlated trades.
+- **Permutation control (exposure-matched):** 1 000 runs. Each run keeps the observed cluster structure exactly:
+  - For every observed cluster (its set of symbols), draw one holdout day uniformly from the days that are `eligibleDays` for **all**
+    symbols in that cluster, and simulate those same symbols on that day with a plan built the same way (same side,
+    `stopAtrMultiple`, `targetRMultiple`, `maxHoldDays`, planner, costs). The null therefore has the rule's own symbol mix, trade
+    count and same-day clustering — only the timing is random.
+  - A drawn cluster with any unfilled symbol is redrawn, up to 5 attempts per cluster; a run with any cluster still unfilled is failed.
+  - `p = (1 + #{completed runs with meanR ≥ observed}) / (1 + completedRuns)`. If fewer than 900 runs complete → `insufficient_data` (step 2b).
+- **Concentration:** `topSymbolShare` uses the positive-P&L definition of `src/strategy/walkforward.ts:412-414`.
+- **Drawdown:** `maxDrawdownR` is the largest peak-to-trough of cumulative R in exit-time order.
+
+#### Windows and leakage
+
+- **Dev mode:** decision days from `2024-01-11` through the last day `d` with `d + maxHoldDays + 1 day < holdoutStart`, and `cutoffMs = holdoutStart`.
+  - Trades cannot reach the holdout. AC-22's assertion (`entryTime ≥ holdoutStart` → non-zero exit) stays as a second line of defense.
+  - Dev writes `data/validation/daily/dev-<ruleId>-<date>.json` with the same statistics and `verdict: "dev_only"`, and never touches the ledger.
+- **Holdout mode:** decision days from `HOLDOUT_START_MS` to `HOLDOUT_END_MS`, `cutoffMs = HOLDOUT_END_MS + (maxHoldDays + 1)·24 h`, but never later than now minus 1 h.
+  The CLI has no flags that change the window. It refuses (exit 1, no ledger line, artifact `verdict: "refused"` not written) when:
+  - `rule.forwardOnly` is true, or `rule.origin !== "rules-file"`;
+  - `research-rules.json` has uncommitted changes (`git diff --quiet HEAD -- research-rules.json` fails) or git is unavailable — the
+    rule under test must exist in a commit, recorded as `rulesFileCommit` (pre-registration, A24);
+  - the ledger contains any entry whose `holdoutStart`/`holdoutEnd` differ from the constants (a changed window never shares a
+    ledger silently: a new window requires moving the old ledger to `holdout-ledger-<oldStart>.jsonl` in a reviewed commit);
+  - the ledger file is unparseable (fail closed — never treated as empty).
+
+#### Ledger and multiple testing
+
+- **Ledger** `data/validation/daily/holdout-ledger.jsonl` (committed): one `LedgerEntry` per holdout run, appended **before**
+  simulation starts, so crashes still consume budget.
+- **Per-rule cap:** `ruleEvaluationIndex` counts entries with this `ruleId` (any hash); the 4th and later runs are `holdout_exhausted`.
+- **Global alpha:** `alpha = 0.10 / globalEvaluationIndex`, where `globalEvaluationIndex` counts **every** entry against this holdout
+  window, across all rule ids. Renaming a rule therefore gains nothing: each additional test on the same holdout raises the bar for
+  every later test (Bonferroni over the whole family).
+- The ledger is append-only by convention and reviewed in git; editing or deleting lines is visible in history and is out of policy.
+- **Gate modes use fixed inputs** (added after the Phase 4 independent verification found two bypasses): in `holdout` and
+  `d1-check` mode the CLI rejects `--rules-path`, `--history-dir`, `--reports-root`, `--journal-path`, `--artifacts-dir`,
+  `--ledger-path`, `--docs-validation-dir`, `--seed`, `--resamples` and `--permutation-runs`; they exist for `dev` only.
+  `--slippage-bps` is accepted in gate modes only when ≥ 5 (costs may only become more conservative). The pre-registration git
+  checks run against the rules file actually loaded, and an untracked file counts as uncommitted.
+- **AI ids in d1-check:** `ai-analyst-<hash8>` selects trades whose full `ruleHash` starts with that 8-char prefix; rules-file ids
+  always match the full hash exactly.
+
+#### d1-check
+
+- **Rule and hash:** the rule is loaded from `research-rules.json`. `ai-analyst-*` ids are treated as `forwardOnly`, with the hash taken from the id.
+- **Reviews:** closed `paper` trades with that `ruleId` **and** that `ruleHash`, so trades from a previous rule version don't count.
+- **`d0Holdout`:** `holdoutTradeR` and `holdoutTradeDays` from the newest `gate-d0-<ruleId>-*.json` with `verdict: "edge_confirmed"` **and** `ruleHash` equal to the current hash; otherwise null.
+- **`unexplainedIncompleteDays`:** UTC days from the first paper entry to now whose `reports/<day>.json` has any non-ok source feeding a feature the rule references. A missing report counts as incomplete. Dates listed in `docs/validation/d1-<ruleId>.md` as lines `- YYYY-MM-DD: <reason>` are subtracted.
+
 `runGateD1` verdict order (first match decides):
-1. `forwardOnly === false` and `d0HoldoutR` is null or empty → `failed` (no D0 pass to compare against);
+1. `forwardOnly === false` and `d0Holdout` is null or has no trades → `failed` (no D0 pass to compare against);
 2. `closedPaperTrades < minTrades` (30, or 60 if `forwardOnly`) or `calendarDays < 45` → `not_yet`;
 3. `expectancyR <= 0` → `failed`;
-4. `!forwardOnly && expectancyR < d0Block30P10` (10th percentile of `resamples` means of 30 trades drawn with replacement from `d0HoldoutR`, seeded) → `failed`;
+4. `!forwardOnly && expectancyR < d0Block30P10` → `failed`. `d0Block30P10` is the 10th percentile of `resamples` (10 000) means, each computed by drawing whole decision-day clusters of the D0 holdout trades with replacement (same day grouping as the D0 bootstrap, §5.10a) until at least 30 trades are drawn, seeded — never per-trade i.i.d.;
 5. `adherenceRate < 0.90` → `failed`;
 6. `unexplainedIncompleteDays > 0` → `not_yet`;
 7. else `paper_passed`.
@@ -1025,10 +1181,31 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 - [ ] AC-20: Given a 1h bar whose low ≤ stop and high ≥ target, when `simulatePlan` runs, then `exitKind === "stop"`.
 - [ ] AC-21: Given a long held across 2 funding settlements at +0.01% on $30 notional, then `fundingUsd === -0.006`.
 - [ ] AC-22: Given `--mode dev` and any sim trade with `entryTime >= holdoutStart`, then the script exits non-zero before writing any artifact.
-- [ ] AC-23: Given a ledger with 3 prior entries for `ruleId`, then verdict is `holdout_exhausted` and a 4th ledger line is still appended.
+- [ ] AC-23: Given a ledger with 3 prior entries for `ruleId`, then the CLI still appends a 4th ledger line before simulating and the verdict is `holdout_exhausted` (`ruleEvaluationIndex 4`).
 - [ ] AC-24: Given 29 trades all at +1R, then verdict `insufficient_data`.
 - [ ] AC-25: Given identical inputs and `seed`, then two `runGateD0` calls return deep-equal reports except `generatedAt`.
 - [ ] AC-26: Given 40 trades with meanR > 0 but bootstrap lower bound ≤ 0, then `no_edge` with `verdictReason` starting `step 4`.
+- [ ] AC-76: `mulberry32(1)` produces a fixed first-three-values sequence recorded in the test; two generators with the same seed produce identical 1 000-value sequences.
+- [ ] AC-77: `snapshotsAt` at T excludes a row with `availableAt = T + 1`; a fear-greed history whose last row ≤ T is 3 days old yields `fetchedAt` 3 days before T, so `buildFeatures` marks `fearGreed` missing (`stale`) with the 26 h staleness.
+- [ ] AC-78: Farside history row for US trading day 2025-03-03 has `availableAt = 2025-03-04T12:00Z`; at decision time 2025-03-04T00:15Z it is not visible, at 2025-03-05T00:15Z it is.
+- [ ] AC-79: Simulation, long plan (stop 95, target 110, qty 1, slippage 0): bar 1 opens 94 → `stop` exit at 94 (gap-through, worse than the stop); bar with o 100 h 111 l 99 → `target` at 110; o 112 on a later bar → `target` at 110, never 112.
+- [ ] AC-80: With `slippageBps 5`, a long entry at bar open 100 fills at 100.05 and a stop exit at 95 fills at 94.9525.
+- [ ] AC-81: A 1h series with one missing bar between entry and the exit bar → `unfilled` with reason containing `gap`; a needed bar beyond `cutoffMs` → `unfilled` with reason containing `cutoff`.
+- [ ] AC-82: Funding rows at the actual `fundingRateTimestamp` values (e.g. every 4 h) are all applied, including one not on 00/08/16 UTC; a row exactly at `entryTime` is not applied; a row exactly at `exitTime` is.
+- [ ] AC-83: `replayRule` with a rule that triggers on 3 consecutive days for one symbol while the first sim trade is held 5 days produces 1 trade and 2 unfilled `position already open`.
+- [ ] AC-84: Dev mode never reads a 1h bar with `t + 1h > holdoutStart`: a fake history whose bars at or after holdoutStart throw on access completes the dev run.
+- [ ] AC-85: Bootstrap on R = [1, 1, 1, 1] gives CI90 [1, 1]; permutation p uses `(1 + k)/(1 + runs)`: 0 of 999 exceeding → p = 0.001; with 899 completed runs → `insufficient_data` (step 2b).
+- [ ] AC-86: Holdout mode for a `forwardOnly` rule or an `ai-analyst-*` id exits 1 and appends no ledger line; for an eligible rule the ledger line exists even if simulation then throws.
+- [ ] AC-91: Day-clustered bootstrap is wider than per-trade: 40 trades on 10 days where every day's 4 trades share that day's R, with day R values [−1, 2, −1, 2, −1, 2, −1, 2, −1, 2], produce a CI90 width strictly greater than a per-trade i.i.d. bootstrap of the same 40 values with the same seed (the test computes both).
+- [ ] AC-92: Global alpha: a ledger with 2 entries for rule `a` and 1 for rule `b` (same window) gives rule `c`'s first run `ruleEvaluationIndex 1`, `globalEvaluationIndex 4`, `alpha 0.025`.
+- [ ] AC-93: Holdout mode refuses (exit 1, ledger unchanged) when `research-rules.json` has uncommitted changes, when the ledger has an entry with a different `holdoutStart`, and when the ledger has an unparseable line.
+- [ ] AC-94: Permutation preserves exposure: for observed clusters `[{A}, {A}, {A, B}]`, every permutation run simulates exactly 4 trades — A three times and B once — and the `{A, B}` cluster's day is eligible for both symbols.
+- [ ] AC-95: Contiguity: 15 daily bars with one missing day inside the last 15 → `atr14d` missing with reason `gap in daily bars`; the same with no gap → value. A stablecoin comparison row 30 h older than its target → `stablecoinSupplyChange7dPct` missing (`gap`). 5 ETF rows spanning 10 calendar days → `btcEtfNetFlowUsd5d` missing.
+- [ ] AC-96: `insufficient_data` when `decisionDaysWithTrades < 20` even with 40 closed trades.
+- [ ] AC-87: `topSymbolShare` for per-symbol P&L {A: +8, B: +2, C: −20} is 0.8.
+- [ ] AC-88: d1-check ignores paper trades whose `ruleHash` differs from the current rule, and ignores a gate-d0 artifact with `edge_confirmed` but a different `ruleHash` (→ D1 `failed`, step 1).
+- [ ] AC-89: `unexplainedIncompleteDays`: 5 days since first paper entry, 2 reports incomplete on a source the rule uses, 1 report missing, 1 of those 3 dates listed in `docs/validation/d1-<ruleId>.md` → 2.
+- [ ] AC-90: The gate-d0 artifact contains `holdoutTradeR` with length `closedTrades`, `holdoutTradeDays` aligned with it, `symbols` with first kline times, `slippageBps`, `seed`, `permutationRunsCompleted`, and `historyCoverage` for every source.
 
 ### 6.4a Gate D1 (P0)
 - [ ] AC-26a: Given 30 paper reviews over 46 days with expectancyR 0.30, adherenceRate 0.93, `d0Block30P10 = 0.05`, `unexplainedIncompleteDays = 0`, then verdict `paper_passed`.
@@ -1037,7 +1214,7 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 - [ ] AC-26d: Given the AC-26a inputs with expectancyR 0.02 < `d0Block30P10` 0.05, then `failed` (`step 4`).
 - [ ] AC-26e: Given `forwardOnly=true` and 45 paper reviews, then `not_yet`; with 60 reviews and the other AC-26a values, then `paper_passed` and `d0Block30P10 === null`.
 - [ ] AC-26f: Given any review with venue `bybit-live` or another `ruleId`, then `runGateD1` throws.
-- [ ] AC-26g: Given `forwardOnly=false` and `d0HoldoutR=null`, then `failed` (`step 1`).
+- [ ] AC-26g: Given `forwardOnly=false` and `d0Holdout=null`, then `failed` (`step 1`).
 
 ### 6.5 Journal, sync, analytics (P0)
 - [ ] AC-27: Given a key whose `/v5/user/query-api` response has `readOnly: 0`, when the journal server starts, then it throws `TradePermissionKeyError` and does not bind the port.
@@ -1156,7 +1333,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 
 - Data window: `2024-01-11` (first US spot BTC ETF trading day) → `2026-09-15`.
 - Holdout: `2025-09-16` → `2026-09-15` (last 12 months). Development/tuning uses only data before `2025-09-16`.
-- Holdout budget: 3 evaluations per `ruleId`, across all hashes, recorded in `data/validation/daily/holdout-ledger.jsonl`. After exhaustion, a variant must use a new `id` and a fresh holdout that starts after the ledger's last entry date (i.e. it waits for new data).
+- Holdout budget: 3 evaluations per `ruleId`, across all hashes, recorded in `data/validation/daily/holdout-ledger.jsonl`. Every evaluation of **any** rule against this window also tightens the significance threshold for all later ones (`alpha = 0.10 / globalEvaluationIndex`, §5.10a), so renaming a rule to get more attempts only makes every later test harder. A genuinely new holdout window requires new data and a reviewed code change to the window constants.
 - Costs: taker 0.055% per side, historical funding, stop-first intrabar resolution (§5.10).
 - Bootstrap: 10,000 resamples of per-trade R, seeded. Permutation control: 1,000 runs of the same rule's
   side/stop/target/hold with entry dates drawn uniformly from the holdout days where the rule's symbols had data, seeded; p = share with meanR ≥ observed.
@@ -1195,7 +1372,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 | **2 — Rules, planner, report** | §4.4–4.6, `bybit-instruments` adapter, `ManualTradingConfig` (§5.11), `research:daily`, example `research-rules.json` (A10). Type-only stubs so the contract compiles before later phases: `ManualTrade`/`AiStance` types (implementation Phase 3), `AiAnalystSection` type (Phase 4b). Until Phase 3: `openTrades = []`, breaker not tripped, `liveClosedTradesForRule = 0`, `ladderResetByBreaker = false`. Until Phase 4b: `aiDisabledReason = "config"`. AC-8..19, AC-11a/b, AC-14a, AC-15a. | P0 |
 | **3 — Journal & dashboard** | §4.11–4.14, §5.8a (RestClient additions, reconstruction, funding, exit classification, linking, paper trades, analytics formulas, breaker, research:daily wiring, server hardening). **Modifies shipped Phase 2 code:** adds `maxHoldDays` to the `kind:"plan"` variant in `src/research/planner.ts`; every construction site and fixture (`planTrade`, `src/research/report.ts`, `tests/research-planner.test.ts`, `tests/research-report.test.ts`, `tests/research-daily.test.ts`) is updated in the same change, and `research:daily` switches from its fixed Phase 2 inputs to the journal (§5.8a wiring). AC-27..38, AC-55..68 (incl. 63a–d). | P0 |
 | **3b — Trade chart & replay** | §5.14: paged `fetchKlines` (replaces the 200-bar review fetch), `chart.ts`, `GET /api/trades/:id/chart`, SVG chart with replay/live follow and channel tabs in `journal.html`. AC-69..75. | P1 |
-| **4 — Daily backtest & gates** | §4.8 history store + `scripts/backfill-history.ts` (lags per §10.3), §4.9–4.10, `backtest:daily` dev/holdout/d1-check. AC-20..26, AC-26a..g. | P0 |
+| **4 — Daily backtest & gates** | §4.8–4.10 per §5.10a: history store + `scripts/backfill-history.ts` (lags per §10.3), `fomc-history.json`, replay loop, simulation with slippage and per-row funding, seeded statistics and permutation control, `backtest:daily` dev/holdout/d1-check, ledger and artifacts. AC-20..26, AC-26a..g, AC-76..96. Also changes shipped code: `src/research/features.ts` (contiguity, §5.3a) and `src/journal/trade-analytics.ts` (`ClosedTradeReview.ruleHash`, `byRule` keyed by rule version, §5.9). | P0 |
 | **4b — AI analyst** | §4.15–4.19, §5.13, `ai` config, report/Markdown integration, journal `aiStanceAtPlan`, `byOrigin`/`byAiStance`. AC-40..54. Depends on Phases 2–3. | P0 (AI channel only) |
 | **5 — Persona** | §4.7 via gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`. AC-39. | P1 |
 | **6 — Hardening** | Coinalyze OI backfill (longer OI history), optional desktop notification when report is written, CSV export of reviews. | P2 |
@@ -1299,6 +1476,21 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - A17: The combination of streaming, structured-output parsing, web search and server-side refusal fallback in one request is assumed supported; if not, fallback is the part dropped.
 - A18: The AI reads only what the input contains plus its own web search. It is not given the journal's P&L history, to avoid it anchoring on recent results.
 - A19: Using an AI to generate analysis for the owner's own decisions keeps a human decision-maker on every order; the report labels AI content as generated and unvalidated.
+- A20: Backtests use the **current** Bybit order-size filters for the whole window; historical changes to `minOrderQty`/`qtyStep` are not modeled.
+- A21: 5 bps adverse slippage per side on top of taker fees is a conservative flat cost for 1h-bar market orders on liquid perps. The owner may raise it. Lowering it does not buy extra attempts: every holdout run, whatever its settings, consumes one of the rule's 3 ledger evaluations.
+- A22: The backtest applies no circuit breaker and no cross-rule open-trade cap: Gate D0 measures one rule in isolation. The live system still enforces both.
+- A23: With $100 capital and 1% risk, many historical plans will be `size_below_min`; they are not simulated, which can leave a rule at `insufficient_data`. That outcome is correct, not a defect to tune around.
+- A24: **The holdout is not blind for a human author.** Rules are written in September 2026, after the owner has lived through the whole
+  2025-09-16 → 2026-09-15 holdout — the same contamination that excludes the AI from Gate D0 (X13), only milder. Gate D0 is therefore a
+  necessary filter, never sufficient on its own: **Gate D1 (forward paper) is the only truly out-of-sample test.** Mitigations:
+  pre-registration (holdout runs require the rule to be committed; `rulesFileCommit` is recorded), the per-rule 3-run cap and the
+  global Bonferroni alpha. Post-hoc tuning after a `no_edge` is visible in git history, not prevented.
+- A26: Backfilled FOMC rows use `availableAt = meeting time − 180 days` (the Fed publishes each year's schedule well ahead; exact
+  publication dates aren't recorded). `hoursToNextFomc` only looks at the nearest future meeting, so this cannot change a feature
+  value within the backtest window. `simulatePlan` derives decision time from the `planId` date prefix (`<date>T00:15:00Z`).
+  The 2025-08-22 notation vote listed on the Fed calendar is excluded: it has no rate statement.
+- A25: Pooling trades by decision day assumes trades from different days are independent enough for a day-level bootstrap. Multi-day
+  holds overlapping across days still share market moves; D0 accepts that residual optimism because D1 re-tests forward.
 
 ---
 

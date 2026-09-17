@@ -18,7 +18,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 2 — Rules, planner, report | `npm run research:daily`: rules → sized trade plans → daily report | ✅ Built |
 | 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ✅ Built |
 | 3b — Trade chart & replay | Price chart per trade with plan levels, volatility range, live follow and candle-by-candle replay | ✅ Built |
-| 4 — Backtest & gates | `npm run backtest:daily`: Gate D0 (holdout) and Gate D1 (paper) verdicts | ⏳ Planned |
+| 4 — Backtest & gates | `npm run backfill` + `npm run backtest:daily`: dev backtests, Gate D0 (holdout) and Gate D1 (paper) verdicts | ✅ Built |
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas | ⏳ Planned |
 | 5 — Analyst persona | Interactive Claude Code skill to write and critique rules | ⏳ Planned |
 
@@ -81,6 +81,40 @@ flowchart TD
 
 You review every gate artifact (`data/validation/daily/*.json`) and change a rule's `status` yourself.
 Why the AI skips D0: its training data runs to May 2026, inside the holdout window — a backtest of it would be cheating.
+
+> **D0 is a filter, not proof.** You lived through the holdout year while writing your rules, so it is not
+> blind for you either. Only Gate D1 — paper trading forward — is truly out of sample.
+
+### Testing a rule (Gates D0 and D1)
+
+1. **Get the data.** `npm run backfill -- --from 2024-01-01 --to <yesterday>`. Rules using ETF flows need the
+   full-history Farside CSVs in `data/manual/`; rules using CPI timing need `FRED_API_KEY`. Without them those
+   rules are `not_evaluable` on every day — the backtest never fills the gap.
+2. **Iterate in dev.** `npm run backtest:daily -- --rule <id> --mode dev` as often as you like. It only uses days
+   before 2025-09-16 and never touches the holdout budget. Artifact: `data/validation/daily/dev-<id>-<date>.json`.
+3. **Commit the rule.** `research-rules.json` must have no uncommitted changes — the holdout run records the commit
+   it tested (pre-registration). Tuning after a failure stays visible in git history.
+4. **Run Gate D0 once you're confident.** `npm run backtest:daily -- --rule <id> --mode holdout`.
+   - It writes a ledger line **before** running, so even a crash uses an attempt. Max 3 attempts per rule.
+   - Every holdout run of *any* rule makes the significance bar stricter for all later runs
+     (`alpha = 0.10 / total runs`), so renaming a rule to get more tries only hurts.
+   - It uses fixed inputs: no custom ledger, rules file, history, seed or sample counts; slippage can only go up (≥ 5 bps).
+5. **Read the artifact** `gate-d0-<id>-<date>.json`: `verdict`, `verdictReason`, trades, mean R, CI, p-value, alpha.
+   Only `edge_confirmed` lets you set the rule's `status` to `holdout-passed` (commit that change).
+6. **Paper trade it** for at least 45 days / 30 trades, then run `--mode d1-check`. Only trades recorded with the
+   rule's current version count; changing the rule restarts D1.
+
+| D0 verdict | What it means |
+|-----------|---------------|
+| `edge_confirmed` | Every check passed. Still only a filter — go to paper trading |
+| `no_edge` | One check failed; `verdictReason` names the step (mean R, confidence interval, random-timing control, concentration, drawdown) |
+| `insufficient_data` | Fewer than 30 trades or 20 trading days, or the random-timing control couldn't complete. Often caused by small capital (plans below Bybit's minimum size) |
+| `holdout_exhausted` | This rule already used its 3 attempts |
+
+What the backtest assumes, so you can judge the results: entry at the next hourly open after 00:15 UTC,
+5 bps slippage each way plus 0.055% taker fees, a stop hit inside an hour always wins over the target, and
+funding charged at every real settlement. Any gap in prices or funding makes that trade "unfilled" rather
+than guessed.
 
 ---
 
@@ -150,8 +184,9 @@ date,totalUsdMillions
 2026-09-15,-120.4
 ```
 
-Paths: `data/manual/farside-btc.csv`, `data/manual/farside-eth.csv`. The file's modification time is
-treated as when the data became available.
+Paths: `data/manual/farside-btc.csv`, `data/manual/farside-eth.csv`. For the daily report, the file's
+modification time is treated as when the data became available. For backtests, include the full history
+(from January 2024); each day's flow is treated as known at 12:00 UTC the following day.
 
 ---
 
@@ -163,14 +198,17 @@ treated as when the data became available.
 | `npm run snapshot:daily -- --date 2026-09-15 --revision 1` | Re-snapshot a date as a new revision (backdated → scheduled decision time) | same |
 | `npm run research:daily` | Snapshot → features → rules → plans → `reports/<date>.json` + `reports/<date>.md` | 0 written · 2 invalid `research-rules.json` (all issues printed, nothing written) · 3 report exists (use `--refetch`) · 4 decision time in the future |
 | `npm run research:daily -- --refetch` | Re-run today as a new revision; nothing is overwritten | same |
-| `npm run verify` | Typecheck + full test suite | non-zero on failure |
-
 | `npm run journal` | Start the dashboard at <http://127.0.0.1:3082> (local only) | exits non-zero if the Bybit key has trade/withdraw permission or can't be verified; exit 5 from `research:daily` if the journal file is unreadable |
+| `npm run backfill -- --from 2024-01-01 --to <yesterday>` | Build point-in-time history in `data/history/` for backtests | prints a per-source summary; failed sources are empty with a reason, never partial |
+| `npm run backtest:daily -- --rule <id> --mode dev` | Backtest a rule on the development period only (before 2025-09-16); free to repeat | 0 on completion |
+| `npm run backtest:daily -- --rule <id> --mode holdout` | **Gate D0.** Uses 1 of the rule's 3 attempts, recorded before it runs | 0 only for `edge_confirmed` · 1 otherwise or refused |
+| `npm run backtest:daily -- --rule <id> --mode d1-check` | **Gate D1** from your paper trades | 0 only for `paper_passed` |
+| `npm run verify` | Typecheck + full test suite | non-zero on failure |
 
 Both research commands accept `--snapshot-root DIR` and `--reports-root DIR` to write somewhere other
 than `data/snapshots/` and `reports/` (useful for experiments). `research:daily` and `journal` accept
-`--journal-path FILE` (default `manual-journal.json`). Commands for phases 4–4b are in the spec (§5.12)
-and will be added here as each phase lands.
+`--journal-path FILE` (default `manual-journal.json`). `backtest:daily` accepts path, seed and sampling
+flags **only in `dev` mode**; gate modes refuse them (see [Testing a rule](#testing-a-rule-gates-d0-and-d1)).
 
 ---
 

@@ -38,6 +38,30 @@ export const DEFAULT_STALENESS_MS: Readonly<Record<SourceId, number>> = {
   "unlocks-manual": 7 * DAY_MS,
 };
 
+/** FeatureName -> the single SourceId that feeds it, per §5.3a's table (Phase 4b: used by
+ *  Gate D1's `unexplainedIncompleteDays` to know which report sources matter for a given rule,
+ *  without re-deriving it from FeatureValue.sourceId at runtime for days whose report never ran
+ *  buildFeatures for this rule). */
+export const FEATURE_SOURCE_ID: Readonly<Record<FeatureName, SourceId>> = {
+  close: "bybit-klines-1d",
+  return1d: "bybit-klines-1d",
+  return7d: "bybit-klines-1d",
+  atr14d: "bybit-klines-1d",
+  realizedVol7d: "bybit-klines-1d",
+  fundingRate8hAvg3d: "bybit-funding",
+  fundingRatePercentile90d: "bybit-funding",
+  oiChange3dPct: "bybit-oi",
+  btcEtfNetFlowUsd1d: "farside-btc-etf",
+  btcEtfNetFlowUsd5d: "farside-btc-etf",
+  ethEtfNetFlowUsd1d: "farside-eth-etf",
+  stablecoinSupplyChange7dPct: "defillama-stablecoins",
+  fearGreed: "fear-greed",
+  hoursToNextFomc: "macro-calendar-manual",
+  hoursToNextCpi: "fred-release-dates",
+  daysToNextUnlock: "unlocks-manual",
+  nextUnlockPctOfFloat: "unlocks-manual",
+};
+
 const META_KEY = "_meta";
 const META_ASOF_FIELD = "asOf";
 
@@ -106,6 +130,17 @@ function groupKlines(rows: readonly SourceRow[], symbol: string): Kline[] {
   return complete;
 }
 
+/**
+ * Contiguity (§5.3a): the N required daily bars must be consecutive — each bar's `t` exactly
+ * 24h after the next-older bar's `t`. `bars` is newest-first; checks indices [0, n).
+ */
+function isConsecutiveDaily(bars: readonly Kline[], n: number): boolean {
+  for (let i = 0; i < n - 1; i++) {
+    if (bars[i]!.t - bars[i + 1]!.t !== DAY_MS) return false;
+  }
+  return true;
+}
+
 function computeClose(bars: readonly Kline[], sourceId: SourceId): FeatureValue {
   if (bars.length < 1) return missing(sourceId, "fewer than 1 completed daily bar");
   const bar0 = bars[0]!;
@@ -114,18 +149,21 @@ function computeClose(bars: readonly Kline[], sourceId: SourceId): FeatureValue 
 
 function computeReturn1d(bars: readonly Kline[], sourceId: SourceId): FeatureValue {
   if (bars.length < 2) return missing(sourceId, "fewer than 2 completed daily bars");
+  if (!isConsecutiveDaily(bars, 2)) return missing(sourceId, "gap in daily bars");
   const bar0 = bars[0]!, bar1 = bars[1]!;
   return value((bar0.c / bar1.c - 1) * 100, bar0.t + DAY_MS, sourceId);
 }
 
 function computeReturn7d(bars: readonly Kline[], sourceId: SourceId): FeatureValue {
   if (bars.length < 8) return missing(sourceId, "fewer than 8 completed daily bars");
+  if (!isConsecutiveDaily(bars, 8)) return missing(sourceId, "gap in daily bars");
   const bar0 = bars[0]!, bar7 = bars[7]!;
   return value((bar0.c / bar7.c - 1) * 100, bar0.t + DAY_MS, sourceId);
 }
 
 function computeAtr14d(bars: readonly Kline[], sourceId: SourceId): FeatureValue {
   if (bars.length < 15) return missing(sourceId, "fewer than 15 completed daily bars");
+  if (!isConsecutiveDaily(bars, 15)) return missing(sourceId, "gap in daily bars");
   let sum = 0;
   for (let i = 0; i < 14; i++) {
     const bar = bars[i]!;
@@ -137,6 +175,7 @@ function computeAtr14d(bars: readonly Kline[], sourceId: SourceId): FeatureValue
 
 function computeRealizedVol7d(bars: readonly Kline[], sourceId: SourceId): FeatureValue {
   if (bars.length < 8) return missing(sourceId, "fewer than 8 completed daily bars");
+  if (!isConsecutiveDaily(bars, 8)) return missing(sourceId, "gap in daily bars");
   const returns: number[] = [];
   for (let i = 0; i < 7; i++) returns.push(Math.log(bars[i]!.c / bars[i + 1]!.c));
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
@@ -160,7 +199,12 @@ function computeFundingRatePercentile90d(rows: readonly SourceRow[], symbol: str
   const inWindow = rows.filter((r) => r.key === symbol && r.field === "fundingRate" && r.observedFor > windowStart && r.observedFor <= decisionTime);
   if (inWindow.length < 90) return missing(sourceId, "fewer than 90 funding settlements in (T-90d, T]");
   let latest = inWindow[0]!;
-  for (const r of inWindow) if (r.observedFor > latest.observedFor) latest = r;
+  let oldest = inWindow[0]!;
+  for (const r of inWindow) {
+    if (r.observedFor > latest.observedFor) latest = r;
+    if (r.observedFor < oldest.observedFor) oldest = r;
+  }
+  if (oldest.observedFor - windowStart > DAY_MS) return missing(sourceId, "gap");
   const latestRate = latest.value as number;
   const countLessEq = inWindow.filter((r) => (r.value as number) <= latestRate).length;
   return value((100 * countLessEq) / inWindow.length, latest.availableAt, sourceId);
@@ -173,6 +217,7 @@ function computeOiChange3dPct(rows: readonly SourceRow[], symbol: string, source
   const target = latest.observedFor - 3 * DAY_MS;
   const atOrBefore = oiRows.find((r) => r.observedFor <= target);
   if (!atOrBefore) return missing(sourceId, "no OI observation at or before latest - 3d");
+  if (target - atOrBefore.observedFor > DAY_MS) return missing(sourceId, "gap");
   const pct = (Number(latest.value) / Number(atOrBefore.value) - 1) * 100;
   return value(pct, latest.availableAt, sourceId);
 }
@@ -195,6 +240,8 @@ function computeEtfFlow1d(rows: readonly SourceRow[], key: string, sourceId: Sou
 function computeEtfFlow5d(rows: readonly SourceRow[], key: string, sourceId: SourceId): FeatureValue {
   const latest5 = latestNRows(rows, key, "netFlowUsd", 5);
   if (latest5.length < 5) return missing(sourceId, "fewer than 5 ETF flow rows available");
+  const span = latest5[0]!.observedFor - latest5[4]!.observedFor;
+  if (span > 9 * DAY_MS) return missing(sourceId, "gap");
   const sum = latest5.reduce((a, r) => a + Number(r.value), 0);
   const availableAt = Math.max(...latest5.map((r) => r.availableAt));
   return value(sum, availableAt, sourceId);
@@ -207,6 +254,7 @@ function computeStablecoinSupplyChange7dPct(rows: readonly SourceRow[], sourceId
   const target = latest.observedFor - 7 * DAY_MS;
   const atOrBefore = supplyRows.find((r) => r.observedFor <= target);
   if (!atOrBefore) return missing(sourceId, "no stablecoin supply row >= 7d before the latest");
+  if (target - atOrBefore.observedFor > DAY_MS) return missing(sourceId, "gap");
   const pct = (Number(latest.value) / Number(atOrBefore.value) - 1) * 100;
   return value(pct, latest.availableAt, sourceId);
 }
