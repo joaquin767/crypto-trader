@@ -97,3 +97,34 @@ test("the skill body stays within the style guide's hard budget", () => {
   const words = body.split(/\s+/).filter(Boolean).length;
   assert.ok(words <= 750, `skill body is ${words} words; the guide's hard maximum is ~1000 tokens`);
 });
+
+test("hardening: the skill carries a news protocol with search-only citations and tags", () => {
+  const { body } = readSkill();
+  assert.match(body, /references\/news-protocol\.md/);
+  assert.match(body, /cite only URLs a search returned this session/);
+  assert.match(body, /`confirmed`, `unconfirmed` or `contradicts`/);
+  assert.match(body, /feature values win over any page for numbers/);
+  const protocol = readFileSync(join(SKILL_DIR, "references/news-protocol.md"), "utf-8");
+  assert.match(protocol, /never cite from memory/);
+  assert.match(protocol, /May not: change a plan's numbers/);
+});
+
+test("hardening: the skill applies the theory reference and its thesis checklist", () => {
+  const { body } = readSkill();
+  assert.match(body, /references\/theory\.md/);
+  assert.match(body, /thesis checklist/);
+  const theory = readFileSync(join(SKILL_DIR, "references/theory.md"), "utf-8");
+  for (const family of ["Flows", "Positioning / leverage", "Macro calendar", "Supply", "Sentiment / liquidity"]) {
+    assert.ok(theory.includes(`| ${family} |`), `theory.md must cover the ${family} family`);
+  }
+  assert.match(theory, /Invalidation/);
+  assert.match(theory, /Coincident vs predictive/);
+});
+
+test("hardening: staleness is stated first and every plan gets a stance that changes nothing", () => {
+  const { body } = readSkill();
+  assert.match(body, /State staleness first/);
+  assert.match(body, /`expiresAt` has passed/);
+  assert.match(body, /stance \(`support` \/ `caution` \/ `oppose`\)[^|]*AI plans included; the stance changes nothing/);
+  assert.match(body, /## Output Contract[\s\S]*`Staleness`, `Evidence`[\s\S]*`News`[\s\S]*`Assessment`/);
+});

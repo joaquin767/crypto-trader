@@ -480,6 +480,20 @@ It loads the same `prompts/ai-analyst.md` the batch analyst uses, so both speak 
 | Returns a proposed rule as a JSON block in `research-rules.json` format (`status: experimental`) | Writes to `reports/`, `data/`, `research-rules.json` or `config.json` — you paste the rule yourself and bump `version` on edits |
 | Ends every reply with the report disclaimer | States buy/sell/size/leverage/venue for anything not already in a report's `plans` |
 
+**How it stays current and methodical** (skill 1.1):
+
+- **Staleness first:** it states the report's decision time, the current time, and whether each plan has expired.
+- **News protocol** (`references/news-protocol.md`): up to 5 web searches per reply (one per symbol, plus ETF
+  flows / CPI / unlock queries when those features are missing). Every item is cited with the URL the search
+  returned and tagged `confirmed` (matches a report feature), `unconfirmed` or `contradicts` (the report's
+  number wins and the discrepancy is stated). News never changes a plan's numbers or fills a missing feature.
+- **Theory reference** (`references/theory.md`): five catalyst families (flows, positioning, macro calendar,
+  supply, sentiment) mapped to features and §2.2 evidence, a seven-point thesis checklist, the order in which
+  a report is read, and the errors it must name (coincident vs predictive, look-ahead, narrative drift, vendor
+  disagreement, volatility is not direction).
+- **A stance on every plan,** AI plans included: `support` / `caution` / `oppose` with evidence IDs. The stance
+  is commentary; it changes nothing in the report.
+
 A rule it proposes still owes Gate D0 (unless `forwardOnly`) and Gate D1 before any leverage, like any
 other rule. **AC-39 owner check:** run it once on a real report and confirm the four "never" rules above
 held; `tests/persona-skill.test.ts` checks the mechanical half (file, frontmatter, references, the four
