@@ -4,6 +4,12 @@
 > 20/24 in 1 round). Round-1 findings (19/24) and all five round-2 weaknesses were fixed; the round-2
 > fixes (open-trade counter, disable-reason contract, gate-reset field list, `aiIdeaToRule` fields,
 > `RestClient.getApiKeyInfo` ownership, 429 AC) were applied after acceptance.
+>
+> **Accepted** by the spec factory (rubric v2, score 20/24, 2 rounds) — **Revision 3**. Round-1 (19/24) findings
+> (per-trade manage/review keying, the shared `config.symbols` side effect, AC-112's fifth clause, per-trade Plan
+> Report scope) and all six round-2 weaknesses (`thesis_mismatch` validation, honest test citations in §4.23,
+> AC-99's split, typed `validateManage`/`validateReview`, exact `skillHash` file-set semantics, `--revise`
+> sync-freshness) were fixed; the round-2 fixes were applied after acceptance.
 
 Status: **Revision 2 — accepted spec. Phases 1–4 implemented; Phase 4b (AI analyst channel) implemented,
 defaulting to the `claude-cli` provider (the owner's Claude subscription via the locally installed CLI, no
@@ -14,6 +20,15 @@ gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`; AC-39's mechanical h
 `tests/persona-skill.test.ts`, its owner run stays manual.** Revision 2 adds the AI analyst channel (§4.15, §5.13, §6.8, §8.4) at
 the owner's request: Claude participates in each daily recommendation.
 
+Status: **Revision 3 — drafted 2026-09-17 at the owner's request; Phase 6 (persona decision channel) is
+NOT implemented.** Revision 3 makes the interactive persona (§4.7) the *decision layer* (§3 P9, §4.20–4.23,
+§5.15, §6.9, §8.5, Phase 6): each day the persona picks today's plan from the report's rule plans, the
+report's AI plans, or an idea of its own — or no trade — and a new CLI (`npm run decide`) validates that
+choice, sizes it with the **existing** `planTrade`, and writes a committed decision artifact plus an
+owner-facing **Plan Report** that says exactly what to place and exactly when to come back. It also narrows
+`config.symbols` to `["BTC/USDT", "ETH/USDT"]` (owner requirement, §13 A27). Everything in revisions 1–2 stays
+as written: the persona still never sets size, leverage or venue, and execution stays 100% manual (P4).
+
 Owner (every module this spec creates or changes):
 `src/research/` (new), `src/journal/` (new), `src/backtest-daily/` (new), `src/server/journal-server.ts` (new),
 `src/server/public/journal.html` (new), `src/config.ts`, `src/strategy/walkforward.ts` (export-only change),
@@ -21,7 +36,14 @@ Owner (every module this spec creates or changes):
 `research-rules.json` (new), `tests/research-*.test.ts`, `tests/journal-*.test.ts`, `tests/backtest-daily-*.test.ts` (new),
 `src/research/ai/` (new), `prompts/ai-analyst.md` (new), `tests/ai-*.test.ts` (new),
 `src/bybit/rest.ts` (additive only: new method `getApiKeyInfo(): Promise<{ readOnly: 0 | 1; permissions: Record<string, string[]> }>` wrapping `GET /v5/user/query-api`; no existing method changes, so the auto-trader is unaffected),
-`.claude/skills/crypto-fundamental-analyst/SKILL.md` (new), `package.json` (scripts + 2 dependencies, §10.1).
+`.claude/skills/crypto-fundamental-analyst/SKILL.md` (new), `package.json` (scripts + 2 dependencies, §10.1),
+`src/decision/` (new, revision 3), `scripts/decide-daily.ts` (new, revision 3), `tests/decision-*.test.ts` (new, revision 3),
+`.claude/skills/crypto-fundamental-analyst/references/decision-protocol.md` (new, revision 3) and edits to that skill's
+`SKILL.md` (revision 3, §4.23); revision 3 also edits, additively, `src/config.ts` (`persona` block), `src/research/rules.ts`
+and `src/research/planner.ts` (the `PlanOrigin` union and two optional provenance fields — `planTrade`'s body is unchanged),
+`src/journal/trade-analytics.ts` (`byOrigin.persona`, `chosenByPersona`, `ClosedTradeReview.basedOnRuleKey`),
+`src/server/journal-server.ts` (resolving a `persona-*` `planId`), `src/research/report.ts` (persona thesis loading),
+`config.json` + `research-rules.json` (symbols) and `package.json` (the `decide` script).
 
 Purpose: the 5-minute auto-trading strategy has a confirmed negative edge. This spec replaces it —
 as the *thing the owner acts on* — with a once-per-day, catalyst/fundamental-informed system on
@@ -43,6 +65,10 @@ measured edge — each channel is measured separately, so the owner learns wheth
 - **§8** validation gates D0/D1 — the only path to real capital and to leverage > 1x.
 - **§9** severity-tiered, phased plan with the go/no-go sentence.
 - **§10–§14** constraints, out of scope, verification, assumptions, considered alternatives.
+- **Revision 3 (persona decision channel)** is concentrated in: §3 P9, §4.20–4.23, §5.6a (the owner-facing
+  **Plan Report**, including the come-back timeline), §5.15 (the typed contract and the fail-closed
+  validation table), §6.9 (AC-98..AC-118), §7's persona rows, §8.5 (gating) and Phase 6 in §9. Read §5.6a
+  first if what you need is "what do I place, and when do I come back".
 
 Severity tiers (same scheme as `specs/profit-target-roadmap.md:48-54`):
 
@@ -70,10 +96,24 @@ report shows both channels side by side; the owner decides. Rules only produce p
 after they pass Gate D0 (historical holdout) and Gate D1 (forward paper); AI ideas only after Gate D1
 in its forward-only form (§8.4).
 
+**Revision 3 adds the decision layer.** After the report exists, the owner opens the interactive persona
+(§4.7) and asks for today's decision. The persona reads the report, checks news under its own protocol, and
+chooses exactly one of: a `kind:"plan"` plan from the report's rules channel, a `kind:"plan"` plan from the
+report's AI channel, an idea of its own, or **no trade** — with a stance recorded for every plan in the
+report. It emits that choice as a `DailyDecisionInput` JSON block and runs `npm run decide -- --date <date>`,
+the **only** writer: the CLI validates the choice against the report (fail closed, §5.15), sizes it with the
+same `planTrade` the other two channels use, and writes `data/decisions/<date>.json` (committed, write-once)
+plus a **Plan Report** `reports/<date>.decision.md` that states, in one page, which orders the owner places,
+inside which window, and exactly when to come back — both for a position that has closed and for one still
+open (§5.6, owner requirement 4). The persona channel is gated like the AI channel: forward-only, Gate D1
+only, paper and leverage 1 until it passes (§8.5).
+
 Operating context:
 
 - Venue: Bybit V5, linear perpetuals (existing client `src/bybit/rest.ts`, SDK `bybit-official-ts-sdk`).
 - Capital: `maxCapitalUsd` from `config.json` (currently $100 per `specs/profit-target-roadmap.md:65`).
+- Candidates (revision 3): `config.symbols = ["BTC/USDT", "ETH/USDT"]` — the only symbols any channel, the
+  persona included, may propose (§13 A27).
 - Decision cadence: once per UTC day. Holding period: 1–10 days per rule.
 - Execution: 100% manual. The system never holds a key with trade permission (§3 P4).
 - Final reviewer of every rule, gate artifact, AI output, and trade: the owner.
@@ -98,6 +138,11 @@ Operating context:
 | E9 | Walk-forward stats helpers exist and are exported. | `src/strategy/walkforward.ts:101` (`median`), `:109` (`percentile`), `:120` (`binomialUpperTail`) |
 | E10 | Funding P&L since a timestamp is already fetchable. | `src/bybit/connector.ts:895` (`getFundingPnlSince(sinceMs)`) |
 | E11 | Test glob is non-recursive: only `tests/*.test.ts` runs. New tests in subdirectories would silently not run. | `package.json:8` |
+| E12 (rev 3) | `planTrade` is pure and takes every sizing input explicitly — config bag, open-trade count, breaker flag, live-trade count, ladder flag, instrument filter and decision time — so a third channel can size through it **without modifying it**. | `src/research/planner.ts:127-139` (signature), `:148-229` (no I/O, no clock read) |
+| E13 (rev 3) | The "non-rule channel = one synthetic `forwardOnly` rule whose id is a hash of the channel's instructions" pattern already exists and works: `aiIdeaToRule` builds it and `runAiAnalyst` feeds it to the same `planTrade`. Revision 3 copies that shape for the persona instead of inventing a second one. | `src/research/ai/analyst.ts:81-100` (`aiIdeaToRule`), `:268-278` (synthesized outcome → `planTrade`) |
+| E14 (rev 3) | `promptVersionHash` deliberately hashes only behaviour-changing inputs and excludes budget, pricing, `cliPath`, timeout and channel status. `skillHash` (§5.15) follows the same line, so a config tweak never resets a track record and a prompt edit always does. | `src/research/ai/analyst.ts:62-74` |
+| E15 (rev 3) | The shipped persona skill forbids producing plans in two places, so revision 3's decision gates are a **deliberate amendment** to a stated rule, not an oversight: "Discuss only (a) rule outputs present in the report … or (b) proposed rule definitions" and "Never state buy, sell, size, leverage, or venue for anything not in the report's `plans`". | `.claude/skills/crypto-fundamental-analyst/SKILL.md:18`, `:22` |
+| E16 (rev 3) | The three example rules all list `["APT/USDT", "SOL/USDT"]`. Narrowing `config.symbols` to BTC + ETH **without editing them** makes `parseRuleSet`'s "symbols ⊆ config.symbols" check fail, so `research:daily` would exit 2 every day. The rules file must change in the same commit as the config. | `research-rules.json:10`, `:30`, `:53`; the check is `src/research/rules.ts:144` (`if (!configSymbols.includes(s))` → issue), reached from `parseRuleSet` (`:184`, `:200`) |
 
 ### 2.2 External evidence on data availability and on edge (researched 2026-09-16)
 
@@ -133,18 +178,31 @@ cannot create one (E1).
 - **P2 — Point-in-time or it didn't happen.** A feature may be used at decision time `T` only if the
   data behind it had `availableAt <= T`. Snapshots are write-once. Backtests use declared,
   conservative availability lags for history that was not snapshotted live.
-- **P3 — Two accountable channels, no unaccountable opinions.** Every plan in a report comes from
-  exactly one channel, recorded in `TradePlan.origin`: a versioned declarative rule in
-  `research-rules.json` (`"rules-file"`), or a verified AI analyst idea (`"ai-analyst"`, §5.13). AI
-  ideas pass through the same planner, sizing, leverage and gates as rules; the AI never sets size,
-  leverage or venue. Every AI claim must cite evidence the system can verify (a snapshot feature value
-  or a URL returned by the API's own search results); unverifiable claims are dropped, not shown as
-  fact. The interactive persona (§4.7) produces no plans. Reports carry the line:
+- **P3 — Accountable channels, no unaccountable opinions.** Every plan comes from exactly one channel,
+  recorded in `TradePlan.origin`: a versioned declarative rule in `research-rules.json` (`"rules-file"`), a
+  verified AI analyst idea (`"ai-analyst"`, §5.13), or — revision 3 — a validated persona decision
+  (`"persona"`, §5.15). AI ideas and persona decisions pass through the same planner, sizing, leverage and
+  gates as rules; neither ever sets size, leverage or venue. Every AI **and persona** claim must cite evidence
+  the system can verify (a snapshot feature value, or — for the AI channel only — a URL returned by the API's
+  own search results); unverifiable claims are dropped, not shown as fact. The persona's own web searches are
+  *not* captured by the system, so its web references are recorded as `unverified` and can never be an idea's
+  only evidence (§5.15). The daily report (§5.6) still carries only rule and AI plans; the persona's choice
+  lives in its own artifacts. Every report, Plan Report and persona reply carries the line:
   `Generated analysis for the owner's review. Not investment advice.`
 - **P8 — The AI is an unvalidated source until measured.** The AI channel's ideas are `forwardOnly`
   (§8.4): its model has seen historical prices up to its training cutoff, so no backtest of it is
   honest. Its assessments of rule plans never change those plans; they are recorded and attributed
   so their value is measured (`byAiStance`, §5.9).
+- **P9 — The persona decides, the system sizes and measures.** (Revision 3.) The interactive persona (§4.7)
+  chooses *which* plan is today's plan — a report rule plan, a report AI plan, an idea of its own, or no
+  trade. It never chooses *how much*: whatever it picks, the executed plan is produced by the existing
+  `planTrade` (§5.5) from the same `PlannerConfig`, breaker state, open-trade count, instrument filters and
+  decision time as any other plan, is recorded with `origin: "persona"`, and is journaled, gated and measured
+  like any other channel (§5.15, §8.5). The persona never sets size, leverage or venue, and never writes a
+  file: the only writer is `npm run decide` (§5.15), which refuses anything it cannot verify against that
+  day's report (P1, P3). A persona choice that picks another channel's plan records `basedOnPlanId`, so the
+  source rule's "chosen" record stays visible (§5.9) — but it credits the persona channel's track record, not
+  the source rule's.
 - **P4 — Read-only by construction.** The system holds only a Bybit API key without trade or withdraw
   permission and verifies that at startup. Humans place orders.
 - **P5 — Leverage is an output, never an input.** Size comes from `risk = riskPerTradePercent × maxCapitalUsd`
@@ -173,6 +231,22 @@ fixtures. Adapters do I/O and are tested with recorded payloads.
  journal-server: exchange-sync (read-only I/O) ──► manual-journal ──► trade-analytics (pure) ──► SSE/HTML
 ```
 
+Decision layer (revision 3) — the persona is an interactive step *between* the report and the owner's hands:
+
+```
+ reports/<date>.{json,md}  ──►  owner + persona skill (§4.7, §4.23)  ──►  DailyDecisionInput (JSON block in chat)
+                                        │ report plans + AI plans + news + theory            │
+                                        │ (the persona never writes a file)                  ▼
+                                                            scripts/decide-daily.ts (§4.22) --mode plan|manage|review
+                                                                      │
+                                    decision/decide.ts (pure) ────────┤ validate (fail closed) ─► personaIdeaToRule ─► planTrade (§5.5, unchanged)
+                                                                      │                                   │
+                                    decision/plan-report.ts (pure) ◄──┘                                    ▼
+                                             │                                      data/decisions/<date>.json   (committed, write-once)
+                                             ▼                                      data/decisions/<date>.manage.<tradeId>.json / .review.<tradeId>.json
+                                    reports/<date>.decision.md  ──►  owner places orders by hand  ──►  journal (§4.11)
+```
+
 | Module | Responsibility | Pure? |
 |--------|----------------|-------|
 | 4.1 `src/research/sources/*.ts` | One adapter per source (§5.2). Fetch, validate shape, return typed rows with `availableAt`. | No |
@@ -181,7 +255,7 @@ fixtures. Adapters do I/O and are tested with recorded payloads.
 | 4.4 `src/research/rules.ts` | Parse/validate `research-rules.json`; evaluate conditions → `RuleOutcome`. | Yes |
 | 4.5 `src/research/planner.ts` | Rule outcome + price + config → `TradePlan` (size, leverage, liq buffer) per P5. | Yes |
 | 4.6 `src/research/report.ts` | Assemble `DailyReport`; render JSON + Markdown; apply circuit-breaker suppression. | Yes (render) |
-| 4.7 `.claude/skills/crypto-fundamental-analyst/SKILL.md` | Interactive persona for *authoring and critiquing rules* and discussing a report. Its domain instructions are loaded from the same `prompts/ai-analyst.md` used by §4.15, so both speak with one voice. Produces no plans (P3). | n/a |
+| 4.7 `.claude/skills/crypto-fundamental-analyst/SKILL.md` | Interactive persona for *authoring and critiquing rules*, discussing a report, and — revision 3 — **deciding today's plan** (§4.23, §5.15). Its domain instructions are loaded from the same `prompts/ai-analyst.md` used by §4.15, so both speak with one voice. It still writes nothing and still never states size, leverage or venue: it emits a `DailyDecisionInput` block that `npm run decide` validates and sizes (P9). | n/a |
 | 4.8 `src/backtest-daily/history-store.ts` | Backfilled history with declared availability lags (§10.3). | No |
 | 4.9 `src/backtest-daily/daily-sim.ts` | Simulate plans on 1h klines: entry, stop/target hit order, time exit, taker fees, funding. | Yes |
 | 4.10 `src/backtest-daily/gate-d0.ts` | Holdout verdict, bootstrap CI, permutation test, holdout budget ledger. | Yes |
@@ -193,7 +267,11 @@ fixtures. Adapters do I/O and are tested with recorded payloads.
 | 4.16 `src/research/ai/verify.ts` | Check every AI evidence ref against features and returned search results; drop unverifiable items; cap idea count. | Yes |
 | 4.17 `src/research/ai/anthropic-client.ts` | The only module importing `@anthropic-ai/sdk`: implements `AiClientPort`; persists raw response to the day's snapshot dir. | No |
 | 4.18 `src/research/ai/budget.ts` | Usage/cost ledger `data/ai-usage.jsonl`; month-to-date spend check before any call. | No |
-| 4.19 `prompts/ai-analyst.md` | Versioned system prompt (role, evidence strength table §2.2, output rules). Part of `promptVersionHash`. | n/a |
+| 4.19 `prompts/ai-analyst.md` | Versioned system prompt (role, evidence strength table §2.2, output rules). Part of `promptVersionHash` **and of `skillHash` (§5.15)**. | n/a |
+| 4.20 `src/decision/decide.ts` (revision 3) | Validate a `DailyDecisionInput` against that date's report (fail closed), synthesize the persona rule, call `planTrade`, assemble `DailyDecision` and `OwnerProtocol`. | Yes |
+| 4.21 `src/decision/plan-report.ts` (revision 3) | Render the owner-facing Plan Report Markdown (orders, execute window, gap rule, come-back timeline) from a `DailyDecision` + the `DailyReport`. | Yes |
+| 4.22 `scripts/decide-daily.ts` (revision 3) | The **only** writer of `data/decisions/` and `reports/*.decision.md`: reads stdin/`--input`, loads report + journal + config, calls §4.20/§4.21, enforces write-once/`--revise`, sets exit codes. | No |
+| 4.23 `.claude/skills/crypto-fundamental-analyst/` (revision 3) | Three new decision gates — `decide today's plan`, `manage open position`, `review closed trade` — plus `references/decision-protocol.md`. Produces the JSON block and may invoke §4.22; still writes nothing itself. | n/a |
 
 The existing auto-trader (`src/main.ts`) is **not modified or deleted** by this spec (§11).
 
@@ -354,17 +432,19 @@ export interface RuleDefinition {
   id: string;                         // /^[a-z0-9-]{3,48}$/
   version: number;                    // integer >= 1, bumped on any change
   description: string;
-  evidence: string[];                 // IDs from §2.2, e.g. ["X1"]; may be empty only if status is "experimental" or origin is "ai-analyst" (AI evidence lives in AiIdea.refs)
+  evidence: string[];                 // IDs from §2.2, e.g. ["X1"]; may be empty only if status is "experimental" or origin is "ai-analyst"/"persona" (their evidence lives in AiIdea.refs / PersonaIdea.refs)
   status: "experimental" | "holdout-passed" | "paper-passed" | "retired";
   symbols: string[];                  // subset of config.symbols
   side: "long" | "short";
-  entryWhenAll: Condition[];          // length >= 1 for origin "rules-file"; empty for origin "ai-analyst"
+  entryWhenAll: Condition[];          // length >= 1 for origin "rules-file"; empty for origin "ai-analyst" and "persona"
   invalidateWhenAny: Condition[];     // thesis invalidation, re-checked while a trade is open
   stopAtrMultiple: number;            // (0, 10]
   targetRMultiple: number;            // (0, 20]
   maxHoldDays: number;                // integer 1..10
   forwardOnly: boolean;               // true if any feature lacks point-in-time history (§10.3)
-  origin: "rules-file" | "ai-analyst";// parseRuleSet requires "rules-file"; "ai-analyst" rules are built only by aiIdeaToRule (§5.13)
+  origin: "rules-file" | "ai-analyst" | "persona";
+  // parseRuleSet requires "rules-file"; "ai-analyst" rules are built only by aiIdeaToRule (§5.13);
+  // "persona" rules only by personaIdeaToRule / the report-plan copy in decide.ts (§5.15, revision 3)
 }
 
 export interface RuleSet { schemaVersion: 1; rules: RuleDefinition[]; }
@@ -404,17 +484,24 @@ export interface PlannerConfig {
   maxOpenManualTrades: number;     // from ManualTradingConfig; compared against openTradeCount
 }
 
+export type PlanOrigin = "rules-file" | "ai-analyst" | "persona";   // "persona" added in revision 3 (§5.15)
+
 export type TradePlan =
   | {
-      kind: "plan"; planId: string; ruleId: string; ruleHash: string; origin: "rules-file" | "ai-analyst";
+      kind: "plan"; planId: string; ruleId: string; ruleHash: string; origin: PlanOrigin;
       symbol: string; side: "long" | "short";
       referencePrice: number; stopPrice: number; targetPrice: number; expiresAt: number;
       quantity: number; notionalUsd: number; riskUsd: number; leverage: number; marginUsd: number;
       estLiquidationPrice: number; liqToStopRatio: number; estRoundTripFeeUsd: number;
       venueIntent: "paper" | "live";  // "live" only if rule.status === "paper-passed" (§8)
       maxHoldDays: number;            // copied from the rule; used by exit classification (§5.8a)
+      /** Revision 3, persona provenance. Both OPTIONAL so `planTrade` is not modified: it never sets
+       *  them, and `src/decision/decide.ts` attaches them afterwards (§5.15 `withPersonaProvenance`).
+       *  Set only on a `origin: "persona"` plan whose choice was `kind: "report-plan"`. */
+      basedOnPlanId?: string | null;   // the report planId the persona chose
+      basedOnRuleKey?: string | null;  // "<that plan's ruleId>@<first 8 chars of its ruleHash>" (§5.9 key format)
     }
-  | { kind: "rejected"; ruleId: string; origin: "rules-file" | "ai-analyst"; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing" };
+  | { kind: "rejected"; ruleId: string; origin: PlanOrigin; symbol: string; reason: "liq_too_close" | "size_below_min" | "atr_missing" | "breaker_tripped" | "max_open_trades" | "instrument_missing" };
 
 /** Pure. Returns 1 unless rule.status === "paper-passed";
  *  then liveLadderCap if liveClosedTradesForRule < 20 or ladderResetByBreaker, else maxLeverage. */
@@ -501,6 +588,92 @@ export function buildReport(input: {
 export function renderReportMarkdown(r: DailyReport): string;
 ```
 
+#### 5.6a Plan Report — `reports/<date>.decision.md` (revision 3, normative layout)
+
+`DailyReport` is **unchanged** by revision 3: the daily report still carries only rule and AI plans, and
+`renderReportMarkdown` is not modified. The persona's decision is rendered separately by
+`renderPlanReport` (§4.21, §5.15) into `reports/<date>.decision.md` — the single page the owner acts on.
+This is owner requirement 4 ("be very clear on the plan report and when I have to execute it and when I
+have to come back"), so the layout below is normative: sections in this order, with these headings, and
+section 2's table present in **every** Plan Report, including a `no-trade` one.
+
+| # | Heading | Must contain |
+|---|---------|--------------|
+| — | `# Plan Report — <dateUtc>` | the decision line (symbol, side, channel, `persona-<hash8>`), `decidedAt` in UTC **and** UTC−3, the source report path + its `sha256`, its `decisionTime` and `completeness`, and `basedOnPlanId` when the choice was `report-plan` |
+| 1 | `## 1. Execute now — the orders you place by hand` | venue (`paper` ⇒ "place nothing on Bybit, record it in the journal"), margin mode `isolated`, leverage, quantity, the 3-row order table (entry / reduce-only stop / reduce-only take-profit) with prices and quantity, `riskUsd`, `estRoundTripFeeUsd`, `estLiquidationPrice` + `liqToStopRatio`, the **execute window** (`decidedAt` → `expiresAt` in UTC and UTC−3), the **gap rule** band, and the exact recording step (paper: `POST /api/paper/entry` with this `planId`; live: link the synced position). A `no-trade` decision replaces the whole section with `**No trade today.** <reason>`; sections 2, 4 and 7 still follow, because "no new trade" does not mean "nothing to do" — positions opened on earlier days still have come-back dates and their own manage artifacts. |
+| 2 | `## 2. When to come back` | the timeline table `\| When \| You do \| Then \|` with, at minimum, one row whose *When* cell names the **next daily report** (00:15 UTC / 21:15 UTC−3 the evening before), one whose *When* cell contains `Position closed`, one whose *When* cell contains `still open`, one naming the **hard time exit** date (`maxHoldDays`), and one intraday row whose *You do* cell contains the literals `journal dashboard` and `alerts only`. The `Position closed` row's *You do* cell names the paper-exit recording step (`POST /api/paper/exit` with `exitKind`) for a `paper` venue, because a paper position closes only when the owner records it. Every artifact path printed here is the **per-trade** one, `data/decisions/<date>.manage.<tradeId>.json` / `.review.<tradeId>.json` (§5.15) |
+| 3 | `## 3. Why this plan` | the persona's `rationale` and, for a `persona-idea`, its thesis, catalysts and `invalidateWhenAny` conditions in plain words |
+| 4 | `## 4. Stances on every plan in today's report` | one row per `kind:"plan"` plan in the report: `planId`, channel (`rules-file` / `ai-analyst`), stance, reasons — chosen plan marked `← chosen` |
+| 5 | `## 5. News checked` | `\| title \| url \| date \| tag \|`, tags as the persona's news protocol (`confirmed` / `unconfirmed` / `contradicts`), or the literal `News: not checked` |
+| 6 | `## 6. Not verified by the system` | every `unverified` web ref and every validator warning, with the sentence that web references are the persona's own searches and are **not** captured by the system |
+| 7 | `## 7. Other open positions` | one row per **other** `status:"open"` journal trade (every open trade whose id is not this decision's own): `tradeId`, symbol, side, `planId`, and the per-trade manage artifact path for today. Omitted only when there is no other open trade; then the section reads `None.` |
+| — | last line | the §5.6 disclaimer, verbatim |
+
+**Scope of one Plan Report (per-trade, not per-day).** Sections 1–3 describe **this decision's own trade and
+nothing else**: its orders, its execute window, its time exit, its come-back rows. The owner can hold up to
+`maxOpenManualTrades` positions, and a position opened three days ago is governed by **its own** Plan Report and
+by its own per-trade manage artifacts — never by today's. Section 7 exists so today's page still *names* those
+other positions and where their instructions live, without pretending to restate them: one
+`npm run decide -- --mode manage --trade <id>` call, and one artifact, per open trade (§5.15).
+
+Literal example (numbers from AC-11's inputs; UTC−3 is the owner's local time, §13 A28):
+
+```markdown
+# Plan Report — 2026-09-18
+
+**BTC/USDT LONG** · channel `persona` (`persona-3f9a1c2b`, experimental → paper) · decided 2026-09-18 00:41 UTC (2026-09-17 21:41 UTC−3)
+Based on report plan `2026-09-18:etf-flow-momentum:BTC/USDT` · report `reports/2026-09-18.json` (sha256 `8c1d4f0a…`), decisionTime 2026-09-18 00:15 UTC, completeness `complete`
+
+## 1. Execute now — the orders you place by hand
+
+Venue **paper** — place nothing on Bybit; record it in the journal. Margin mode: **isolated**. Leverage: **1x**. Quantity: **0.0005 BTC** (notional $30.00, margin $30.00).
+
+| # | Order | Type | Price | Quantity | Reduce-only |
+|---|-------|------|-------|----------|-------------|
+| 1 | Entry — BUY | market | ~60,000.00 (reference) | 0.0005 | no |
+| 2 | Stop loss — SELL | stop-market | 58,000.00 | 0.0005 | **yes** |
+| 3 | Take profit — SELL | limit | 64,000.00 | 0.0005 | **yes** |
+
+Risk if stopped: **$1.00** (1.0% of $100). Est. round-trip fee: $0.033. Est. liquidation 30,300.00 — 14.85× the stop distance away (1x isolated: liquidation sits about half-way to zero).
+
+**Execute window:** 2026-09-18 00:41 UTC → **2026-09-18 06:41 UTC** (2026-09-17 21:41 → 2026-09-18 03:41 UTC−3). After it closes, do not enter: wait for tomorrow's report.
+**Gap rule:** do not enter if the mark is more than **500.00** away from 60,000.00 (0.25 × ATR14d 2,000.00) — i.e. outside **59,500.00 – 60,500.00**. If it is outside, do not enter.
+**Record it:** paper → `npm run journal` → `POST /api/paper/entry {"planId":"2026-09-18:persona-3f9a1c2b:BTC/USDT","fillPrice":<your fill>,"time":<ms>}`.
+
+## 2. When to come back
+
+| When | You do | Then |
+|------|--------|------|
+| **Every day at 00:15 UTC (21:15 UTC−3 the evening before), after the timer has run** | Read `reports/<date>.md`, then open the persona | It runs `manage open position` or `review closed trade` **once per trade** and writes each call through `npm run decide` |
+| **Position closed** — stop 58,000.00 hit, target 64,000.00 hit, or the time exit below | Paper: record the exit the same day with `POST /api/paper/exit {"tradeId":"<tradeId>","fillPrice":<price>,"time":<ms>,"exitKind":"stop"\|"target"\|"time"}` (the journal has no exchange to see it). Live: start `npm run journal` (it syncs on startup and every 30 s) and check `GET /api/state` shows `lastSync.status: "ok"`. Then, at the **next** daily report, ask the persona to `review closed trade` for this trade | `data/decisions/<date>.review.<tradeId>.json` — R, exit kind, adherence, thesis verdict, lesson |
+| **Position still open** at the next daily report | Ask the persona to `manage open position` for this trade | `data/decisions/<date>.manage.<tradeId>.json` with exactly one of `hold` / `tighten stop to <price>` / `close now` — you execute it by hand that morning |
+| **2026-09-23 (maxHoldDays 5) — hard time exit** | Close the position yourself that day at whatever price it is | Record the exit with `exitKind: "time"` (paper: `POST /api/paper/exit`; live: the sync picks it up, you set the exit kind in the dashboard) |
+| **Intraday, any time** | Nothing. The **journal dashboard**'s **alerts only** — no persona session between daily reports | Nothing to run |
+
+(`<tradeId>` is filled in once you record the entry; until then the journal has no id for this plan.)
+
+## 3. Why this plan
+…
+## 4. Stances on every plan in today's report
+| planId | channel | stance | reasons |
+|--------|---------|--------|---------|
+| `2026-09-18:etf-flow-momentum:BTC/USDT` ← chosen | rules-file | support | … |
+| `2026-09-18:ai-analyst-7d2e:ETH/USDT` | ai-analyst | caution | … |
+## 5. News checked
+| title | url | date | tag |
+## 6. Not verified by the system
+- web ref `https://…` — persona search result, **unverified** (the system does not capture the persona's searches).
+## 7. Other open positions
+
+These are **not** governed by this page — each has its own Plan Report and its own per-trade artifact today:
+
+| tradeId | symbol | side | planId | Today's manage artifact |
+|---------|--------|------|--------|-------------------------|
+| `7c1f…` | ETH/USDT | long | `2026-09-15:persona-3f9a1c2b:ETH/USDT` | `data/decisions/2026-09-18.manage.7c1f….json` |
+
+Generated analysis for the owner's review. Not investment advice.
+```
+
 ### 5.7 Manual journal — `src/journal/manual-journal.ts`
 
 ```ts
@@ -525,6 +698,14 @@ export interface ManualTrade {
   notes: string;                    // owner free text, pre- and post-trade
   createdAt: number; updatedAt: number;
 }
+
+// Revision 3: `ManualTrade` has no `origin` field of its own — a trade's channel is
+// `plannedSnapshot.origin` (`"rules-file" | "ai-analyst" | "persona"`, §5.5 `PlanOrigin`), and its
+// persona provenance is `plannedSnapshot.basedOnPlanId` / `basedOnRuleKey`. Widening `PlanOrigin` is
+// therefore the only change needed here: a persona plan links, paper-records, syncs, classifies and
+// reviews exactly like a rule or AI plan. `aiStanceAtPlan` stays null for persona-origin trades (the
+// batch AI assesses only rule plans); the persona's own stance on the plan it chose lives in
+// `data/decisions/<date>.json`.
 
 export function loadManualJournal(opts?: { path?: string }): ManualTrade[];   // falls back through .bak.1..5; throws JournalUnreadableError if all fail
 export function saveManualJournal(trades: readonly ManualTrade[], opts?: { path?: string }): void; // atomic + rotate 5 backups
@@ -605,6 +786,12 @@ to `thesis_invalidated` only (`PATCH /api/trades/:id/exit-kind`). Paper exits ca
 **Linking.** `POST /api/trades/:id/link {planId}` loads the plan from the latest revision of `reports/<planId date>.json`. It
 returns 409 unless symbol and side match, the trade's first entry time is in `[report decisionTime, plan expiresAt]`, and the plan
 is `kind: "plan"`. `aiStanceAtPlan` comes from that report's `aiAnalyst.assessments`. Never automatic.
+**(Revision 3)** A `planId` whose middle segment starts with `persona-` is **not** in any report: the server loads it from the
+effective (highest-revision) `data/decisions/<planId date>.json` and matches `decision.plan.planId`, returning 404 when that file
+or plan is absent. The window check then uses `[decision.decidedAt, decision.ownerProtocol.executeUntil]` instead of the report's
+— a persona plan's entry window is its own execute window (§5.15), not the report's 12 h `expiresAt`. `aiStanceAtPlan` is null for
+these. The same resolution applies to `POST /api/paper/entry {planId, …}`, and to `research:daily`'s `openTradeThesis` step, which
+loads an open persona trade's rule from that file's `personaRule` (missing/unreadable file → `not_evaluable`, as for AI rules).
 
 **Paper trades.** `recordPaperEntry`: quantity = plan quantity, one fill at `fillPrice`, `feeUsd = notional × roundTripFeePercent / 200`.
 `recordPaperExit`: same fee rule, owner-supplied `exitKind`; funding 0.
@@ -661,7 +848,8 @@ export interface LiveTradeView {
 }
 
 export interface ClosedTradeReview {
-  tradeId: string; ruleId: string | null; ruleHash: string | null; origin: "rules-file" | "ai-analyst" | null; aiStanceAtPlan: AiStance | null;
+  tradeId: string; ruleId: string | null; ruleHash: string | null; origin: PlanOrigin | null; aiStanceAtPlan: AiStance | null;
+  basedOnRuleKey: string | null;             // revision 3: plannedSnapshot.basedOnRuleKey, null unless origin "persona" on a chosen report plan
   plannedRiskUsd: number | null; netPnlUsd: number; feesUsd: number; fundingUsd: number;
   rMultiple: number | null;                  // netPnlUsd / plannedRiskUsd; null if unplanned
   entrySlippagePct: number | null;           // vs plannedSnapshot.referencePrice, signed adverse-positive
@@ -675,9 +863,15 @@ export interface AggregateStats {
   expectancyR: number | null; totalNetPnlUsd: number; maxDrawdownR: number | null;
   adherenceRate: number | null;              // planned & followedPlan / closedTrades
   byRule: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;   // key "<ruleId>@<first 8 chars of ruleHash>" so rule versions never blend
-  byOrigin: Record<"rules-file" | "ai-analyst", { closed: number; expectancyR: number | null; netPnlUsd: number }>;
+  byOrigin: Record<PlanOrigin, { closed: number; expectancyR: number | null; netPnlUsd: number }>;  // "persona" added in revision 3; every key always present, zero-filled
   /** Rule-origin trades only, grouped by the AI's stance on their plan. Answers "does the AI's opinion predict outcomes?" */
   byAiStance: Record<AiStance | "none", { closed: number; expectancyR: number | null; winRate: number | null }>;
+  /** Revision 3. Closed persona-origin trades whose decision picked another channel's plan, grouped by that
+   *  plan's rule: key = `basedOnRuleKey` ("<ruleId>@<first 8 chars of ruleHash>", same format as `byRule`).
+   *  Answers "which rules does the persona actually pick, and how do those picks do?" Persona ideas of the
+   *  persona's own (no `basedOnPlanId`) are not counted here — they appear only in `byOrigin.persona`.
+   *  It counts *closed trades*, not decisions: decisions that were never executed live in `data/decisions/`. */
+  chosenByPersona: Record<string, { closed: number; expectancyR: number | null; netPnlUsd: number }>;
 }
 
 export function liveView(t: ManualTrade, pos: SyncResult["positions"][number] | null, thesis: ThesisState, now: number, lastSyncAt: number, staleAfterMs: number): LiveTradeView;
@@ -884,7 +1078,8 @@ export function replayRule(opts: ReplayOptions): ReplayResult;
   `--slippage-bps` is accepted in gate modes only when ≥ 5 (costs may only become more conservative). The pre-registration git
   checks run against the rules file actually loaded, and an untracked file counts as uncommitted.
 - **AI ids in d1-check:** `ai-analyst-<hash8>` selects trades whose full `ruleHash` starts with that 8-char prefix; rules-file ids
-  always match the full hash exactly.
+  always match the full hash exactly. **(Revision 3)** `persona-<hash8>` behaves identically: treated as `forwardOnly`, hash taken
+  from the id prefix, `d0Holdout` null, minimum 60 closed paper trades (§8.5).
 
 #### d1-check
 
@@ -944,6 +1139,20 @@ export interface AiAnalystConfig {
 // Config gains `ai?: Partial<AiAnalystConfig>`; credential read from CLAUDE_CODE_OAUTH_TOKEN or
 // ANTHROPIC_API_KEY (provider "claude-cli"), or from ANTHROPIC_API_KEY / the SDK default credential
 // chain (provider "anthropic-api") — never from config.json, either way.
+
+// ── Revision 3 ───────────────────────────────────────────────────────────────────────────────
+export interface PersonaConfig {
+  executionWindowMs: number;      // > 0, default 21_600_000 (6 h). The Plan Report's execute window: decidedAt + this (§13 A29)
+  maxEntryGapAtr: number;         // > 0, default 0.25. Gap rule: skip the entry if |mark − referencePrice| > this × atr14d (§13 A30)
+  channelStatus: "experimental" | "paper-passed";  // default "experimental"; owner-edited after the persona channel's Gate D1 (§8.5)
+  passedSkillHash: string | null; // default null; loadConfig throws ConfigError when channelStatus is "paper-passed" and this is null
+  ownerTimeZone: string;          // IANA zone for the Plan Report's second clock column, default "America/Argentina/Buenos_Aires" (UTC−3)
+  decisionsRoot: string;          // default "data/decisions"
+  skillRoot: string;              // default ".claude/skills/crypto-fundamental-analyst" — the skillHash input root (§5.15)
+}
+// Config gains `persona?: Partial<PersonaConfig>`; loadConfig validates and throws ConfigError
+// (src/config.ts:176) on violation. There is no `enabled` flag: the channel is a CLI the owner runs by
+// hand, so not running it is how it stays off. No credential and no network is involved (§5.15).
 ```
 
 ### 5.12 CLIs and scripts (`package.json`)
@@ -954,6 +1163,7 @@ export interface AiAnalystConfig {
 "backfill":        "node --experimental-strip-types scripts/backfill-history.ts --config ./config.json"
 "backtest:daily":  "node --experimental-strip-types scripts/backtest-daily.ts --config ./config.json"
 "journal":         "node --experimental-strip-types src/server/journal-server.ts --config ./config.json"
+"decide":          "node --experimental-strip-types scripts/decide-daily.ts --config ./config.json"
 ```
 
 - `snapshot:daily [--date YYYY-MM-DD] [--revision N] [--snapshot-root DIR]` (Phase 1; later called internally by `research:daily`) — scheduled decision time is `<date>T00:15:00Z` (default: today UTC). **Effective decision time** (used for features, reports and plans): if every snapshot's `fetchedAt` lies in `[scheduled, scheduled + 2h]` it is the latest `fetchedAt` (`mode: "live"`); otherwise it is the scheduled time (`mode: "scheduled"`, e.g. backdated runs). Without this, sources whose `availableAt` is `fetchedAt` would always be filtered by P2 in live runs. Output adds `scheduledDecisionTime`, `decisionTime`, `decisionMode`; runs every adapter for `config.symbols`, writes snapshots, prints `{ sources: [{sourceId,status,statusDetail,rows}], features: FeatureVector[] }` as JSON to stdout. Exit 0 whenever snapshots were written (any status); exit 3 if any snapshot for the date exists and no `--revision`; exit 4 if decision time is in the future.
@@ -970,6 +1180,12 @@ export interface AiAnalystConfig {
   `reports/<date>.json` + `.md` (**the rules report is persisted before any AI call**) → if `ai.enabled`: `runAiAnalyst`
   → `attachAiAnalyst` → rewrite both report files. An AI failure never deletes or alters the already-written rules report content.
 - `research:daily --no-ai` skips the AI step for that run (section status `"disabled"`, reason `"--no-ai"`).
+- **(Revision 3)** `decide --date YYYY-MM-DD [--mode plan|manage|review] [--trade <tradeId>] [--input <file>] [--revise] [--decisions-root DIR] [--reports-root DIR] [--journal-path FILE] [--sync-status-path FILE] [--rules-path FILE] [--ai-rules-root DIR] [--skill-root DIR]` —
+  reads the `DailyDecisionInput` (or `ManageInput` / `ReviewInput`) as JSON from `--input` or stdin; `--mode`
+  defaults to `plan`. `--trade` is **required** for `manage` and `review` (those artifacts are keyed by
+  `(date, tradeId)`, §5.15) and rejected for `plan`. Writes only under `persona.decisionsRoot` and `reports/`; one
+  invocation handles exactly one trade. Exit codes in §5.15; the
+  `--*-root` / `--*-path` flags exist so tests can redirect I/O and are not part of the owner's workflow.
 
 ### 5.13 AI analyst — `src/research/ai/`
 
@@ -1196,6 +1412,466 @@ export interface TradeChartData {
   - The ±2σ band is drawn lighter than ±1σ. The legend reads `Real price`, `Volatility range ±1σ / ±2σ (not a forecast)`.
   - Every dynamic string is HTML-escaped.
 
+### 5.15 Persona decision channel — `src/decision/` (revision 3, Phase 6)
+
+The persona (§4.7) decides; this module validates, sizes, records and renders. **Nothing here calls the
+network or an LLM**: the persona is a human-driven Claude Code session, and its output reaches the system
+only as a JSON block on stdin. `npm run decide` is the only writer of `data/decisions/` and
+`reports/*.decision.md` (P9).
+
+#### Types — `src/decision/types.ts`
+
+```ts
+import type { AiEvidenceRef, AiStance } from "../research/ai/types.ts";            // §5.13 shapes, reused verbatim
+import type { Condition, RuleDefinition, RuleSet, ThesisState } from "../research/rules.ts";
+import type { InstrumentFilter, PlannerConfig, TradePlan } from "../research/planner.ts";
+import type { DailyReport } from "../research/report.ts";
+import type { FeatureVector } from "../research/types.ts";
+import type { ExitKind, ManualTrade } from "../journal/types.ts";
+import type { SyncResult } from "../journal/exchange-sync.ts";                     // §5.8
+import type { ClosedTradeReview } from "../journal/trade-analytics.ts";
+import type { PersonaConfig } from "../config.ts";                                 // §5.11
+
+/** A news item the persona checked. Recorded, never verified by the system (P3, revision 3). */
+export interface PersonaNewsItem { title: string; url: string; date: string | null; tag: "confirmed" | "unconfirmed" | "contradicts"; }
+
+/** The persona's opinion of ONE plan in the report. One is required for every kind:"plan" plan. */
+export interface PersonaStance { planId: string; stance: AiStance; reasons: string[]; }   // reasons: >= 1 non-empty string
+
+/** Same shape as AiIdea (§5.13) — deliberately, so both non-rule channels are sized by one code path. */
+export interface PersonaIdea {
+  symbol: string; side: "long" | "short"; thesis: string; catalysts: string[]; refs: AiEvidenceRef[];
+  invalidateWhenAny: Condition[]; stopAtrMultiple: number; targetRMultiple: number; maxHoldDays: number; confidence: number;
+}
+
+export type PersonaChoice =
+  | { kind: "report-plan"; planId: string }        // a kind:"plan" plan of that date's report, either channel
+  | { kind: "persona-idea"; idea: PersonaIdea }    // the persona's own idea
+  | { kind: "no-trade"; reason: string };          // trimmed length >= 1
+
+export interface DailyDecisionInput {
+  dateUtc: string;                 // YYYY-MM-DD, must equal --date
+  choice: PersonaChoice;
+  stances: PersonaStance[];        // exactly one per kind:"plan" plan in that date's report, any order
+  news: PersonaNewsItem[];         // may be empty ("News: not checked")
+  rationale: string;               // trimmed length >= 1; rendered as Plan Report §3
+}
+
+export type DecisionRejectionCode =
+  | "schema_invalid" | "date_mismatch" | "unknown_plan" | "not_a_plan" | "expired" | "rule_changed"
+  | "unverifiable_feature" | "web_only_evidence" | "no_evidence" | "symbol_not_configured"
+  | "out_of_range" | "missing_stance" | "duplicate_stance" | "empty_reason" | "replan_rejected"
+  // --mode manage / --mode review only. One code per distinguishable cause, so a rejection says what to do:
+  | "trade_not_found"      // no journal trade with that id at all
+  | "trade_not_open"       // --mode manage, trade exists but status !== "open"
+  | "trade_not_closed"     // --mode review, trade exists but status !== "closed"
+  | "trade_not_planned"    // trade exists in the right state but has no plannedSnapshot (unplanned fill)
+  | "thesis_mismatch";     // --mode manage, input.thesis !== the ThesisState the CLI computed
+// `not_a_plan` is plan-mode only (the chosen report entry is `kind:"rejected"`); manage/review use the
+// four trade-state codes above instead, so "not a plan" never has to mean four different things.
+
+export interface DecisionRejection { code: DecisionRejectionCode; path: string; detail: string; }
+
+export interface DecisionValidation {
+  ok: boolean;
+  rejections: DecisionRejection[];
+  /** Web refs are recorded, never verified: the persona's searches happen in its own session and the
+   *  system cannot see them (P3). Always `verified: false`; present so the Plan Report §6 can list them. */
+  unverifiedWebRefs: { path: string; url: string }[];
+}
+
+export interface OwnerProtocolOrder {
+  slot: 1 | 2 | 3; kind: "entry" | "stop" | "take-profit"; action: "buy" | "sell";
+  orderType: "market" | "stop-market" | "limit"; price: number | null; quantity: number; reduceOnly: boolean;
+}
+
+export interface OwnerProtocol {
+  decidedAt: number; executeFrom: number; executeUntil: number;   // executeFrom = decidedAt; executeUntil = decidedAt + persona.executionWindowMs
+  referencePrice: number; atr14d: number; maxEntryGapAbs: number; // maxEntryGapAbs = persona.maxEntryGapAtr × atr14d
+  entryBand: [number, number];                                    // [referencePrice − maxEntryGapAbs, referencePrice + maxEntryGapAbs]
+  venueIntent: "paper" | "live"; leverage: number; marginMode: "isolated";
+  orders: OwnerProtocolOrder[];                                   // exactly 3, slots 1..3, stop and take-profit reduceOnly true
+  recordVia: "paper-api" | "live-link";                           // "paper-api" iff venueIntent "paper"
+  timeExitOnOrBefore: number;                                     // decidedAt + maxHoldDays × 24 h — the hard time exit, planning estimate from decidedAt
+  nextReportAt: number;                                           // next <date>T00:15:00Z strictly after decidedAt
+  ownerTimeZone: string;                                          // persona.ownerTimeZone, for the Plan Report's second clock
+}
+
+export interface DailyDecision {
+  schemaVersion: 1; dateUtc: string; revision: number;            // 0 for <date>.json, n for <date>.r<n>.json
+  decidedAt: number; skillHash: string;
+  reportPath: string; reportSha256: string; reportDecisionTime: number;
+  input: DailyDecisionInput; validation: DecisionValidation;
+  plan: Extract<TradePlan, { kind: "plan" }> | null;              // null iff choice.kind === "no-trade"
+  /** The synthesized persona rule (personaIdeaToRule / reportPlanToPersonaRule) that produced `plan`.
+   *  Persisted here — not in data/ai-rules/ — so a later report can run `evaluateThesis` on an open
+   *  persona-origin trade and so the plan is reproducible from the artifact alone. Null iff plan is null;
+   *  a decision file that cannot be read makes that trade's thesis `not_evaluable` (same rule as §5.13). */
+  personaRule: RuleDefinition | null;
+  basedOnPlanId: string | null; basedOnRuleKey: string | null;    // non-null iff choice.kind === "report-plan"
+  ownerProtocol: OwnerProtocol | null;                            // null iff plan is null
+  disclaimer: "Generated analysis for the owner's review. Not investment advice.";
+}
+
+// Manage and review artifacts are keyed by (dateUtc, tradeId), never by date alone: with
+// `maxOpenManualTrades` up to 5 the owner can hold several positions at once, and two trades managed on
+// the same morning are unrelated records. `tradeId` is therefore part of each artifact's identity, and
+// write-once, `--revise` and "effective artifact" are all scoped to that pair (see the artifact table).
+export interface ManageInput {
+  dateUtc: string; tradeId: string;   // must equal --date and --trade
+  action: { kind: "hold" } | { kind: "tighten-stop"; price: number } | { kind: "close-now" };
+  thesis: ThesisState; reasons: string[]; news: PersonaNewsItem[];   // reasons: >= 1 non-empty string
+}
+export interface ManageDecision { schemaVersion: 1; dateUtc: string; tradeId: string; revision: number; writtenAt: number; skillHash: string;
+  input: ManageInput; validation: DecisionValidation; tradePlanId: string | null; currentStopPrice: number; disclaimer: DailyDecision["disclaimer"]; }
+
+export interface ReviewInput {
+  dateUtc: string; tradeId: string;   // must equal --date and --trade
+  rMultiple: number; exitKind: ExitKind; followedPlan: boolean;
+  thesisVerdict: "confirmed" | "invalidated" | "inconclusive"; lesson: string;   // trimmed length >= 1
+}
+export interface ReviewDecision { schemaVersion: 1; dateUtc: string; tradeId: string; revision: number; writtenAt: number; skillHash: string;
+  input: ReviewInput; validation: DecisionValidation; computed: ClosedTradeReview; disclaimer: DailyDecision["disclaimer"]; }
+```
+
+#### Functions — `src/decision/decide.ts` (pure) and `plan-report.ts` (pure)
+
+```ts
+export interface DecisionContext {
+  dateUtc: string; report: DailyReport; reportPath: string; reportSha256: string;
+  features: FeatureVector[];                 // rebuilt from that date's snapshots at the report's decisionTime
+  configSymbols: readonly string[];
+  plannerConfig: PlannerConfig;
+  personaCfg: PersonaConfig;
+  skillHash: string;
+  ruleSet: RuleSet;                          // research-rules.json, to re-load a chosen rule plan's rule
+  aiRules: Record<string, RuleDefinition>;   // data/ai-rules/<planId>.json, to re-load a chosen AI plan's rule
+  journal: readonly ManualTrade[];
+  breaker: { tripped: boolean; trigger: string | null; details: string };
+  liveClosedTradesForPersona: number; ladderResetByBreaker: boolean;
+  instruments: Record<string, InstrumentFilter | null>;
+  now: number;                               // = decidedAt
+}
+
+/** Pure. Validates the input against the report and the config. Never throws; collects EVERY rejection
+ *  (like parseRuleSet, §5.4) so one run tells the persona everything that is wrong. Order of checks does
+ *  not short-circuit across independent items. See the rejection table below. */
+export function validateDecision(input: DailyDecisionInput, ctx: DecisionContext): DecisionValidation;
+
+export interface ManageContext {
+  dateUtc: string; tradeArg: string;            // --trade, as given on the command line
+  trade: ManualTrade | null;                    // journal lookup by id; null = not found
+  /** The thesis the CLI computed itself: `evaluateThesis(rule, fv)` for that trade's rule, resolved the
+   *  same way §5.8a resolves a planId — `research-rules.json` for a rule-origin trade,
+   *  `data/ai-rules/<planId>.json` for an AI-origin one, the decision file's `personaRule` for a
+   *  persona-origin one. `not_evaluable` when the rule or a feature cannot be loaded (never a guess). */
+  computedThesis: ThesisState;
+  personaCfg: PersonaConfig; skillHash: string; now: number;
+}
+
+export interface ReviewContext {
+  dateUtc: string; tradeArg: string;
+  trade: ManualTrade | null;
+  computed: ClosedTradeReview | null;           // reviewClosedTrade(trade, klines1h); null iff trade is null or open
+  personaCfg: PersonaConfig; skillHash: string; now: number;
+}
+
+/** Pure, same discipline as validateDecision: never throws, collects every rejection.
+ *  Rejection tables under "Manage and review modes" below. */
+export function validateManage(input: ManageInput, ctx: ManageContext): DecisionValidation;
+export function validateReview(input: ReviewInput, ctx: ReviewContext): DecisionValidation;
+
+/** Pure. Mirrors aiIdeaToRule (§5.13) exactly, with: id `persona-<skillHash.slice(0,8)>`, version 1,
+ *  description idea.thesis, evidence [], symbols [idea.symbol], side idea.side, entryWhenAll [],
+ *  invalidateWhenAny / stopAtrMultiple / targetRMultiple / maxHoldDays copied from the idea,
+ *  forwardOnly true, origin "persona", and
+ *  status = (cfg.channelStatus === "paper-passed" && cfg.passedSkillHash === skillHash) ? "paper-passed" : "experimental". */
+export function personaIdeaToRule(idea: PersonaIdea, skillHash: string, cfg: PersonaConfig): RuleDefinition;
+
+/** Pure. The rule used to re-plan a chosen report plan: the SOURCE rule's side, stopAtrMultiple,
+ *  targetRMultiple, maxHoldDays and invalidateWhenAny, re-labelled as the persona channel — id
+ *  `persona-<hash8>`, origin "persona", forwardOnly true, entryWhenAll [], evidence [],
+ *  status as in personaIdeaToRule. Sizing inputs are therefore identical to the source plan's. */
+export function reportPlanToPersonaRule(sourceRule: RuleDefinition, skillHash: string, cfg: PersonaConfig): RuleDefinition;
+
+/** Pure. Attaches persona provenance to a plan produced by `planTrade`; changes no number and no
+ *  other field. `planTrade` itself is NOT modified by revision 3 (P9). */
+export function withPersonaProvenance(plan: Extract<TradePlan, { kind: "plan" }>, basedOnPlanId: string | null,
+  basedOnRuleKey: string | null): Extract<TradePlan, { kind: "plan" }>;
+
+/** I/O (reads files, no network). Fully specified below — the hash is a rule id and a gate identity, so
+ *  two implementations must agree byte for byte. A missing or unreadable input throws `SkillHashError`;
+ *  the CLI then exits 5 and writes nothing (fail closed: an unhashable skill cannot have a track record). */
+export class SkillHashError extends Error {}
+export function skillHash(opts?: { skillRoot?: string; promptPath?: string; repoRoot?: string }): string;
+
+/** Pure. Builds the owner protocol from the sized plan and config. `nextReportAt` is the next
+ *  `<date>T00:15:00Z` strictly after decidedAt; `timeExitOnOrBefore` is decidedAt + maxHoldDays × 24 h
+ *  (a planning estimate: once the owner fills, the journal's `hoursToExpiry` is authoritative, §5.8a). */
+export function buildOwnerProtocol(plan: Extract<TradePlan, { kind: "plan" }>, atr14d: number,
+  cfg: PersonaConfig, decidedAt: number): OwnerProtocol;
+
+/** Pure. Renders §5.6a's layout. Every dynamic string is escaped for Markdown table cells (`|` → `\|`);
+ *  every absolute time is printed twice, `<UTC> UTC` and the same instant in `ownerProtocol.ownerTimeZone`. */
+export function renderPlanReport(decision: DailyDecision, report: DailyReport): string;
+
+/** I/O. Declared here for readability, but it LIVES IN `src/journal/manual-journal.ts` next to the
+ *  journal it describes — `src/decision/` only reads it. Last exchange sync, as the journal server
+ *  records it (see "Sync freshness" below). Missing file → null. Unparseable → throws (fail closed,
+ *  never treated as "never synced"). */
+export interface JournalSyncStatus { syncedAt: number; status: SyncResult["status"]; error: string | null; liveSync: "enabled" | "disabled"; }
+export function readSyncStatus(opts?: { path?: string }): JournalSyncStatus | null;
+export function writeSyncStatus(s: JournalSyncStatus, opts?: { path?: string }): void;   // called by the journal server only
+
+export interface DecideArgs {
+  date: string; mode: "plan" | "manage" | "review"; revise: boolean;
+  trade: string | null;            // --trade <journal trade id>; REQUIRED for mode "manage" and "review", rejected for "plan"
+  input: string | null;            // path; null = read stdin
+  configPath: string;              // default "./config.json"
+  decisionsRoot: string;           // default personaCfg.decisionsRoot
+  reportsRoot: string;             // default "reports"
+  journalPath: string;             // default "./manual-journal.json"
+  rulesPath: string;               // default "./research-rules.json"
+  aiRulesRoot: string;             // default "data/ai-rules"
+  skillRoot: string;               // default personaCfg.skillRoot
+  syncStatusPath: string;          // default "<journalPath minus .json>.sync.json", i.e. "./manual-journal.sync.json"
+}
+/** Injected so every test runs offline and deterministically (same shape as research:daily's deps). */
+export interface DecideDeps {
+  now(): number;
+  readStdin(): Promise<string>;
+  fetchKlines?: typeof fetchKlines;   // --mode review only, for reviewClosedTrade's 1h bars (§5.14)
+}
+
+/** I/O. The CLI body (§4.22). Resolves; never rejects for an expected failure — every expected failure
+ *  is an exit code below. Writes nothing unless it returns exitCode 0. */
+export function runDecide(args: DecideArgs, deps: DecideDeps):
+  Promise<{ exitCode: number; message: string; decision: DailyDecision | ManageDecision | ReviewDecision | null; planReport: string | null }>;
+```
+
+#### `skillHash` — exact file set and algorithm (normative)
+
+The hash is the persona channel's rule id **and** its Gate D1 identity, so it is specified to the byte;
+two implementations that disagree would silently split or merge track records.
+
+1. **File set** = every **regular file** under `<skillRoot>` (default `.claude/skills/crypto-fundamental-analyst/`),
+   found **recursively**, **plus** `<promptPath>` (default `prompts/ai-analyst.md`). Not just `*.md`, and not
+   just the `references/` and `assets/` directories that exist today: a new file of any extension, at any
+   depth, is part of the skill and changes the hash.
+2. **Excluded:** dotfiles and dot-directories (any path segment starting with `.`); anything that is not a
+   regular file (directories, sockets, fifos); **symlinks are not followed** and not hashed (a symlinked
+   instruction file would make the hash depend on state outside the repo). Nothing else is excluded — there
+   is no ignore list and no glob library.
+3. **Path form:** POSIX relative path from the repository root (`<repoRoot>`, default `process.cwd()`), forward
+   slashes, no leading `./`.
+4. **Order:** ascending **byte order** of that relative path string (not locale collation).
+5. **Per-file digest:** SHA-256 of the file's **raw bytes** — no newline normalisation, no trimming, no
+   text decoding, so a CRLF or a trailing-newline change is a change.
+6. **Concatenation:** for each file in order, append the UTF-8 string `` `${relPath}\n${sha256Hex}\n` ``.
+7. **Result:** SHA-256 of that concatenation, hex. First 8 chars are the rule id suffix (`persona-<hash8>`).
+8. **Implementation:** `node:fs` only — `readdirSync(root, { recursive: true, withFileTypes: true })` plus
+   `lstatSync` for the symlink check and `readFileSync` for the bytes. No `glob`, no new dependency (§10.1).
+   A read error or a missing `<promptPath>` throws `SkillHashError` (exit 5, nothing written).
+
+#### Validation (fail closed — mirrors §5.13 `verifyAiOutput`)
+
+Any rejection ⇒ **exit 2**, nothing written, every rejection printed as `<code> <path>: <detail>`.
+The table below is `--mode plan` (`validateDecision`); `--mode manage` and `--mode review` have their own
+tables under "Manage and review modes".
+
+| Check | Rejection |
+|-------|-----------|
+| Input is not JSON, or does not match `DailyDecisionInput` | `schema_invalid` |
+| `input.dateUtc !== --date` | `date_mismatch` |
+| `choice.kind === "report-plan"` and no plan in `report.plans` has that `planId` | `unknown_plan` |
+| …the named plan exists but is `kind: "rejected"` | `not_a_plan` |
+| …`now > thatPlan.expiresAt` | `expired` (the report's 12 h entry window, §5.5, has closed — re-run `research:daily` for a fresh report) |
+| …the source rule can no longer be loaded, or its `ruleHash` differs from the plan's | `rule_changed` |
+| `choice.kind === "persona-idea"`: a `{kind:"feature"}` ref whose symbol/feature is not `kind:"value"` in `ctx.features`, or whose `value` differs by more than `1e-9 × max(1, |value|)` | `unverifiable_feature` |
+| …zero refs at all | `no_evidence` |
+| …only `{kind:"web"}` refs (no verified feature ref) | `web_only_evidence` — the persona's searches are not captured by the system, so they can never be an idea's only evidence |
+| …`idea.symbol ∉ configSymbols` | `symbol_not_configured` |
+| …`confidence ∉ [0,1]`, `stopAtrMultiple ∉ (0,10]`, `targetRMultiple ∉ (0,20]`, `maxHoldDays ∉ 1..10` (integer), or an `invalidateWhenAny` condition that `parseRuleSet`'s condition validation would reject | `out_of_range` |
+| `choice.kind === "no-trade"` with `reason.trim() === ""`; or `rationale.trim() === ""`; or a stance with zero non-empty reasons | `empty_reason` |
+| A `kind:"plan"` plan in the report with no stance | `missing_stance` (path = that `planId`) |
+| A stance whose `planId` is not a `kind:"plan"` plan of the report | `unknown_plan` |
+| Two stances for the same `planId` | `duplicate_stance` |
+| `planTrade` returns `kind:"rejected"` for the chosen/synthesized rule | `replan_rejected`, detail = the planner's reason — nothing is written, because there is nothing the owner could place; the persona re-runs with a `no-trade` choice or the owner clears the blocker |
+
+Web refs never cause a rejection on their own: each is recorded in `validation.unverifiedWebRefs` and
+rendered in Plan Report §6.
+
+#### Sizing (P9 — the system sizes, always)
+
+- **`persona-idea`** — `rule = personaIdeaToRule(idea, skillHash, personaCfg)`; synthesized outcome
+  `{ ruleId: "persona-<hash8>", ruleHash: skillHash, symbol, result: "triggered", evidence: <feature refs as {feature: value}> }`;
+  then `planTrade(outcome, rule, fv, plannerConfig, openTradeCount, breakerTripped, dateUtc,
+  liveClosedTradesForPersona, ladderResetByBreaker, instruments[symbol] ?? null, report.decisionTime)`.
+  `planId = <date>:persona-<hash8>:<symbol>` (planTrade's own format).
+- **`report-plan`** — `rule = reportPlanToPersonaRule(sourceRule, skillHash, personaCfg)`, the same
+  synthesized-outcome call with the same `decisionTime`, then
+  `withPersonaProvenance(plan, chosenPlanId, "<sourceRule.id>@<sourceRuleHash.slice(0,8)>")`.
+  Because every sizing input is identical, the planner reproduces the chosen plan's numbers exactly (AC-99);
+  only `planId`, `ruleId`, `ruleHash`, `origin`, `basedOn*` and — once the two channels' `status` differ —
+  `venueIntent`/`leverage` change.
+- **Open-trade count** — `openTradeCount` = the number of `status:"open"` journal trades (both venues) **only**.
+  The report's own plans are not counted: the persona *replaces* them with one decision rather than adding to
+  them, and at most one decision per date is executed (§13 A31).
+- **Breaker, instruments, decision time, `PlannerConfig`** — exactly the values `research:daily` used for that
+  date's report, recomputed from the same sources. A tripped breaker therefore yields `replan_rejected`
+  (`breaker_tripped`) and no decision, as it does for every other channel.
+- **Never** does this module compute a size, a leverage, a venue, a stop or a target of its own.
+
+#### Artifacts and write-once
+
+| Path | Committed? | Rule |
+|------|-----------|------|
+| `data/decisions/<date>.json` | yes (§10.2) | write-once (`wx`, as `snapshot-store.ts`). Second run without `--revise` → exit 3 |
+| `data/decisions/<date>.r<n>.json` | yes | written by `--revise`, `n` = 1, 2, 3…, never overwriting an existing revision; the **effective** decision for a date is the highest existing revision |
+| `data/decisions/<date>.manage.<tradeId>.json` / `.manage.<tradeId>.r<n>.json` | yes | `--mode manage --trade <tradeId>`; write-once, `--revise` and "effective artifact" are scoped to the **(date, tradeId)** pair, so two positions managed on the same morning produce two independent records that never collide |
+| `data/decisions/<date>.review.<tradeId>.json` / `.review.<tradeId>.r<n>.json` | yes | `--mode review --trade <tradeId>`, same per-(date, tradeId) rule |
+| `reports/<date>.decision.md` | no — `reports/` is gitignored (§10.2) | derived; rewritten in full on each successful `--mode plan` run, so it always matches that date's newest decision revision. **Not** rewritten by `--mode manage` or `--mode review`: those artifacts are read directly, and the page's §7 lists the *paths* they will occupy rather than their contents |
+
+**Identity, and what "already acted on" means.** A `--mode plan` artifact is identified by its **date**; a
+`--mode manage` or `--mode review` artifact by the pair **(date, tradeId)**. Everywhere below, "the effective
+artifact" means the highest existing revision *of that identity* — so a `--revise` of this morning's manage
+decision for trade `A` can never touch, shadow or conflict with the one for trade `B` written the same morning.
+`--revise` is refused (**exit 3**, nothing written, the offending id named) when the owner has already acted on
+the artifact being revised:
+
+- `--mode plan` — any journal trade's `planId` equals the effective decision's `plan.planId`.
+- `--mode manage` — any journal event for that `tradeId` exists **after** the effective manage decision's
+  `writtenAt`: a new exit fill, a changed `exitKind`, a `status` change to `closed`, or an `updatedAt` later
+  than `writtenAt`. The instruction has been executed (or overtaken); its record is history, not a draft. The
+  owner's route is a *new* manage decision tomorrow, not a rewritten one.
+- `--mode review` — a review artifact is written after the trade is already closed, so its subject cannot move;
+  `--revise` is allowed for it unless the trade is re-synced into a different `computed` review, in which case
+  the mismatch is caught by the `out_of_range` check instead.
+
+#### Manage and review modes
+
+Both exist so the persona still never writes: it produces the block, the CLI validates and persists it. Both
+require `--trade <id>`, and both refuse it on `--mode plan` (`schema_invalid`). The id must match the block's
+own `tradeId` (`date_mismatch` otherwise, the same way `dateUtc` must match `--date`). The persona loops over
+open positions by calling the CLI **once per trade**, never once per day: one position's `hold` and another's
+`close now` are two artifacts, two exit codes and two records.
+
+**`--mode manage --trade <id>`** (owner requirement 4e) — `validateManage(input, ctx)`:
+
+| Check | Rejection |
+|-------|-----------|
+| Body is not JSON, or does not match `ManageInput`; or `--trade` is missing | `schema_invalid` |
+| `input.dateUtc !== --date`, or `input.tradeId !== --trade` | `date_mismatch` |
+| `ctx.trade === null` (no journal trade with that id) | `trade_not_found` |
+| `ctx.trade.status !== "open"` | `trade_not_open` |
+| `ctx.trade.plannedSnapshot === null` (unplanned fill — nothing to manage against) | `trade_not_planned` |
+| **`input.thesis !== ctx.computedThesis`** | **`thesis_mismatch`**, detail `persona said <input>, system computed <computed>` |
+| `action.kind === "tighten-stop"` and the price does not move the stop **toward** the entry while staying on the correct side of it — long: `plannedSnapshot.stopPrice < price < plannedSnapshot.referencePrice`; short mirrored | `out_of_range` (a "tightened" stop that widens risk, or crosses the entry, is refused) |
+| `action.kind` is not exactly one of `hold` / `tighten-stop` / `close-now`, or `price` is not finite | `schema_invalid` |
+| `reasons` has no non-empty entry | `empty_reason` |
+
+`thesis_mismatch` is the same principle as the review mode's R check: **the persona reports the system's
+state, it never asserts one.** `ctx.computedThesis` comes from `evaluateThesis(rule, fv)` on that day's
+features, with the rule resolved exactly as §5.8a resolves a `planId` — `research-rules.json` for a
+rule-origin trade, `data/ai-rules/<planId>.json` for an AI-origin one, the decision file's `personaRule` for
+a persona-origin one — and is `not_evaluable` when the rule or a feature is unavailable. A persona that says
+`intact` while the system computes `invalidated` has either misread the report or hallucinated the check;
+either way the instruction built on it does not get recorded. The artifact stores `currentStopPrice` so the
+owner's diff is explicit.
+
+**`--mode review --trade <id>`** (owner requirement 4d) — `validateReview(input, ctx)`:
+
+| Check | Rejection |
+|-------|-----------|
+| Body is not JSON, or does not match `ReviewInput`; or `--trade` is missing | `schema_invalid` |
+| `input.dateUtc !== --date`, or `input.tradeId !== --trade` | `date_mismatch` |
+| `ctx.trade === null` | `trade_not_found` |
+| `ctx.trade.status !== "closed"` | `trade_not_closed` |
+| `|input.rMultiple − ctx.computed.rMultiple| > 1e-6`, or `ctx.computed.rMultiple === null` while a number was supplied | `out_of_range` |
+| `input.exitKind !== ctx.computed.exitKind`, or `input.followedPlan !== ctx.computed.followedPlan` (exact match, no tolerance) | `out_of_range` |
+| `thesisVerdict` not one of `confirmed` / `invalidated` / `inconclusive` | `schema_invalid` |
+| `lesson.trim() === ""` | `empty_reason` |
+
+`ctx.computed` is `reviewClosedTrade(trade, klines1h)` (§5.9), reusing the journal server's cached review when
+present. The persona supplies only what the system cannot compute: the thesis verdict and one lesson. The
+artifact stores both the persona's `input` and the `computed` review, so a later disagreement is visible.
+
+#### Sync freshness — `--revise` only
+
+**Evidence.** The last-sync timestamp is `SyncResult.syncedAt` (`src/journal/exchange-sync.ts:263`), but it
+lives **only in the journal server's process memory** (`src/server/journal-server.ts:150`, `:175`) and is served
+at `GET /api/state` as `lastSync` (`:296`); `manual-journal.json` itself stores no sync time — `ManualTrade.updatedAt`
+is the only persisted timestamp. A separate CLI therefore cannot currently know how fresh the journal is.
+
+Phase 6 closes that gap with a **sidecar**, not a network call: the journal server calls `writeSyncStatus`
+after every sync attempt (the `lastSync = result` path, `src/server/journal-server.ts:175`, plus the paper-only
+branch at `:164`), writing `manual-journal.sync.json` — gitignored, next to the journal, holding
+`{ syncedAt, status, error, liveSync }`. `decide` reads it with `readSyncStatus`.
+
+Because "already acted on" is judged from the journal, a stale journal makes that judgement worthless: a fill
+that already happened may simply not be imported yet. So **before** evaluating the "already acted on" rules
+above, `--revise` in modes `plan` and `manage` requires:
+
+- a readable `manual-journal.sync.json` (missing → **exit 5**; unparseable → **exit 5**, never treated as fresh), **and**
+- either `liveSync === "disabled"` (paper-only mode, §5.8a — there is no exchange state to be stale about, so the
+  check passes and the decision records that it was skipped), **or** `status === "ok"` **and**
+  `now − syncedAt <= manual.staleAfterMs` (§5.11, default 120 000).
+
+Otherwise: **exit 5**, message `journal_stale: run the journal server sync first`, nothing written. The owner's
+fix is to start or leave `npm run journal` running — it syncs on startup and every `manual.syncIntervalMs`
+(§5.11, default 30 000; `src/server/journal-server.ts:488-490`) — and confirm `GET /api/state` shows
+`lastSync.status: "ok"`. A first run (no `--revise`) is not gated: it writes a new record rather than
+overwriting a judgement about what the owner has already done.
+
+#### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Decision written; the written artifact's path (and, for `--mode plan`, the Plan Report path) is printed on stdout |
+| 2 | Validation failed (any row of the rejection table), including a missing/ill-placed `--trade` or one naming a trade in the wrong state. Nothing written; every rejection printed |
+| 3 | Precondition: no `reports/<date>.json` (message contains `run research:daily first`); or an artifact **of that identity** — `<date>` for `plan`, `(<date>, <tradeId>)` for `manage`/`review` — exists and `--revise` was not given; or `--revise` was given but the owner has already acted on that artifact (rules above) |
+| 4 | `--date` unparseable, or its `00:15:00Z` decision time is in the future |
+| 5 | `manual-journal.json` unreadable (all backups corrupt, `JournalUnreadableError`), `research-rules.json` unreadable/invalid, `skillHash` cannot be computed (`SkillHashError`), or — on `--revise` in modes `plan`/`manage` — the journal's last sync is missing, unparseable, failed, or older than `manual.staleAfterMs` (`journal_stale: run the journal server sync first`) |
+
+Codes 0/2/3/4/5 mirror `research:daily`'s meanings exactly, so the two CLIs read the same way.
+
+#### Persona skill changes — §4.23 (normative)
+
+`.claude/skills/crypto-fundamental-analyst/` gains three **Decision Gates** rows and one reference file. Its
+existing Hard Rules, Output Contract and disclaimer stay as they are; AC-39's amendment (§6.7) governs (a) and (c).
+
+| New gate | The persona does | It never does |
+|----------|------------------|---------------|
+| `decide today's plan` | Read today's report; run the staleness, theory and news protocols; give a stance on **every** `kind:"plan"` plan; then emit one fenced ```json``` block matching `DailyDecisionInput` and offer to run `npm run decide -- --date <date>`; on a non-zero exit, show the CLI's rejections verbatim and emit a corrected block | Write any file; state a size, leverage, venue, quantity, stop or target of its own; claim the decision is recorded before the CLI exits 0 |
+| `manage open position` | For **each** open journal trade, **one at a time**: re-check `invalidateWhenAny` via the day's report, the news protocol and `openTradeThesis`; copy that trade's `openTradeThesis.state` into the block's `thesis` field **verbatim** (the CLI recomputes it and rejects a mismatch, `thesis_mismatch`); output **exactly one** of `hold` / `tighten stop to <price>` / `close now` with reasons, as a `ManageInput` block naming that `tradeId`, then run `npm run decide -- --mode manage --date <date> --trade <tradeId>`. Two open positions ⇒ two blocks and two commands, never one combined block | Suggest adding to, averaging into, or re-entering a position; propose a stop that widens risk or crosses the entry; batch several trades into one block or one artifact; act on it itself |
+| `review closed trade` | Per closed trade: read the journal's computed review (`GET /api/review/:tradeId`), restate its `rMultiple`, `exitKind` and `followedPlan` unchanged, add the thesis verdict and one lesson, emit a `ReviewInput` block and run `npm run decide -- --mode review --date <date> --trade <tradeId>` | Compute or adjust R, re-classify the exit, grade adherence itself, or review several trades in one block |
+
+Three hard rules are added to the skill. What actually checks each one — stated per rule, because "the tests
+cover it" is the kind of claim that quietly stops being true:
+
+1. **`npm run decide` is the only writer.** The persona never creates, edits or deletes a file — not
+   `data/decisions/`, not `reports/`, not `research-rules.json`, not `config.json`. Its output is a JSON block plus,
+   at most, that one command. *Checked by:* the existing AC-39 (a)/(c) mechanical assertions in
+   `tests/persona-skill.test.ts` (the skill text must still forbid writing and must still forbid stating
+   size/leverage/venue), plus the **[manual]** AC-116 for the behaviour. A text assertion cannot prove a model
+   will not write a file; AC-116 and verification gate 15 are what actually cover that.
+2. **The block must carry a stance for every plan.** A `DailyDecisionInput` whose `stances` miss any `kind:"plan"`
+   plan of that date's report is invalid and the CLI will reject it — the persona states its opinion of the plans
+   it *didn't* pick, every day, so the record can be read back against outcomes. *Checked by:* **AC-104**
+   (`missing_stance`), in the CLI — the enforcement is the validator, not the prose.
+3. **Editing this skill restarts Gate D1 at zero.** `SKILL.md` must carry that sentence verbatim —
+   `Editing this skill restarts the persona channel's Gate D1 at zero.` — because the reader of the skill is the
+   one about to edit it. Every file under the skill directory, plus `prompts/ai-analyst.md`, is hashed into
+   `skillHash` (§5.15), which is the persona channel's rule id and `ruleHash`; changing any of them starts a new
+   60-trade / 45-day count (§8.5). *Checked by:* **AC-121**
+   (the literal sentence is present in `SKILL.md`) and **AC-110** (the hash actually changes when any of those
+   files changes).
+
+`references/decision-protocol.md` (new) holds the `DailyDecisionInput` / `ManageInput` / `ReviewInput` shapes, the
+§5.15 rejection table in the persona's own words, the exact `npm run decide` invocations **including the mandatory
+`--trade <id>` on manage and review and the one-call-per-trade rule**, and the owner-protocol vocabulary (execute
+window, gap rule, the two come-back cases) so the persona's chat answers and the Plan Report say the same thing.
+
 ---
 
 ## 6. Acceptance criteria
@@ -1311,7 +1987,15 @@ Each item maps to at least one test in `tests/` (root level, per E11) unless mar
 
 ### 6.7 Persona (P1)
 - [ ] AC-39 [manual]: `.claude/skills/crypto-fundamental-analyst/SKILL.md` exists, was generated through gentle-ai `skill-creator`, has valid frontmatter, and its instructions state: (a) only discuss rule outputs present in a report or proposed rule definitions in `research-rules.json` format; (b) cite §2.2 evidence IDs and strength for every claim; (c) never state buy/sell/size for anything not in a report's `plans`; (d) always include the §5.6 disclaimer. Owner runs it once on a real report and confirms (a)–(d) hold.
-  *Hardening (2026-09-17, skill 1.1, owner request "always updated on news and the theory"):* the persona may use the Claude Code web search tool under the same discipline as §5.13's batch channel — (e) it cites only URLs a search returned in the same session, tags each item `confirmed` / `unconfirmed` / `contradicts` against the report's features, and the report's feature value wins for any number; news never changes a plan or fills a missing feature; (f) it states the report's staleness (decisionTime, now, expired plans) before any assessment; (g) it applies a method reference (`references/theory.md`: catalyst families mapped to features and §2.2 rows, thesis checklist, order of examination, named errors) and gives a `support`/`caution`/`oppose` stance on every plan, AI plans included, as commentary only. `tests/persona-skill.test.ts` checks (a)–(g) mechanically; the owner run covers behaviour. §11 is unchanged: the persona still produces no plans and writes nothing.
+  *Hardening (2026-09-17, skill 1.1, owner request "always updated on news and the theory"):* the persona may use the Claude Code web search tool under the same discipline as §5.13's batch channel — (e) it cites only URLs a search returned in the same session, tags each item `confirmed` / `unconfirmed` / `contradicts` against the report's features, and the report's feature value wins for any number; news never changes a plan or fills a missing feature; (f) it states the report's staleness (decisionTime, now, expired plans) before any assessment; (g) it applies a method reference (`references/theory.md`: catalyst families mapped to features and §2.2 rows, thesis checklist, order of examination, named errors) and gives a `support`/`caution`/`oppose` stance on every plan, AI plans included, as commentary only. `tests/persona-skill.test.ts` checks (a)–(g) mechanically; the owner run covers behaviour. §11 is unchanged: the persona still produces no plans and writes nothing. *(That last sentence is superseded by the revision-3 amendment below: the persona now produces one decision, still writes nothing.)*
+  *Revision 3 amendment (2026-09-17, owner requirement 1 — the persona becomes the decision layer, §5.15, §6.9):*
+  (a) is widened to allow **one** further output — a `DailyDecisionInput` / `ManageInput` / `ReviewInput` JSON
+  block, whose `choice` may name a plan present in that date's report or carry an idea of the persona's own —
+  and (c) is restated as: **never state size, leverage, venue, stop price, target price or quantity that the
+  persona itself computed**; a plan's numbers may only be restated from the report or from a Plan Report the
+  CLI produced. (b), (d), (e), (f), (g) are unchanged. The persona still writes no file: the JSON block is
+  handed to `npm run decide`, which is the only writer (P9). `tests/persona-skill.test.ts` gains the checks in
+  AC-110/AC-116.
 
 ### 6.7a Trade chart & replay (P1 — review tooling, not a capital gate)
 - [ ] AC-69: `dailySigmaBeforeEntry` on 8 daily closes [100,101,99,102,100,103,101,104] with all closes before entry equals the sample stdev of their 7 log returns (±1e-12); adding a 9th bar whose close time is after entry does not change the result; with 7 eligible bars it returns null.
@@ -1345,6 +2029,45 @@ All tests use a fake `AiClientPort`; no test calls the network.
 - [x] AC-53: Given an open AI-origin trade whose `data/ai-rules/<planId>.json` is missing, then its `openTradeThesis.state === "not_evaluable"`.
 - [ ] AC-54 [manual]: One live call with a real key on a real day's snapshot: response parses, `rawResponsePath` exists, ledger cost within ±20% of the Anthropic console's reported cost for that request (this also verifies `webSearchUsdPerRequest`, A16); owner reads the AI section and signs off in `docs/validation/ai-analyst-smoke-<date>.md`.
 - [ ] AC-54a [manual, claude-cli]: One live CLI run on a real day's snapshot: structured output parses, raw file exists, `listCostUsd` recorded, owner reads the AI section and signs off in `docs/validation/ai-analyst-smoke-<date>.md`.
+
+### 6.9 Persona decision channel (P0 for that channel; revision 3, Phase 6)
+
+The rules and AI channels do not depend on any of these. No test calls the network or an LLM: every test
+feeds `runDecide` a JSON block and fixture report/journal/rules files. Numbering starts at AC-98 because
+AC-70..AC-97 are already taken by §6.4 and §6.7a; AC-113a/b, AC-114a and AC-119 were added in critique
+round 1 (per-trade manage/review keying), and AC-99a, AC-120, AC-121 and AC-122 in round 2
+(`thesis_mismatch`, the skill's D1-reset sentence, `--revise` sync freshness). The `[manual]` AC-116 is
+listed last because it is the owner's end-to-end run, not a unit test.
+
+- [ ] AC-98: Given a fixture report for `2026-09-18` containing rule plan `P` (`kind:"plan"`, origin `rules-file`) and an input choosing `{kind:"report-plan", planId: P.planId}` with a stance for every `kind:"plan"` plan, when `runDecide --mode plan` runs, then exit 0; `data/decisions/2026-09-18.json` exists with `plan.origin === "persona"`, `plan.ruleId === "persona-" + skillHash.slice(0,8)`, `plan.ruleHash === skillHash`, `plan.planId === "2026-09-18:persona-<hash8>:BTC/USDT"`, `basedOnPlanId === P.planId`, `basedOnRuleKey === "<P.ruleId>@<P.ruleHash.slice(0,8)>"`, and `reports/2026-09-18.decision.md` exists.
+- [ ] AC-99: **Sizing equality — same status on both sides.** Given AC-98's inputs with the source rule's `status: "experimental"`, `persona.channelStatus: "experimental"` and `persona.passedSkillHash: null` (so both rules resolve to the same status), then the written `plan` equals `P` within 1e-9 in **every** sizing and level field: `symbol`, `side`, `referencePrice`, `stopPrice`, `targetPrice`, `expiresAt`, `quantity`, `notionalUsd`, `riskUsd`, `leverage`, `marginUsd`, `estLiquidationPrice`, `liqToStopRatio`, `estRoundTripFeeUsd`, `venueIntent` and `maxHoldDays`. Only `planId`, `ruleId`, `ruleHash`, `origin`, `basedOnPlanId` and `basedOnRuleKey` differ.
+- [ ] AC-99a: **Sizing equality — persona channel behind the source rule.** Given the same inputs but the source rule at `status: "paper-passed"` (so `P` has `venueIntent: "live"` and `leverage` from the §8.3 ladder) while `persona.channelStatus: "experimental"`, then `referencePrice`, `stopPrice`, `targetPrice`, `expiresAt` and `maxHoldDays` still equal `P`'s within 1e-9, and `leverage === 1`, `venueIntent === "paper"` — the persona channel's own gate governs (§8.5). `quantity`, `notionalUsd`, `riskUsd`, `marginUsd`, `estLiquidationPrice` and `liqToStopRatio` are those the planner returns for leverage 1 from the same inputs, not `P`'s.
+- [ ] AC-100: **Persona idea sizing.** Given AC-11's numeric inputs and a `persona-idea` with `stopAtrMultiple 2`, `targetRMultiple 2`, one feature ref matching the report's `close`, then the plan has `riskUsd 1`, `quantity 0.0005`, `notionalUsd 30`, `stopPrice 58000`, `targetPrice 64000`, `leverage 1`, `venueIntent "paper"` and `planId "2026-09-18:persona-<hash8>:BTC/USDT"` (±1e-9).
+- [ ] AC-101: Given a `persona-idea` ref `{kind:"feature", symbol:"BTC/USDT", feature:"fundingRate8hAvg3d", value:0.0002}` while the FeatureVector holds `0.0003`, then exit 2, `rejections` contains `{code:"unverifiable_feature", path:"choice.idea.refs[0]"}`, and neither `data/decisions/2026-09-18.json` nor `reports/2026-09-18.decision.md` exists.
+- [ ] AC-102: Given an idea whose only ref is `{kind:"web"}`, then exit 2 with `web_only_evidence`; given zero refs, `no_evidence`; given one matching feature ref **plus** the web ref, then exit 0 and the written decision's `validation.unverifiedWebRefs` contains that url, and Plan Report §6 contains it with the word `unverified`.
+- [ ] AC-103: Given an idea on `SOL/USDT` while `config.symbols` is `["BTC/USDT","ETH/USDT"]`, then exit 2 `symbol_not_configured`; given `confidence 1.5`, `stopAtrMultiple 0`, `targetRMultiple 21` or `maxHoldDays 11`, then exit 2 `out_of_range` with one rejection per offending field.
+- [ ] AC-104: Given a report with 3 `kind:"plan"` plans and stances for only 2, then exit 2 with exactly one `missing_stance` whose `path` is the un-stanced `planId`; given a stance for a `planId` not in the report, `unknown_plan`; given two stances for the same `planId`, `duplicate_stance`; given a stance for a `kind:"rejected"` entry, `unknown_plan`.
+- [ ] AC-105: Given `now > P.expiresAt` and a `report-plan` choice naming `P`, then exit 2 `expired` and nothing is written; given the same `now` with a `persona-idea` choice, then exit 0 (a fresh idea carries its own window, `ownerProtocol.executeUntil = decidedAt + executionWindowMs`).
+- [ ] AC-106: Given `{kind:"no-trade", reason:"   "}`, then exit 2 `empty_reason`; given `{kind:"no-trade", reason:"breaker tripped and no thesis survives the CPI print"}`, then exit 0, the decision has `plan: null` and `ownerProtocol: null`, and the Plan Report's section 1 is `**No trade today.**` followed by the reason, while section 2's timeline table, section 4's stances table and section 7's other-open-positions table are still present.
+- [ ] AC-107: **Write-once.** Given a successful run, when `runDecide` runs again for the same date without `--revise`, then exit 3 and `data/decisions/<date>.json`'s bytes are unchanged; with `--revise`, then exit 0, `<date>.r1.json` is written, `<date>.json` is still byte-identical, a third run with `--revise` writes `<date>.r2.json`, and `reports/<date>.decision.md` renders the r2 decision.
+- [ ] AC-108: Given a journal containing a trade whose `planId` equals the effective decision's `plan.planId`, when `runDecide --revise` runs, then exit 3, the message names that trade id, and no file is written or modified.
+- [ ] AC-109: Given no `reports/<date>.json`, then exit 3 with a message containing `run research:daily first`; given a `manual-journal.json` whose file and all 5 backups are corrupt, then exit 5 and nothing written; given `--date 2099-01-01`, then exit 4; given a `--skill-root` missing `SKILL.md`, then exit 5 (`SkillHashError`) and nothing written.
+- [ ] AC-110: **skillHash sensitivity.** Given one byte changed in `SKILL.md`, in any `references/*.md`, in any `assets/*`, or in `prompts/ai-analyst.md`, then `skillHash` changes and so does the persona rule id `persona-<hash8>`; given a **new file added under `references/` with a non-`.md` extension** (e.g. `references/checklist.txt` or `references/table.csv`), then it changes too — the file set is every regular file under the skill root, not a `*.md` glob (§5.15); given a file's trailing newline changed from LF to CRLF, then it changes (raw bytes, no normalisation); given only file mtimes change, or a dotfile is added under the skill root, or `config.json`'s `persona.executionWindowMs` / `maxEntryGapAtr` / `channelStatus` / `passedSkillHash` change, then `skillHash` is identical; given the same tree hashed twice, then the two values are equal (path order is byte order, not locale collation).
+- [ ] AC-111: **Gating.** Given `persona.channelStatus "experimental"`, or `"paper-passed"` with `passedSkillHash` ≠ the current `skillHash`, then `personaIdeaToRule` and `reportPlanToPersonaRule` return `status:"experimental"` and every persona plan has `leverage 1`, `venueIntent "paper"`; given `"paper-passed"` with a matching hash, then `status:"paper-passed"` and `effectiveMaxLeverage` applies the §8.3 ladder (`liveLadderCap` for the first 20 closed live persona trades).
+- [ ] AC-112: **Plan Report contents.** Given AC-98's decision, then `reports/<date>.decision.md` contains: the execute window rendered as both `<from> UTC → <until> UTC` and the same two instants in `persona.ownerTimeZone`; the gap-rule band `[referencePrice − 0.25·atr14d, referencePrice + 0.25·atr14d]` with both bounds; exactly three order rows, of which the stop and take-profit rows say `yes` in the reduce-only column and the entry row says `no`; a `| When | You do | Then |` table with at least one row whose *When* cell contains `Position closed`, one containing `still open`, one containing `00:15 UTC`, one naming the `maxHoldDays` time-exit date, and one intraday row whose *You do* cell contains both literals `journal dashboard` and `alerts only`; the per-trade artifact paths `data/decisions/<date>.manage.` and `data/decisions/<date>.review.` (never the date-only `…<date>.manage.json` form); the `planId` in the recording instruction; and the §5.6 disclaimer as the last non-empty line.
+- [ ] AC-113: **Manage mode (per trade).** Given an open journal trade `A` with `plannedSnapshot` long, referencePrice 100, stopPrice 90: `--mode manage --trade A` with `{kind:"tighten-stop", price: 85}` → exit 2 `out_of_range`; with `price: 101` → exit 2 `out_of_range`; with `price: 95` → exit 0 and `data/decisions/<date>.manage.A.json` holds that one action, `tradeId: "A"` and `currentStopPrice: 90`; with `{kind:"hold"}` and empty `reasons` → exit 2 `empty_reason`; with a `tradeId` no journal trade has → exit 2 `trade_not_found`; with a `tradeId` that is `closed` → exit 2 `trade_not_open`; with an open but unplanned trade (`plannedSnapshot === null`) → exit 2 `trade_not_planned`; with no `--trade` at all, or with `--trade` on `--mode plan`, or with a `--trade` that differs from the block's `tradeId` → exit 2 (`schema_invalid` / `date_mismatch` respectively).
+- [ ] AC-113a: **Two trades managed the same day.** Given open trades `A` and `B` and the same `--date`: `--mode manage --trade A` then `--mode manage --trade B` both exit 0 and write `…manage.A.json` and `…manage.B.json`; neither file's bytes change when the other is written; a **second** `--trade A` run that date without `--revise` → exit 3 naming `A` while `…manage.B.json` is untouched; with `--revise` → `…manage.A.r1.json` is written and `…manage.A.json` stays byte-identical.
+- [ ] AC-113b: **Acted-on manage decisions are not revisable.** Given `…manage.A.json` written at `writtenAt`, when trade `A` subsequently gains an exit fill, a changed `exitKind`, a `status: "closed"`, or any `updatedAt > writtenAt`, then `--mode manage --trade A --revise` exits 3, names the trade, and writes nothing (mirrors AC-108); with no such later journal event, `--revise` succeeds.
+- [ ] AC-114: **Review mode (per trade).** Given a closed journal trade `A` whose `reviewClosedTrade` gives `rMultiple -1.1`, `exitKind "stop"`, `followedPlan true`: `--mode review --trade A` with `rMultiple: -1.1`, matching `exitKind`/`followedPlan` and a non-empty `lesson` → exit 0 and `data/decisions/<date>.review.A.json` contains `tradeId: "A"`, `input` and `computed`; with `rMultiple: -0.9` → exit 2 `out_of_range`; with `exitKind: "target"` → exit 2 `out_of_range`; with an empty `lesson` → exit 2 `empty_reason`; with a still-open trade → exit 2 `trade_not_closed`; with an unknown id → exit 2 `trade_not_found`; with no `--trade` → exit 2.
+- [ ] AC-114a: **Two trades reviewed the same day.** Given closed trades `A` and `B` reviewed on the same `--date`, then `…review.A.json` and `…review.B.json` both exist and neither is overwritten or shadowed by the other; a second review of `A` that date without `--revise` → exit 3 naming `A`.
+- [ ] AC-115: **Symbols.** Given the shipped `research-rules.json`, then every rule's `symbols` is a subset of `["BTC/USDT","ETH/USDT"]` and no rule lists any other symbol; given a rule listing a symbol outside `config.symbols`, then `parseRuleSet` still raises a validation issue (existing behaviour, AC-8); given a persona idea or an AI idea outside `config.symbols`, then it is rejected (`symbol_not_configured`, AC-103 / AC-44). `config.symbols` is not hard-coded anywhere in `src/` — the pair is a config value (§13 A27).
+- [ ] AC-117: **Linking a persona plan.** Given a decision file whose `plan.planId` is `2026-09-18:persona-<hash8>:BTC/USDT` and a journal trade entered inside `[decidedAt, ownerProtocol.executeUntil]`, then `POST /api/trades/:id/link` with that planId returns 200, sets `plannedSnapshot` to that plan and `aiStanceAtPlan` to `null`; entered after `executeUntil` → 409; a planId whose decision file is absent → 404; `POST /api/paper/entry` with the same planId records a paper trade against it. A `persona-*` planId is never looked up in `reports/<date>.json`.
+- [ ] AC-118: **Persona thesis.** Given an open persona-origin trade and a decision file whose `personaRule.invalidateWhenAny` is met by the next day's features, then that day's report has `openTradeThesis[i].state === "invalidated"`; given the decision file missing or unreadable, then `"not_evaluable"` (never a guess).
+- [ ] AC-119: **Plan Report scope with other positions open.** Given one other `status:"open"` journal trade at decision time, then the Plan Report's `## 7. Other open positions` section lists exactly that trade — its `tradeId`, symbol, side, `planId` and today's `data/decisions/<date>.manage.<tradeId>.json` path — sections 1–3 mention no other trade's orders or exits, and the decision's own trade does not appear in section 7; given no other open trade, section 7 reads `None.`; given two, both rows appear.
+- [ ] AC-120: **`thesis_mismatch`.** Given an open rule-origin trade whose rule's `invalidateWhenAny` is met by that date's features (so `evaluateThesis` returns `invalidated`) and a `ManageInput` with `thesis: "intact"` and `action: {kind:"hold"}`, then `--mode manage --trade A` exits 2 with `{code:"thesis_mismatch", path:"thesis"}` whose detail names both states, and `data/decisions/<date>.manage.A.json` is not created; given the same input with `thesis: "invalidated"`, then exit 0. Given a persona-origin trade whose decision file is missing, the CLI computes `not_evaluable`, so `thesis: "not_evaluable"` is accepted and `thesis: "intact"` is rejected — the persona never asserts a thesis the system did not compute.
+- [ ] AC-121: **Skill states the D1 reset.** `tests/persona-skill.test.ts` asserts `.claude/skills/crypto-fundamental-analyst/SKILL.md` contains the literal sentence `Editing this skill restarts the persona channel's Gate D1 at zero.` (exact string, including the final period); removing or rewording it fails the test.
+- [ ] AC-122: **`--revise` requires a fresh journal sync.** Given `manual.staleAfterMs` 120 000 and `manual-journal.sync.json` holding `{liveSync:"enabled", status:"ok", syncedAt: now − 300_000}`, then `--mode plan --revise` and `--mode manage --trade A --revise` both exit **5** with a message containing `journal_stale: run the journal server sync first`, and nothing is written; with `syncedAt: now − 60_000` both proceed to the normal "already acted on" checks; with `status:"failed"`, or the file missing, or the file unparseable, then exit 5 (never treated as fresh); with `liveSync:"disabled"` (paper-only mode) the check is skipped and the run proceeds regardless of `syncedAt`; a **first** run without `--revise` never consults the file and never exits 5 for staleness.
+- [ ] AC-116 [manual]: **First supervised cycle.** The owner runs one full cycle end to end and signs it off in `docs/validation/persona-decision-cycle-<date>.md`: (1) `npm run research:daily`; (2) asks the persona for today's decision and reads the JSON block before it runs anything; (3) `npm run decide -- --date <date>` succeeds and the owner confirms the Plan Report's numbers against `reports/<date>.json` by hand; (4) the owner places the paper orders inside the execute window and records the entry via `POST /api/paper/entry`; (5) at the next daily report the owner runs `manage open position` for that trade (`--trade <id>`) and confirms the artifact `data/decisions/<date>.manage.<tradeId>.json` matches what the persona said in chat — and, if a second position is open, that it produced its own separate artifact; (6) after the position closes, `review closed trade` produces an artifact whose `rMultiple` equals the dashboard's. The sign-off states explicitly whether the Plan Report answered "what do I place" and "when do I come back" without the owner asking a follow-up question — that is what requirement 4 is for.
 
 ---
 
@@ -1387,6 +2110,25 @@ Default for every row: **halt the dependent output and surface it; never substit
 | AI: search results contain instructions (prompt injection) | Output is schema-constrained and verified; the AI has no tools that change state; it can at worst produce a paper-only idea flagged in the AI channel. | Closed |
 | AI: served by fallback model | Recorded in `servedByModel`; `promptVersionHash` is unchanged (it hashes the configured model), and the Markdown shows `served by <model>`. | n/a (visible) |
 | AI: disagrees with a rule plan (`oppose`) | Rule plan unchanged; stance shown next to it and recorded on the trade (`aiStanceAtPlan`). | n/a |
+| **Persona decision (revision 3):** no `reports/<date>.json` for the date | `npm run decide` exits **3**, message `no report for <date>; run research:daily first`; nothing written. | Closed |
+| Persona: a decision for the date already exists and no `--revise` | Exit **3**; the existing `data/decisions/<date>.json` is byte-unchanged. | Closed |
+| Persona: `--revise` but a journal trade already links to the effective decision's `plan.planId` | Exit **3**, refusing the rewrite and naming the trade id; the owner's route is `--mode manage`, not a rewritten decision. | Closed |
+| Persona: `--date` unparseable, or its 00:15 UTC decision time is in the future | Exit **4**. | Closed |
+| Persona: journal unreadable (all backups corrupt), `research-rules.json` unreadable/invalid, or a skill/prompt file missing (`SkillHashError`) | Exit **5**, nothing written — an unhashable skill has no track record to attribute the decision to. | Closed |
+| Persona: input fails any validation row of §5.15 (unverified feature ref, web-only evidence, unknown/expired/rejected plan, missing stance, out-of-range field, empty reason) | Exit **2**, every rejection printed, nothing written. The persona fixes the block and re-runs. | Closed |
+| Persona cites a web page the system cannot see | Recorded in `validation.unverifiedWebRefs` and printed in Plan Report §6 as `unverified`; never counted as an idea's evidence. | Closed |
+| Persona: chosen rule changed in `research-rules.json` since the report (hash mismatch), or its `data/ai-rules/<planId>.json` is missing | Exit **2** (`rule_changed`) — the plan's thesis can no longer be reproduced or re-checked. | Closed |
+| Persona: `planTrade` rejects the chosen/synthesized plan (breaker tripped, max open trades, size below min, liq too close, instrument missing) | Exit **2** (`replan_rejected`, detail = the planner reason); nothing written, because there is nothing to place. | Closed |
+| Persona: two decisions wanted for one date (a second trade) | Not supported: one executed decision per date (§13 A31). A second idea waits for tomorrow's report. | Closed |
+| Persona: process killed after `data/decisions/<date>.json` is written, before the Plan Report | Decision stands; re-running without `--revise` exits 3, so the owner re-renders with `--revise` (which appends `r1` rather than mutating the record) or reads the JSON directly. | Closed |
+| Persona: owner misses the execute window (`decidedAt + executionWindowMs`) or the mark gaps beyond `maxEntryGapAtr × atr14d` | Do not enter. The decision stays on file, unexecuted; tomorrow's report starts a fresh cycle. Entering late is an adherence miss and is measured as one (§5.8a `followedPlan`). | Closed |
+| Persona: `manage` names an unknown trade, a trade that is not open, an unplanned trade, or a "tightened" stop that widens risk or crosses the entry | Exit **2** (`trade_not_found` / `trade_not_open` / `trade_not_planned` / `out_of_range`); no artifact. One code per cause, so the rejection says what to do. | Closed |
+| Persona: `--mode manage`/`--mode review` without `--trade`, with `--trade` on `--mode plan`, or with a `--trade` that differs from the block's `tradeId` | Exit **2** (`schema_invalid` / `date_mismatch`). Manage and review artifacts are keyed by `(date, tradeId)`, so an unaddressed call has no identity to write to. | Closed |
+| Persona: a second `manage`/`review` for the **same** `(date, tradeId)` without `--revise` | Exit **3**; the existing artifact is byte-unchanged. A different `tradeId` on the same date is a different identity and writes normally. | Closed |
+| Persona: `--revise` of a manage decision the owner has already acted on (any journal event for that trade after `writtenAt`) | Exit **3**, naming the trade; nothing written. The record of what was instructed stays as it was; the next instruction is tomorrow's manage decision. | Closed |
+| Persona: `manage` block asserts a `thesis` the CLI's own `evaluateThesis` does not produce for that trade | Exit **2** (`thesis_mismatch`), detail naming both states; nothing written. The persona reports the system's state, it never asserts one — the same rule as the review mode's R check. | Closed |
+| Persona: `--revise` (modes `plan`/`manage`) while the journal's last sync is missing, unparseable, `failed`, or older than `manual.staleAfterMs` | Exit **5**, `journal_stale: run the journal server sync first`; nothing written. "Already acted on" is judged from the journal, so a stale journal makes that judgement worthless — a fill may simply not be imported yet. Skipped in paper-only mode (`liveSync: "disabled"`), where there is no exchange state to be stale about. | Closed |
+| Persona: `review` reports an R, exit kind or adherence that differs from the journal's computed review | Exit **2** (`out_of_range`) — the persona reports the system's numbers, it never authors them. | Closed |
 
 ---
 
@@ -1425,6 +2167,41 @@ Default for every row: **halt the dependent output and surface it; never substit
 - Any change to an input of `promptVersionHash` (§5.13: system prompt, output schema, model, effort, maxTokens, webSearchMaxUses, maxIdeasPerDay) creates a new hash and restarts the count at 0 (AC-49). After a pass, the owner sets `ai.channelStatus: "paper-passed"` and `ai.passedPromptHash` to that artifact's `ruleHash`. If the running hash differs from `passedPromptHash`, `aiIdeaToRule` yields status `experimental` (leverage 1, paper) automatically.
 - The AI's *assessments of rule plans* never gate anything. Their value is reported by `byAiStance` (§5.9). If, after ≥ 30 closed rule-origin trades per stance bucket, `byAiStance.oppose.expectancyR >= byAiStance.support.expectancyR`, the dashboard shows `AI stance has no measured predictive value` on every AI stance.
 
+### 8.5 Persona decision channel gating (revision 3)
+
+- The persona channel is gated as **one `forwardOnly` rule per `skillHash`**: rule id `persona-<hash8>`,
+  `ruleHash = skillHash` (§5.15). Every persona plan — whether it re-plans a rule plan, re-plans an AI plan, or
+  sizes an idea of the persona's own — carries that id and hash, so the channel has exactly one track record.
+- **It never takes Gate D0.** X13 applies to the persona's model with full force: it is the same model family,
+  trained on data inside the holdout window, and its decisions are interactive and un-replayable — there is no
+  honest way to simulate what it *would* have chosen on a past day. Any "backtest of the persona" is contaminated
+  by construction.
+- **Gate D1** uses `runGateD1` with `forwardOnly: true` (§5.10): ≥ **60** closed **paper** trades of origin
+  `persona` with that `ruleHash`, over ≥ **45** calendar days, `expectancyR > 0`, `adherenceRate ≥ 0.90`,
+  `unexplainedIncompleteDays === 0`. Command:
+  `npm run backtest:daily -- --rule persona-<hash8> --mode d1-check`. As with `ai-analyst-*` ids (§5.10a,
+  "AI ids in d1-check"), a `persona-*` id is treated as `forwardOnly`, its hash is taken from the id's 8-char
+  prefix and matched against each trade's full `ruleHash`, and `d0Holdout` is `null`.
+- **Until it passes, every persona plan is `venueIntent: "paper"` and `leverage: 1`** — enforced by
+  `personaIdeaToRule` / `reportPlanToPersonaRule` returning `status: "experimental"` whenever
+  `persona.channelStatus !== "paper-passed"` or `persona.passedSkillHash !== skillHash`, which `planTrade` and
+  `effectiveMaxLeverage` then honour unchanged (AC-111). After a pass the owner sets
+  `persona.channelStatus: "paper-passed"` and `persona.passedSkillHash` to that artifact's `ruleHash`, and the
+  §8.3 leverage ladder applies to the persona rule exactly as to any other: `liveLadderCap` for its first 20
+  closed live trades, then `maxLeverage`, with `ladderResetByBreaker` after a trip.
+- **Editing the skill restarts the count at zero.** Any change to `SKILL.md`, `references/*.md`, `assets/*` or
+  `prompts/ai-analyst.md` produces a new `skillHash`, hence a new rule id, hence a D1 track record starting at
+  0 trades — the same rule as the AI channel's `promptVersionHash` (§8.4). The skill states this to its reader
+  (§4.23) so the owner knows the cost of an edit before making it.
+- **The other two channels progress only through their own paper trades.** A persona decision that picks a rule
+  plan creates a `persona`-origin trade and credits the persona channel, not the rule: that rule's own Gate D1
+  count is unaffected. The owner may still record paper trades for a rule or AI plan through the existing paper
+  flow (`POST /api/paper/entry` with that plan's `planId`) to advance its gate. What the decision *does* record
+  is `basedOnPlanId`/`basedOnRuleKey`, so `chosenByPersona` (§5.9) shows which rules the persona keeps picking
+  and how those picks perform — a diagnostic, never a gate.
+- The persona's **stances** on plans it did not pick gate nothing at all. They are recorded in the decision
+  artifact and rendered in Plan Report §4 so they can be read back against outcomes later.
+
 ---
 
 ## 9. Phased plan
@@ -1438,12 +2215,13 @@ Default for every row: **halt the dependent output and surface it; never substit
 | **4 — Daily backtest & gates** | §4.8–4.10 per §5.10a: history store + `scripts/backfill-history.ts` (lags per §10.3), `fomc-history.json`, replay loop, simulation with slippage and per-row funding, seeded statistics and permutation control, `backtest:daily` dev/holdout/d1-check, ledger and artifacts. AC-20..26, AC-26a..g, AC-76..96. Also changes shipped code: `src/research/features.ts` (contiguity, §5.3a) and `src/journal/trade-analytics.ts` (`ClosedTradeReview.ruleHash`, `byRule` keyed by rule version, §5.9). | P0 |
 | **4b — AI analyst** | §4.15–4.19, §5.13, `ai` config, report/Markdown integration, journal `aiStanceAtPlan`, `byOrigin`/`byAiStance`. AC-40..54. Depends on Phases 2–3. | P0 (AI channel only) |
 | **5 — Persona** | §4.7 via gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`. AC-39. | P1 |
-| **6 — Hardening** | Coinalyze OI backfill (longer OI history), optional desktop notification when report is written, CSV export of reviews. | P2 |
-| **7 — Retire scalper** | Separate spec decides whether to delete `src/main.ts` auto-trading loop and 5m harness. | P3 |
+| **6 — Persona decision channel** (revision 3) | §4.20–4.23, §5.6a, §5.15: `src/decision/{types,decide,plan-report}.ts`, `scripts/decide-daily.ts`, `persona` config (§5.11), `PlanOrigin` widened to `"persona"` across `src/research/planner.ts`, `src/research/rules.ts` and `src/journal/trade-analytics.ts` (`byOrigin.persona`, `chosenByPersona`, `ClosedTradeReview.basedOnRuleKey`), the three new persona gates + `references/decision-protocol.md`, and `config.symbols` / `research-rules.json` narrowed to BTC + ETH. **Also modifies shipped Phase 2–3 code:** `src/server/journal-server.ts` resolves a `persona-*` `planId` from `data/decisions/` for `POST /api/trades/:id/link` and `POST /api/paper/entry` (§5.8a, revision-3 paragraph) **and calls `writeSyncStatus` after every sync attempt** (the sync-freshness sidecar, §5.15; `src/journal/manual-journal.ts` gains `readSyncStatus`/`writeSyncStatus`), and `src/research/report.ts`'s `openTradeThesis` step loads an open persona trade's rule from that file's `personaRule`. AC-98..AC-122. **Depends on Phases 2–5** (report, journal, gates, AI plans to choose from, and the persona skill itself). Does **not** modify `planTrade`'s body or any shipped number. | P0 (persona channel only) |
+| **7 — Hardening** | Coinalyze OI backfill (longer OI history), optional desktop notification when report is written, CSV export of reviews. | P2 |
+| **8 — Retire scalper** | Separate spec decides whether to delete `src/main.ts` auto-trading loop and 5m harness. | P3 |
 
 Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules produce plans; Gate D1 needs calendar time, Gate D0 does not.
 
-**Go/no-go: no order with real capital may be placed from any plan of this system until Phases 1–4 are complete with all their acceptance criteria green, and the specific rule has passed Gate D0 (or is `forwardOnly`) and Gate D1 with committed artifacts reviewed by the owner; for AI-origin plans, Phase 4b must also be complete and the exact `promptVersionHash` in use must have passed Gate D1 (§8.4). Until then every journal entry from this system is venue `paper` and leverage is 1. The AI's support for a rule plan never substitutes for that rule's gates.**
+**Go/no-go: no order with real capital may be placed from any plan of this system until Phases 1–4 are complete with all their acceptance criteria green, and the specific rule has passed Gate D0 (or is `forwardOnly`) and Gate D1 with committed artifacts reviewed by the owner; for AI-origin plans, Phase 4b must also be complete and the exact `promptVersionHash` in use must have passed Gate D1 (§8.4); for persona-origin plans, Phase 6 must also be complete and the exact `skillHash` in use must have passed Gate D1 in its forward-only form (§8.5). Until then every journal entry from this system is venue `paper` and leverage is 1. Neither the AI's support for a plan nor the persona's choice of it ever substitutes for a gate — and a persona decision that picks a rule plan does not inherit that rule's gates, it carries the persona channel's own.**
 
 ---
 
@@ -1464,7 +2242,7 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - Tests must live directly in `tests/` (glob `tests/*.test.ts` is non-recursive, E11). Tests never hit the network: adapters are tested against recorded fixtures in `tests/fixtures/research/`.
 - FRED requires `FRED_API_KEY` env var; missing key → source `unavailable` (not a crash). Limit 120 req/min.
 - Bybit read-only key via `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`; distinct env names from the auto-trader's keys so the two cannot be confused.
-- Coinalyze free API: 40 req/min, requires key `COINALYZE_API_KEY` (Phase 6 only).
+- Coinalyze free API: 40 req/min, requires key `COINALYZE_API_KEY` (Phase 7 — "Hardening" — only; renumbered from 6 in revision 3).
 - AI credentials: never written to config, logs, reports, or snapshots. Provider `claude-cli` (default):
   `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), falling back to `ANTHROPIC_API_KEY` if unset —
   when the OAuth token IS set, `ANTHROPIC_API_KEY` is removed from the spawned CLI's environment so the
@@ -1476,7 +2254,12 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - `data/ai-usage.jsonl` and `data/ai-rules/` are committed (audit trail); `data/snapshots/*/ai-analyst.raw.json` is gitignored like other snapshots.
 - Farside may block non-browser clients; if so, adapter returns `unavailable` and the owner may drop a manual CSV at `data/manual/farside-<btc|eth>.csv` which the adapter reads with `availableAt = file mtime`.
 - Bybit public market endpoints: stay under 10 req/s (reuse `src/bybit/rate-limiter.ts`).
-- `data/snapshots/`, `reports/`, `manual-journal.json*` are gitignored; `data/validation/daily/*.json` and the ledger are committed.
+- `data/snapshots/`, `reports/`, `manual-journal.json*` are gitignored; `data/validation/daily/*.json` and the ledger are committed. **(Revision 3)** `manual-journal.sync.json` (the sync-status sidecar, §5.15) is gitignored with the journal it belongs to — it is machine state, not a record.
+- **(Revision 3)** `data/decisions/*.json` (decision, manage and review artifacts, all revisions) are **committed** — they
+  are the persona channel's audit trail, the input to its Gate D1 review, and the only record of decisions that were
+  never executed. The Plan Report `reports/<date>.decision.md` is **gitignored**, because `reports/` already is and the
+  file is fully derived from the committed decision plus that date's report; it is regenerated by re-running
+  `npm run decide -- --revise`. `npm run decide` performs no network I/O and reads no credential.
 
 ### 10.3 Declared availability lags for backfilled history (used only where no live snapshot exists)
 
@@ -1484,7 +2267,7 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 |--------|-------------------------------|--------------|
 | bybit klines 1d | bar close | yes |
 | bybit funding | settlement time | yes |
-| bybit OI | not usable before snapshots start (history too short, X6) | no → rules using `oiChange3dPct` are `forwardOnly` until Phase 6 |
+| bybit OI | not usable before snapshots start (history too short, X6) | no → rules using `oiChange3dPct` are `forwardOnly` until Phase 7 (Hardening; renumbered from 6 in revision 3) |
 | farside ETF flows for US trading day D | D+1 at 12:00 UTC | yes, with lag |
 | FRED release dates | scheduled release time (08:30 ET converted to UTC with DST) — schedule published ahead | yes |
 | FOMC dates (manual JSON) | statement time 14:00 ET; schedule known a year ahead | yes |
@@ -1497,11 +2280,14 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 ## 11. Out of scope
 
 - Automated order placement, order modification, or cancellation — by any component, including the dashboard.
-- Modifying or deleting `src/main.ts`, `src/strategy/*` 5m engine, or its specs (Phase 7 needs its own spec). The only shared-file change is the additive `RestClient.getApiKeyInfo()` method; `npm test` must stay green for all pre-existing tests (§12.2).
+- Modifying or deleting `src/main.ts`, `src/strategy/*` 5m engine, or its specs (Phase 8 needs its own spec). The only shared-file change is the additive `RestClient.getApiKeyInfo()` method; `npm test` must stay green for all pre-existing tests (§12.2). **(Revision 3)** `src/main.ts` is not modified **in code**; its *behaviour* changes only through the shared `config.symbols` value, which revision 3 narrows to BTC + ETH — a knowingly accepted side effect, recorded for owner veto in §13 A33.
 - Paid data (Tokenomist, DefiLlama Pro, Coinglass, CryptoPanic), a separate news NLP pipeline, social sentiment scrapers. (The AI analyst's own web search is in scope; nothing else ingests news.)
 - AI output that bypasses verification, the planner, or gates; AI-chosen size, leverage or venue; AI modifying rule plans or `research-rules.json`.
 - Multi-turn/agentic AI loops, AI tools other than web search, Managed Agents, Batches, multiple models or model cascades.
-- Interactive persona (§4.7) writing to reports or producing plans.
+- **(Revision 3)** Persona output that bypasses `npm run decide`; persona-chosen size, leverage or venue; automated
+  execution of a decision (by the CLI, the dashboard, or anything else); more than one persona decision per date
+  executed. The persona also never writes a file, edits `research-rules.json`, `config.json` or a report, or changes a
+  rule's `status`.
 - ML models, parameter optimizers, or auto-tuning of rule thresholds.
 - Spot trading, options, multi-exchange, cross-margin, portfolio optimization, hedging.
 - Testnet as a validation venue (consistent with `specs/profit-target-roadmap.md:68`).
@@ -1516,7 +2302,7 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 1. `npm run typecheck` (= `tsc --noEmit`) — zero errors.
 2. `npm test` (= `node --test --experimental-strip-types "tests/*.test.ts"`) — all green, including all pre-existing tests (365 at time of writing).
 3. `rg --files tests | rg "^tests/.+/.+\.test\.ts$"` — returns nothing (no test hidden in a subdirectory).
-4. `rg -n "placeOrder|createOrder|cancelOrder|setLeverage" src/research src/journal src/backtest-daily src/server/journal-server.ts` — returns nothing (P4).
+4. `rg -n "placeOrder|createOrder|cancelOrder|setLeverage" src/research src/journal src/backtest-daily src/decision scripts/decide-daily.ts src/server/journal-server.ts` — returns nothing (P4; `src/decision` and `scripts/decide-daily.ts` added in revision 3).
 5. Independent reviewer verdict `approved` on each phase's diff.
 6. **[manual, Phase 1]** Live smoke: `npm run snapshot:daily` against real endpoints; every source `ok` or a documented reason; snapshot files committed to a scratch branch for review, not main.
 7. **[manual, Phase 2]** Owner reads 7 consecutive daily reports and confirms each plan's numbers by hand for at least one plan per report.
@@ -1526,12 +2312,15 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 11. `rg -n "ANTHROPIC_API_KEY|sk-ant-" reports data/ai-usage.jsonl data/ai-rules` — returns nothing (no credential leakage).
 12. **[manual, Phase 4b]** AC-54 (anthropic-api) and/or AC-54a (claude-cli) live smoke, plus 7 consecutive daily runs with AI enabled where the owner confirms each AI stance's cited feature values against the report by hand for at least one assessment per day.
 13. **[manual, Phase 3]** Funding sign check: hold one small real position through a funding settlement, compare the journal's `fundingUsd` sign with Bybit's transaction log (positive funding rate + long = paid). Only then set `manual.fundingSignVerified: true`. (The read-only-key checks are item 8.)
+14. **(Revision 3)** `rg -n "writeFile|appendFile|mkdir|fs\." src/decision` — every hit is in `scripts/decide-daily.ts`'s call path only: `src/decision/decide.ts` and `src/decision/plan-report.ts` are pure and must contain none (the sole exception is `skillHash`, which reads the skill files and may live in its own `src/decision/skill-hash.ts`).
+15. **(Revision 3)** `rg -n "data/decisions|reports/.*decision\.md" src scripts --glob '!scripts/decide-daily.ts'` — returns nothing: only the `decide` CLI writes those paths (P9).
+16. **[manual, Phase 6]** AC-116's supervised cycle, signed off in `docs/validation/persona-decision-cycle-<date>.md`, plus 7 consecutive days on which the owner reads only the Plan Report before acting and records any question it failed to answer.
 
 ---
 
 ## 13. Assumptions (for owner veto)
 
-- A1: Bybit linear perps remain the only venue; symbols come from `config.symbols`.
+- A1: Bybit linear perps remain the only venue; symbols come from `config.symbols` (revision 3: `["BTC/USDT", "ETH/USDT"]`, A27).
 - A2: Decision time 00:15 UTC fits the owner's day; manual execution happens within the plan's `expiresAt` (default 12 h).
 - A3: Owner will use market (taker) orders; fees modeled at 0.055%/side. If limit orders are used, measured slippage in the journal will show it.
 - A4: 1h klines are fine enough to resolve stop/target for 1–10 day holds; stop-first on ambiguity biases results pessimistically, which is intended.
@@ -1540,9 +2329,9 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - A7: DefiLlama stablecoin history revisions are small enough to accept with a 1-day lag.
 - A8: Survivorship: backtests only use symbols listed on Bybit for the whole window; the symbol list and listing dates are recorded in each artifact. Delisted-symbol bias is accepted and noted.
 - A9: `riskPerTradePercent` default 1 and `marginBudgetPercent` default 25 are starting values, not optimized.
-- A10: Initial rule set for Phase 2 contains three `experimental` example rules only as test fixtures of the format (ETF-flow momentum X1, pre-FOMC/CPI de-risk X2 as a "no new entries within 24 h" rule, funding-extreme contrarian X4). They are not recommendations; the owner writes the real rules.
+- A10: Initial rule set for Phase 2 contains three `experimental` example rules only as test fixtures of the format (ETF-flow momentum X1, pre-FOMC/CPI de-risk X2 as a "no new entries within 24 h" rule, funding-extreme contrarian X4). They are not recommendations; the owner writes the real rules. **(Revision 3)** Their `symbols` become `["BTC/USDT", "ETH/USDT"]` in the same commit as the `config.symbols` change, or every `research:daily` run exits 2 (E16). With that pair, `btcEtfNetFlowUsd*` and `ethEtfNetFlowUsd1d` apply directly to the traded symbol rather than as market context, and no example rule may use `daysToNextUnlock` / `nextUnlockPctOfFloat` — those are permanently 999 / 0 for BTC and ETH (A27).
 - A11: Running the daily job is the owner's machine's responsibility (cron/systemd timer). A missed day produces no report, never a back-dated one.
-- A12: The analyst persona is a Claude Code skill used interactively by the owner; it is not part of the scheduled pipeline.
+- A12: The analyst persona is a Claude Code skill used interactively by the owner; it is not part of the scheduled pipeline. (Revision 3: it is now also the decision layer, but still owner-invoked — the scheduled 00:15 UTC job still runs only `research:daily`, and a day on which the owner never opens the persona simply has no decision.)
 - A13: The first leverage-ladder step (cap `liveLadderCap` for 20 live trades, breaker reset) is enforced in code; raising `maxLeverage` above 2 is a deliberate manual config commit by the owner, not automated, because it is a capital decision the owner reviews.
 - A14: Leverage > 1 is permitted at all only because the owner explicitly requested leveraged trading; defaults (`maxLeverage` 2, hard ceiling 5, liquidation ≥ 2× stop distance) are conservative starting points for owner veto.
 - A15: The owner explicitly requested that Claude actively participate in recommendations (2026-09-16). Estimated cost per daily call ≈ $0.20–$0.60 (≈30–60k input tokens, 5–15k output, ≤5 searches) → roughly $6–$18/month, i.e. 6–18% of the current $100 capital per month. The AI channel must earn that back to be worth keeping; `byOrigin`/`byAiStance` exist to measure it. The owner may lower `effort` or choose another model; this spec does not downgrade on its own.
@@ -1567,6 +2356,43 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
   The 2025-08-22 notation vote listed on the Fed calendar is excluded: it has no rate statement.
 - A25: Pooling trades by decision day assumes trades from different days are independent enough for a day-level bootstrap. Multi-day
   holds overlapping across days still share market moves; D0 accepts that residual optimism because D1 re-tests forward.
+- A27 **(revision 3)**: `config.symbols` is `["BTC/USDT", "ETH/USDT"]` — the owner's explicit choice for the start of the
+  persona channel (the two deepest, most-covered instruments, and the only two for which the ETF-flow features exist at
+  all). The pair is a config value, not a constant in `src/`: widening it later is a config edit plus a rules-file edit,
+  not a code change. Two consequences the spec states rather than hides: `btcEtfNetFlowUsd1d`/`btcEtfNetFlowUsd5d` and
+  `ethEtfNetFlowUsd1d` now apply directly to the traded symbols instead of as market-wide context, and
+  `daysToNextUnlock`/`nextUnlockPctOfFloat` are permanently 999/0 for BTC and ETH (no unlock schedule), so any rule or
+  idea built on the unlock family is inert for this symbol set — the example rules must not use it. **A third consequence
+  reaches outside this spec's modules: `config.symbols` is shared with the untouched auto-trader — see A33.**
+- A28 **(revision 3)**: The owner's local clock is UTC−3 (`persona.ownerTimeZone`, default
+  `America/Argentina/Buenos_Aires`). Every absolute time in the Plan Report is printed in UTC **and** that zone, because
+  a come-back instruction the owner has to convert in their head is an instruction they will get wrong once. The zone is
+  config, and DST (which that zone does not currently observe) is handled by formatting the instant, never by adding a
+  fixed offset.
+- A29 **(revision 3)**: `persona.executionWindowMs` defaults to **6 h** — shorter than the plan's own 12 h `expiresAt`
+  (A2), because the decision is taken some time after 00:15 and a stale *decision* is worse than a stale *plan*: the
+  persona weighed news that keeps aging. The owner may raise it up to the plan's `expiresAt`; past that the report-plan
+  choice is `expired` anyway.
+- A30 **(revision 3)**: `persona.maxEntryGapAtr` defaults to **0.25** ATR. Entering more than a quarter of a daily ATR
+  away from `referencePrice` silently changes the trade's R: the stop distance is fixed in the plan, so the real risk and
+  the real R-multiple drift from the printed ones. 0.25 is a starting value for owner veto, not a measured threshold —
+  the journal's `entrySlippagePct` will show whether it is the right one.
+- A31 **(revision 3)**: **One decision per date.** The persona replaces the report's plans with a single choice rather
+  than adding to them, so `openTradeCount` counts only open journal trades, `data/decisions/<date>.json` is write-once,
+  and a second idea waits for the next report. If the owner ever wants two concurrent persona positions, that is a new
+  revision, not a `--revise`.
+- A32 **(revision 3)**: The owner performs every time exit. `maxHoldDays` is printed as a hard date in the Plan Report
+  and is enforced by nothing but the owner's hand — there is no scheduler, no bot and no alert that will close a position
+  (P4). A missed time exit shows up as `exitKind: "discretionary"` and an adherence miss (§5.8a), which is exactly how it
+  should surface: measured, not silently corrected.
+- A33 **(revision 3, for explicit owner veto)**: **Narrowing `config.symbols` also narrows `src/main.ts`'s tradeable
+  universe** from its current list to BTC + ETH, without any code edit — the 5-minute auto-trader reads the same field
+  (`src/main.ts:518`, `:653`, `:683`, `:696`, `:698`, `:709`, `:837`, `:964`). The owner accepts this: the scalper has a
+  confirmed negative edge (E1), is not in use since the pivot away from it, and is slated for retirement in Phase 8. This
+  spec therefore does **not** decouple the two — a second symbol list is one more thing to keep in sync for a component
+  that is being removed, and the silent-shrink surprise is cheaper to *state* than to engineer around. If the owner wants
+  the scalper's universe preserved, the deferred alternative is a `research.symbols` scope (§14), and it must be chosen
+  *before* the `config.symbols` edit lands, not after.
 
 ---
 
@@ -1579,5 +2405,11 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - **Keep auto-execution, only change horizon to daily.** Deferred: manual execution was the owner's explicit requirement and removes a whole class of execution-risk findings; can be revisited after D1 via a new spec.
 - **Spot swing trading without leverage.** Deferred: removes liquidation risk entirely and is the safer default for a strategy without measured edge. Remains the recommended fallback if no rule passes D1.
 - **Paid point-in-time data (Tokenomist, Coinglass, DefiLlama Pro).** Deferred until a free-data rule passes D0 and a paid source would plausibly sharpen it; ~$29–$300/mo is large relative to $100 capital.
-- **Full hexagonal restructuring of the existing repo.** Deferred: new modules follow ports/adapters internally; the legacy engine stays untouched until Phase 7's spec.
+- **Full hexagonal restructuring of the existing repo.** Deferred: new modules follow ports/adapters internally; the legacy engine stays untouched until Phase 8's spec.
+- **(Revision 3) The persona writing `data/decisions/` (or the report) directly.** Rejected: a file written by a chat session is unverifiable after the fact — nothing would have checked its feature citations against the snapshot, re-derived its size from `planTrade`, or refused an expired plan. Routing every decision through `npm run decide` costs one command and buys the whole fail-closed table (§7) plus a committed, hash-attributed record. This is P9.
+- **(Revision 3) Persona limited to choosing among the report's plans (no ideas of its own).** Rejected by owner requirement 1: the persona may differ from both channels. The risk — an idea nobody backtested — is handled the same way the AI channel's is: forward-only, paper, its own Gate D1, verified feature citations, and a hard refusal of web-only evidence.
+- **(Revision 3) Letting the persona run the daily job unattended (decide + record automatically).** Deferred: it would remove the human from the only step that is currently guaranteed human (P4), and the channel has no measured edge yet. Revisit only after §8.5's Gate D1 passes, in a new spec.
+- **(Revision 3) More than one persona decision per day, or intraday re-decisions.** Deferred (§13 A31): one decision per date keeps the channel's track record one-trade-per-day and matches the once-daily data. The `manage open position` gate covers "something changed" without adding a second entry.
+- **(Revision 3) A `research.symbols` scope, decoupling this system's universe from `config.symbols`.** Deferred, and the decision is A33's: `config.symbols` is read by the untouched auto-trader (`src/main.ts:518,653,683,696,698,709,837,964`), so narrowing it to BTC + ETH shrinks the scalper's universe too. A separate `research.symbols` (defaulting to `config.symbols`) would isolate the two, at the cost of a second list to keep in sync — for an engine that has a confirmed negative edge (E1) and is scheduled for deletion in Phase 8. If the owner ever wants the scalper running on its old universe alongside this system, this is the change to make, **before** narrowing `config.symbols`.
+- **(Revision 3) A `mark`-price feed for the gap rule.** Deferred: `decide` is offline and the owner is at the terminal with the exchange open, so the band is printed and the owner compares. Adding a price fetch would put a network call (and a fresh failure mode) into the only step that has none.
 - **Reusing `src/learning/journal.ts` by extending `TradeRecord`.** Rejected: its `indicatorsAtEntry` shape (E6) and auto-trader coupling would leak scalping concerns; a separate `ManualTrade` store reuses only the durability pattern (E7).
