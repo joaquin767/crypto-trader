@@ -47,11 +47,60 @@ details.review{border-top:1px solid var(--line);padding:8px 0}
 details.review summary{cursor:pointer;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 16px;margin:8px 0}
 .kv div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px dashed var(--line);padding:2px 0}
+
+/* Trade chart & replay (§5.14) */
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tabs button{background:var(--panel-2);color:var(--dim);border:1px solid var(--line);border-radius:6px;
+  padding:5px 11px;font-size:12px;cursor:pointer}
+.tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.chart-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:10px}
+.chart-legend{display:flex;gap:14px;flex-wrap:wrap;justify-content:flex-end;font-size:10.5px;margin-bottom:6px}
+.chart-legend .swatch{display:inline-block;width:14px;height:2px;margin-right:4px;vertical-align:middle;background:var(--text)}
+.chart-legend .swatch.band{height:8px;background:rgba(76,141,255,.28)}
+.chart-card-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:10px}
+.chart-card-row .stat{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.chart-card-row .stat .label{font-size:10px;text-transform:uppercase;color:var(--dim);letter-spacing:.4px}
+.chart-card-row .stat .value{font-size:15px;font-weight:600;margin-top:2px}
+.chart-card-row .stat .value .basis{font-size:10px;font-weight:400;color:var(--dim);margin-top:1px}
+.chart-svg-wrap{width:100%;overflow-x:auto}
+.chart-svg-wrap svg{width:100%;height:auto;display:block;min-width:280px}
+.replay-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.replay-controls input[type=range]{flex:1;min-width:140px}
 </style>
 </head>
 <body>
 <h1>Manual Trading Journal <span id="staleBadge" class="pill warn" hidden></span></h1>
 <div id="banners"></div>
+
+<h2>Trade chart</h2>
+<div class="card">
+  <div class="chart-controls">
+    <div class="tabs" id="channelTabs">
+      <button type="button" class="tab active" data-channel="both">Both</button>
+      <button type="button" class="tab" data-channel="rules-file">Rules</button>
+      <button type="button" class="tab" data-channel="ai-analyst">AI</button>
+    </div>
+    <select id="chartTradeSelect" aria-label="Chart trade"></select>
+  </div>
+  <p id="chartAiEmpty" class="dim" hidden>AI analyst arrives in Phase 4b.</p>
+  <p id="chartEmpty" class="dim" hidden>No trades to chart yet.</p>
+  <div id="chartBody" hidden>
+    <div class="chart-card-row" id="chartCardRow"></div>
+    <div class="chart-legend dim">
+      <span><i class="swatch"></i>Real price</span>
+      <span><i class="swatch band"></i>Volatility range &plusmn;1&sigma; / &plusmn;2&sigma; (not a forecast)</span>
+    </div>
+    <div id="chartUnavailable" class="banner warn" hidden></div>
+    <div class="chart-svg-wrap" id="chartSvgWrap"></div>
+    <div class="replay-controls">
+      <input type="range" id="replaySlider" min="0" max="0" value="0" step="1" aria-label="Reveal candle by candle">
+      <button type="button" class="secondary" id="replayPlay">Play</button>
+      <button type="button" class="secondary" id="replayRestart">Restart</button>
+      <button type="button" class="secondary" id="replayLive" hidden>LIVE</button>
+    </div>
+    <p class="dim" style="font-size:11px;margin-top:4px">Drag to reveal the real price candle by candle</p>
+  </div>
+</div>
 
 <h2>Open trades</h2>
 <div id="openTrades" class="grid"></div>
@@ -293,8 +342,8 @@ function refresh() {
       lastTrades = trades;
       renderBanners(state);
       renderOpenTrades(state, trades);
-      await renderClosedTrades(trades);
-      await renderStats();
+      // The chart is the primary view: it must not wait behind reviews and stats, which fetch klines too.
+      await Promise.all([refreshChart(trades), renderClosedTrades(trades), renderStats()]);
     } finally {
       refreshing = null;
     }
@@ -330,6 +379,385 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest(".thesis-btn");
   if (!btn) return;
   submit(() => api(`/api/trades/${encodeURIComponent(btn.dataset.tradeId)}/exit-kind`, jsonBody("PATCH", { exitKind: "thesis_invalidated" })));
+});
+
+// ── Trade chart & replay (§5.14) ────────────────────────────────────────────────────────────────
+// Inline SVG, no libraries. `chart` holds the client-side replay state; `chart.data` is the last
+// TradeChartData fetched from GET /api/trades/:id/chart. All SVG nodes are built via DOM APIs
+// (createElementNS + textContent) rather than string concatenation, so no separate escaping pass
+// is needed for the values placed inside it.
+
+const CHART_COLORS = {
+  up: "#2ea043", down: "#f0503a", warn: "#d9a441", accent: "#4c8dff",
+  text: "#e6edf3", dim: "#8b98a9", faint: "#5a6675", line: "#262e3a", panel2: "#1b222d",
+};
+
+const chart = {
+  channel: "both",
+  tradeId: null,
+  data: null,
+  cursor: 0,
+  entryIndex: 0,
+  maxCursor: 0,
+  pinnedToLive: true,
+  playing: false,
+  playTimer: null,
+};
+
+function chartTradesFor(channel, trades) {
+  const byChannel = channel === "both" ? trades : trades.filter((t) => (t.plannedSnapshot?.origin ?? null) === channel);
+  const open = byChannel.filter((t) => t.status === "open").sort((a, b) => b.updatedAt - a.updatedAt);
+  const closed = byChannel.filter((t) => t.status === "closed").sort((a, b) => b.updatedAt - a.updatedAt);
+  return [...open, ...closed];
+}
+
+function renderChannelTabs() {
+  for (const btn of document.querySelectorAll("#channelTabs .tab")) {
+    btn.classList.toggle("active", btn.dataset.channel === chart.channel);
+  }
+}
+
+function renderChartTradeSelect(trades) {
+  const list = chartTradesFor(chart.channel, trades);
+  const sel = $("chartTradeSelect");
+  const prev = chart.tradeId;
+  sel.innerHTML = list.map((t) => `<option value="${esc(t.id)}">${esc(t.symbol)} ${esc(t.side)} · ${esc(t.status)} (${esc(t.id.slice(0, 8))})</option>`).join("");
+  if (list.length === 0) {
+    chart.tradeId = null;
+  } else if (!list.some((t) => t.id === prev)) {
+    chart.tradeId = list[0].id;
+  }
+  if (chart.tradeId) sel.value = chart.tradeId;
+  return list;
+}
+
+async function refreshChart(trades) {
+  renderChannelTabs();
+  const list = renderChartTradeSelect(trades);
+  $("chartAiEmpty").hidden = chart.channel !== "ai-analyst" || list.length > 0;
+  $("chartEmpty").hidden = chart.channel === "ai-analyst" || list.length > 0;
+  $("chartBody").hidden = list.length === 0;
+  if (list.length === 0 || !chart.tradeId) { chart.data = null; return; }
+  const selected = list.find((t) => t.id === chart.tradeId);
+  const sameTradeLoaded = chart.data && chart.data.tradeId === chart.tradeId;
+  // Closed-trade charts never change once fetched; open trades refetch on every live/trade event
+  // so the replay can auto-follow the newest candle (unless the owner pinned it back).
+  if (!sameTradeLoaded || (selected && selected.status === "open")) {
+    await loadChartData();
+  }
+}
+
+async function loadChartData() {
+  let data;
+  try {
+    data = await api(`/api/trades/${encodeURIComponent(chart.tradeId)}/chart`);
+  } catch (err) {
+    $("chartSvgWrap").innerHTML = `<p class="warn">${esc(err.message)}</p>`;
+    return;
+  }
+  const sameTradeAsBefore = chart.data && chart.data.tradeId === data.tradeId;
+  const wasPinned = chart.pinnedToLive;
+  const prevCursor = chart.cursor;
+  chart.data = data;
+
+  const steps = data.candles.length + (data.formingCandle ? 1 : 0);
+  chart.maxCursor = Math.max(0, steps - 1);
+  const idx = data.candles.findIndex((c) => c.t >= data.entryTime);
+  chart.entryIndex = idx >= 0 ? Math.min(idx, chart.maxCursor) : 0;
+
+  if (!sameTradeAsBefore) {
+    chart.cursor = chart.maxCursor;
+    chart.pinnedToLive = true;
+  } else if (data.status === "open" && wasPinned) {
+    chart.cursor = chart.maxCursor;
+  } else {
+    chart.cursor = Math.min(Math.max(prevCursor, chart.entryIndex), chart.maxCursor);
+  }
+
+  renderChartCardRow(data);
+  renderReplayControls(data);
+  renderChartSvg();
+}
+
+const INTERVAL_MS_CLIENT = { "15": 15 * 60_000, "60": 60 * 60_000 };
+
+// True while a closed trade's replay hasn't reached its exit: the outcome must stay hidden until then.
+function replayHidesOutcome(data) {
+  if (data.status !== "closed" || data.exitTime === null) return false;
+  const current = data.candles[Math.min(chart.cursor, data.candles.length - 1)];
+  return !current || current.t < data.exitTime - INTERVAL_MS_CLIENT[data.interval];
+}
+
+function renderChartCardRow(data) {
+  const dirLabel = `${data.side === "long" ? "LONG" : "SHORT"}${data.leverage ? ` ${fmt(data.leverage, 0)}x` : ""}`;
+  const lastPrice = data.formingCandle?.c ?? data.candles.at(-1)?.c ?? null;
+  if (replayHidesOutcome(data)) {
+    const atCursor = data.candles[Math.min(chart.cursor, data.candles.length - 1)];
+    $("chartCardRow").innerHTML = `
+      <div class="stat"><div class="label">Direction</div><div class="value ${data.side === "long" ? "up" : "down"}">${esc(dirLabel)}</div></div>
+      <div class="stat"><div class="label">Entry</div><div class="value mono">${esc(fmt(data.levels.entry))}</div></div>
+      <div class="stat"><div class="label">Price at cursor</div><div class="value mono">${esc(fmt(atCursor?.c))}<div class="basis">${esc(time(atCursor?.t))}</div></div></div>
+      <div class="stat"><div class="label">State</div><div class="value">Replaying</div></div>
+      <div class="stat"><div class="label">P&amp;L</div><div class="value dim">hidden<div class="basis">revealed at exit</div></div></div>
+    `;
+    return;
+  }
+  const close = data.status === "closed" ? data.exitPrice : lastPrice;
+  const pnl = data.pnl;
+  $("chartCardRow").innerHTML = `
+    <div class="stat"><div class="label">Direction</div><div class="value ${data.side === "long" ? "up" : "down"}">${esc(dirLabel)}</div></div>
+    <div class="stat"><div class="label">Entry</div><div class="value mono">${esc(fmt(data.levels.entry))}</div></div>
+    <div class="stat"><div class="label">Close</div><div class="value mono">${esc(fmt(close))}</div></div>
+    <div class="stat"><div class="label">State</div><div class="value">${data.status === "open" ? "Open" : "Closed"}</div></div>
+    <div class="stat"><div class="label">P&amp;L</div><div class="value mono ${signCls(pnl?.usd)}">${pnl ? esc(fmt(pnl.usd)) : "—"}${pnl ? `<div class="basis">${esc(pnl.basis)}</div>` : ""}</div></div>
+  `;
+}
+
+function renderReplayControls(data) {
+  const slider = $("replaySlider");
+  slider.min = String(chart.entryIndex);
+  slider.max = String(chart.maxCursor);
+  slider.value = String(chart.cursor);
+  slider.disabled = chart.maxCursor <= chart.entryIndex;
+  $("replayLive").hidden = data.status !== "open";
+  $("replayLive").disabled = chart.pinnedToLive;
+  // Every cursor change passes through here, so the card follows the replay (outcome hidden until exit).
+  renderChartCardRow(data);
+}
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  return el;
+}
+
+function revealCandlesClient(candles, cursor) {
+  if (candles.length === 0) return [];
+  const clamped = Math.max(0, Math.min(cursor, candles.length - 1));
+  return candles.slice(0, clamped + 1);
+}
+
+function formatAxisTime(ms) {
+  const d = new Date(ms);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${dd} ${months[d.getUTCMonth()]} ${hh}:${mi}`;
+}
+
+function pathFromBand(points, upperKey, lowerKey, x, y) {
+  const top = points.map((p) => `${x(p.t)},${y(p[upperKey])}`);
+  const bottom = points.slice().reverse().map((p) => `${x(p.t)},${y(p[lowerKey])}`);
+  return `M ${top.join(" L ")} L ${bottom.join(" L ")} Z`;
+}
+
+function renderChartSvg() {
+  const data = chart.data;
+  const wrap = $("chartSvgWrap");
+  const unavailable = $("chartUnavailable");
+  if (!data || data.dataStatus === "unavailable") {
+    unavailable.hidden = false;
+    unavailable.textContent = data?.dataDetail || "Chart data unavailable.";
+    wrap.innerHTML = "";
+    return;
+  }
+  unavailable.hidden = true;
+
+  const allCandles = data.candles.concat(data.formingCandle ? [data.formingCandle] : []);
+  if (allCandles.length === 0) {
+    wrap.innerHTML = `<p class="dim">No candle data in range.</p>`;
+    return;
+  }
+
+  // Draw at the container's real pixel width so text stays 10–11 px at any screen size.
+  const W = Math.max(320, Math.round(wrap.clientWidth || 800));
+  const H = W < 560 ? 260 : 340;
+  const padL = 112, padR = 14, padT = 14, padB = 28;
+  const times = allCandles.map((c) => c.t);
+  // Scale to price, entry/SL/TP and the band. Liquidation is usually far away and would flatten the
+  // price line, so it only gets a line when it already falls inside this range.
+  const values = allCandles.map((c) => c.c);
+  for (const lv of [data.levels.entry, data.levels.stop, data.levels.target]) {
+    if (lv !== null && lv !== undefined) values.push(lv);
+  }
+  if (data.band) for (const p of data.band.points) values.push(p.upper2, p.lower2);
+
+  const minT = Math.min(...times), maxT = Math.max(...times);
+  const rawMin = Math.min(...values), rawMax = Math.max(...values);
+  const pad = Math.max((rawMax - rawMin) * 0.06, rawMax * 0.001);
+  const minP = rawMin - pad, maxP = rawMax + pad;
+  const spanT = Math.max(1, maxT - minT);
+  const spanP = Math.max(1e-9, maxP - minP);
+  const x = (t) => padL + ((t - minT) / spanT) * (W - padL - padR);
+  const y = (p) => padT + (1 - (p - minP) / spanP) * (H - padT - padB);
+  const price = (p) => {
+    const decimals = p >= 1000 ? 0 : p >= 100 ? 2 : p >= 1 ? 3 : 5;
+    return "$" + p.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  };
+  const mono = "ui-monospace,SFMono-Regular,Menlo,monospace";
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": "Trade price chart" });
+
+  // Horizontal grid lines now; their price labels are drawn after the level labels so they can step
+  // aside where a level label sits in the same left gutter.
+  const gridYs = [];
+  for (let i = 0; i <= 5; i++) {
+    const p = minP + (spanP * i) / 5;
+    const yy = y(p);
+    gridYs.push({ yy, p });
+    svg.appendChild(svgEl("line", { x1: padL, x2: W - padR, y1: yy, y2: yy, stroke: CHART_COLORS.line, "stroke-width": "1", opacity: "0.6" }));
+  }
+
+  if (data.band && data.band.points.length > 1) {
+    svg.appendChild(svgEl("path", { d: pathFromBand(data.band.points, "upper2", "lower2", x, y), fill: CHART_COLORS.accent, opacity: "0.08", stroke: "none" }));
+    svg.appendChild(svgEl("path", { d: pathFromBand(data.band.points, "upper1", "lower1", x, y), fill: CHART_COLORS.accent, opacity: "0.16", stroke: "none" }));
+  }
+
+  // Real price line — revealed candles only; the forming candle's segment is drawn dashed.
+  const revealed = revealCandlesClient(data.candles, chart.cursor);
+  const includeForming = Boolean(data.formingCandle) && chart.cursor >= chart.maxCursor;
+  if (revealed.length > 0) {
+    const solidPts = revealed.map((c) => `${x(c.t)},${y(c.c)}`).join(" ");
+    svg.appendChild(svgEl("polyline", { points: solidPts, fill: "none", stroke: CHART_COLORS.text, "stroke-width": "1.6", opacity: "0.92" }));
+    if (includeForming) {
+      const last = revealed.at(-1);
+      const dashedPts = `${x(last.t)},${y(last.c)} ${x(data.formingCandle.t)},${y(data.formingCandle.c)}`;
+      svg.appendChild(svgEl("polyline", { points: dashedPts, fill: "none", stroke: CHART_COLORS.text, "stroke-width": "1.6", "stroke-dasharray": "3,3", opacity: "0.92" }));
+    }
+    const entryCandle = data.candles.find((c) => c.t >= data.entryTime);
+    if (entryCandle && revealed.some((c) => c.t === entryCandle.t)) {
+      svg.appendChild(svgEl("circle", { cx: x(entryCandle.t), cy: y(entryCandle.c), r: 3.2, fill: CHART_COLORS.warn }));
+    }
+    // The exit marker only appears once the replay has reached the exit candle — never ahead of it.
+    const exitRevealed = data.exitTime !== null && revealed.length > 0 && revealed.at(-1).t >= data.exitTime - INTERVAL_MS_CLIENT[data.interval];
+    if (data.status === "closed" && exitRevealed && data.exitPrice !== null) {
+      const exitColor = data.pnl && data.pnl.usd >= 0 ? CHART_COLORS.up : CHART_COLORS.down;
+      svg.appendChild(svgEl("circle", { cx: x(data.exitTime), cy: y(data.exitPrice), r: 3.2, fill: exitColor }));
+    }
+  }
+
+  // Level lines, labeled at the left edge (drawn after the price line so labels stay legible).
+  const levelDefs = [
+    { key: "liquidation", label: "Liq", color: CHART_COLORS.faint },
+    { key: "stop", label: "SL", color: CHART_COLORS.down },
+    { key: "entry", label: "Entry", color: CHART_COLORS.warn },
+    { key: "target", label: "TP", color: CHART_COLORS.up },
+  ];
+  const placedLabelYs = [];
+  const offScale = [];
+  for (const lvl of levelDefs) {
+    const v = data.levels[lvl.key];
+    if (v === null || v === undefined) continue;
+    if (v < minP || v > maxP) { offScale.push(`${lvl.label} ${price(v)}`); continue; }
+    const yy = y(v);
+    const dashed = lvl.key === "target" ? "2,3" : "5,4";
+    svg.appendChild(svgEl("line", { x1: padL, x2: W - padR, y1: yy, y2: yy, stroke: lvl.color, "stroke-width": "1", "stroke-dasharray": dashed, opacity: "0.8" }));
+    // Nudge a label that would overlap one already placed.
+    let ly = yy;
+    for (const other of placedLabelYs) if (Math.abs(ly - other) < 17) ly = other + (ly >= other ? 17 : -17);
+    placedLabelYs.push(ly);
+    const text = `${lvl.label} ${price(v)}`;
+    // Level labels live in the left gutter (like the reference design), so they never cover the price line or entry dot.
+    const boxW = Math.min(padL - 10, text.length * 6.4 + 12);
+    svg.appendChild(svgEl("rect", { x: 4, y: ly - 8.5, width: boxW, height: 17, rx: 3, fill: CHART_COLORS.panel2, stroke: lvl.color, "stroke-width": "1" }));
+    const label = svgEl("text", { x: 10, y: ly + 3.8, "font-size": "10.5", fill: lvl.color, "font-family": mono });
+    label.textContent = text;
+    svg.appendChild(label);
+  }
+  // Grid price labels, skipping any that would collide with a level label in the gutter.
+  for (const g of gridYs) {
+    if (placedLabelYs.some((ly) => Math.abs(ly - g.yy) < 14)) continue;
+    const label = svgEl("text", { x: padL - 8, y: g.yy + 3.5, "font-size": "10", fill: CHART_COLORS.faint, "text-anchor": "end", "font-family": mono });
+    label.textContent = price(g.p);
+    svg.appendChild(label);
+  }
+  if (offScale.length > 0) {
+    const note = svgEl("text", { x: W - padR, y: padT + 10, "font-size": "10", fill: CHART_COLORS.faint, "text-anchor": "end", "font-family": mono });
+    note.textContent = `off-scale: ${offScale.join(" · ")}`;
+    svg.appendChild(note);
+  }
+
+  // Time axis.
+  const ticks = W < 560 ? 3 : 5;
+  for (let i = 0; i <= ticks; i++) {
+    const t = minT + (spanT * i) / ticks;
+    const label = svgEl("text", { x: x(t), y: H - 9, "font-size": "10", fill: CHART_COLORS.faint, "text-anchor": i === ticks ? "end" : i === 0 ? "start" : "middle", "font-family": mono });
+    label.textContent = formatAxisTime(t);
+    svg.appendChild(label);
+  }
+
+  wrap.innerHTML = "";
+  wrap.appendChild(svg);
+}
+
+const chartReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+let chartResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(chartResizeTimer);
+  chartResizeTimer = setTimeout(() => { if (chart.data) renderChartSvg(); }, 120);
+});
+
+function stopPlay() {
+  chart.playing = false;
+  if (chart.playTimer) { clearInterval(chart.playTimer); chart.playTimer = null; }
+  $("replayPlay").textContent = "Play";
+}
+
+function startPlay() {
+  if (!chart.data) return;
+  if (chartReducedMotion) {
+    chart.cursor = chart.maxCursor;
+    chart.pinnedToLive = chart.data.status === "open";
+    renderReplayControls(chart.data);
+    renderChartSvg();
+    return;
+  }
+  if (chart.cursor >= chart.maxCursor) chart.cursor = chart.entryIndex;
+  chart.playing = true;
+  chart.pinnedToLive = false;
+  $("replayPlay").textContent = "Pause";
+  chart.playTimer = setInterval(() => {
+    chart.cursor += 1;
+    if (chart.cursor >= chart.maxCursor) { chart.cursor = chart.maxCursor; stopPlay(); }
+    renderReplayControls(chart.data);
+    renderChartSvg();
+  }, 80);
+}
+
+$("replayPlay").addEventListener("click", () => { if (chart.playing) stopPlay(); else startPlay(); });
+$("replayRestart").addEventListener("click", () => {
+  stopPlay();
+  chart.cursor = chart.entryIndex;
+  chart.pinnedToLive = false;
+  if (chart.data) { renderReplayControls(chart.data); renderChartSvg(); }
+});
+$("replayLive").addEventListener("click", () => {
+  stopPlay();
+  chart.pinnedToLive = true;
+  if (chart.data) { chart.cursor = chart.maxCursor; renderReplayControls(chart.data); renderChartSvg(); }
+});
+$("replaySlider").addEventListener("input", (e) => {
+  stopPlay();
+  chart.cursor = Number(e.target.value);
+  chart.pinnedToLive = false;
+  if (chart.data) { renderReplayControls(chart.data); renderChartSvg(); }
+});
+$("chartTradeSelect").addEventListener("change", (e) => {
+  stopPlay();
+  chart.tradeId = e.target.value || null;
+  chart.pinnedToLive = true;
+  loadChartData().catch((err) => { $("chartSvgWrap").innerHTML = `<p class="warn">${esc(err.message)}</p>`; });
+});
+$("channelTabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab");
+  if (!btn) return;
+  stopPlay();
+  chart.channel = btn.dataset.channel;
+  chart.tradeId = null;
+  chart.pinnedToLive = true;
+  refreshChart(lastTrades).catch(() => {});
 });
 
 // Don't clobber a notes field the owner is typing in when a live event arrives.

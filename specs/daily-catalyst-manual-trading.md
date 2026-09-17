@@ -974,6 +974,10 @@ export interface TradeChartData {
   candle unless the owner has dragged it back; a `LIVE` button re-pins it.
 - **Replay.** Play reveals 1 candle per 80 ms, starting from the entry candle. Pause, drag and restart are available.
   `prefers-reduced-motion` disables the animation (jumps straight to the end).
+  Until the cursor reaches the exit candle of a closed trade, the exit marker, close price and P&L stay hidden; the card
+  shows the price at the cursor instead, so the replay can be reviewed without hindsight.
+- **Caching.** Closed-trade charts and reviews are cached by `tradeId + updatedAt` only when their kline fetch succeeded;
+  a failed fetch is retried on the next request instead of being pinned as unavailable.
 - **Channel tabs.** `Rules` / `AI` / `Both` filter the trade list by `origin`; `AI` shows an empty state until Phase 4b.
 - **Rendering.** Inline SVG, no new dependencies.
   - Levels are labeled at the left edge: Entry, SL, TP; Liq only when present.
