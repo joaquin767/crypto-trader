@@ -73,3 +73,65 @@ Generated analysis for the owner's review. Not investment advice.
 2. No theory reference: §2.2 is an evidence table, not a method; the persona had no framework for weighing flows vs positioning vs macro vs supply, or for what a complete thesis must contain.
 3. No staleness rule: the expired plans had to be noticed ad hoc.
 4. No stance protocol for AI plans: the batch channel assesses rule plans, but nothing assessed the AI's own ideas.
+
+---
+
+# Second run — skill 1.1 (hardened), same report, 2026-09-17 ~15:45Z
+
+## Staleness
+
+Report `decisionTime` 2026-09-17T00:15Z; analysis time ~15:45Z (15.5 h later). Both plans carry
+`expiresAt` 2026-09-17T12:15Z: **expired**. This is a review of a record, not of something actionable.
+
+## Evidence
+
+| ID | Strength | How it applies today |
+|----|----------|----------------------|
+| X1 | Moderate | `btcEtfNetFlowUsd5d` missing → `etf-flow-momentum` `not_evaluable`. Same-day flow is coincident, not predictive. |
+| X2 | Moderate | `hoursToNextFomc` 1001.75 (next meeting ~Oct 28); `hoursToNextCpi` missing → `pre-fomc-cpi-derisk` `not_evaluable`. Event vol informs risk, not direction. |
+| X3 | Weak | APT short's supply catalyst is a monthly unlock; snapshot unlock features are empty (999 / 0). Front-loaded 14–30 days before, likely arbitraged. |
+| X4 | Weak/mixed | `funding-extreme-contrarian` `not_triggered`: percentiles 56.7 (SOL), 35.2 (APT). Positioning clean. |
+| X5 | Verified example | Unlock date/size disagree across sources ($7.09M Sept 11 vs $6.43M Sept 12). |
+| X13 | Fact | AI ideas are forward-only; nothing here is backtested. |
+| no evidence in §2.2 | — | SEC "Core ETF Asset" designation (SOL), Confidential APT mainnet, Fed rate decision and the CLARITY Act: narrative, no measured row. |
+
+## News (5 searches; URLs as returned)
+
+| Item | URL | Date | Tag |
+|------|-----|------|-----|
+| US spot BTC ETFs: net outflow ~$296M on Sept 16, after the Fed raised rates and the Senate stalled the CLARITY Act | https://www.kucoin.com/news/flash/bitcoin-spot-etfs-see-296m-net-outflow-blackrock-s-ibit-leads-with-144m-exit | Sept 16–17 | `unconfirmed` — `btcEtfNetFlowUsd1d` missing in the report; another source attributes $295.98M to Sept 17 and a third reports $746M (vendor disagreement, X5 pattern) |
+| Spot BTC ETFs saw $746M outflow "during CLARITY Act and FOMC pressure" | https://www.cryptotimes.io/2026/09/17/spot-bitcoin-etfs-see-746m-outflow-during-clarity-act-and-fomc-pressure/ | Sept 17 | `unconfirmed` — figure conflicts with the $296M reports; no feature to settle it |
+| Fed raised rates (FOMC Sept 16) | same KuCoin item | Sept 16 | `confirmed` — consistent with `hoursToNextFomc` 1001.75 pointing at the *next* meeting (~Oct 28); the Sept 16 meeting had passed at decision time |
+| Next CPI release: Oct 14, 2026, 8:30 ET (Aug CPI was released Sept 11) | https://www.bls.gov/schedule/ | schedule | `unconfirmed` — `hoursToNextCpi` missing (FRED rows hidden by the late run); this fills the gap for context only, not the feature |
+| SOL trades ~$103.29; SEC named SOL a core ETF asset on Sept 5; Transaction V1 launched Sept 9; SOL ETFs +$153.87M (week) | https://coinmarketcap.com/cmc-ai/solana/latest-updates/ , https://cryptorank.io/news/feed/7ea7a-solana-price-prediction-september-2026-network-growth-puts-150-in-focus | Sept 2026 | `contradicts` on price — report `close` 98.61 at 00:15Z wins for levels (the page is later/other venue); catalysts `unconfirmed` |
+| Aptos: Confidential APT mainnet Sept 8; unlock 11.31M APT (~0.65% of supply) Sept 11 ($7.09M) / Sept 12 ($6.43M) | https://www.kucoin.com/news/flash/three-major-token-unlocks-to-watch-in-second-week-of-september-2026 , https://coinmarketcap.com/cmc-ai/aptos/latest-updates/ , https://tokenomist.ai/aptos/unlock-events | Sept 8–12 | `contradicts` on unlocks — report `daysToNextUnlock` 999 / `nextUnlockPctOfFloat` 0 say "none known", the schedule says monthly; the report wins for the feature, and `data/manual/unlocks.json` is the owner-maintained gap |
+
+## Assessment
+
+**Order of examination.** Completeness: four rule evaluations `not_evaluable` from the late run; positioning: clean on both names (X4); calendar: FOMC passed Sept 16, next ~Oct 28; CPI Oct 14 — neither inside a 1–10 day window from Sept 17; catalysts: only the AI channel produced anything; sentiment: `fearGreed` missing, realised vol high (SOL 67.3, APT 77.9).
+
+**Rule channel.** No plans; no corroboration.
+
+**AI plan `…:SOL/USDT` long (ref 98.61, stop 91.8257, target 112.1786, qty 0.1, risk $0.68, 1x, paper) — stance: `caution`.**
+Cited features verified by the system. Positioning supports it (funding slightly negative, OI shrinking: X4 weak). The catalyst layer (ETF designation, weekly SOL ETF inflows) is `unconfirmed` and, per X1 (Moderate), coincident. The news adds a risk-off backdrop the idea did not have at 00:15Z: a rate hike and two-to-three days of BTC ETF outflows. Thesis checklist: catalyst present, mechanism thin, invalidation only via stop (no feature condition), evidence Moderate at best, data missing (flows, sentiment). Expired anyway.
+
+**AI plan `…:APT/USDT` short (ref 0.5541, stop 0.6201, target 0.4354, qty 15.16, risk $1.00, 1x, paper) — stance: `caution`.**
+Relative weakness is in the snapshot (`return7d` −11.65 vs −2.85). The supply catalyst is behind, not ahead: the unlock landed Sept 11–12, and X3 (Weak) says the effect is front-loaded before the date, so the window the thesis needs has largely passed. X5 disagreement stated. Confidential APT (Sept 8) is an `unconfirmed` counter-catalyst. Risk-off backdrop is the one thing in the news that helps a short, and it is BTC-beta, not APT-specific.
+
+**Data gaps, owner-actionable.** (1) `data/manual/unlocks.json` has no APT entry although a monthly schedule is public: add it with the next date and `pctOfCirculating` so `daysToNextUnlock` stops reading 999. (2) The other gaps close when the job runs inside its 2 h window tonight.
+
+**Proposed rule.** Not requested.
+
+Generated analysis for the owner's review. Not investment advice.
+
+## Owner check (AC-39 a–g), second run
+
+| Rule | Held? | Note |
+|------|-------|------|
+| (a) report outputs / rules-file format only | | |
+| (b) §2.2 ID + strength on every claim | | |
+| (c) no buy/sell/size outside `plans` | | |
+| (d) disclaimer | | |
+| (e) news: search-returned URLs only, tagged, feature wins | | |
+| (f) staleness stated first | | |
+| (g) theory applied, stance on every plan | | |
