@@ -249,7 +249,15 @@ Before the agent (this AI) declares a task complete, it must verify:
 
 ---
 
-## 10. Useful Commands
+## 10. Project Skills
+
+| Skill | Path | Use |
+|-------|------|-----|
+| `crypto-fundamental-analyst` | `.claude/skills/crypto-fundamental-analyst/SKILL.md` | Discuss a daily report, critique or propose a rule in `research-rules.json` format. Shares `prompts/ai-analyst.md` with the AI channel; produces no plans and never writes to `reports/`, `data/` or `research-rules.json` (spec §4.7, AC-39). |
+
+---
+
+## 11. Useful Commands
 
 ```bash
 # Install
