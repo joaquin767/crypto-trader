@@ -213,3 +213,58 @@ test("permutation never uses a 1h bar beyond cutoffMs — a poisoned history tha
     });
   });
 });
+
+// ── AC-97: draws come only from fillable days ───────────────────────────────────────────────────
+
+test("AC-97: with mostly unfillable eligible days, all runs still complete and every draw is a fillable day", () => {
+  const dailyFrom = Date.UTC(2026, 0, 1);
+  const hourlyFrom = Date.UTC(2026, 5, 1);
+  const hourlyTo = hourlyFrom + 10 * DAY; // 1h bars (and so fills) only exist for early June
+  const history = buildHistory(dailyFrom, hourlyFrom, Date.UTC(2026, 8, 30));
+  // Truncate 1h bars to early June: days after that are eligible on paper but can never fill (no bars).
+  const hourly = history.find((h) => h.sourceId === "bybit-klines-1h")!;
+  hourly.rows = hourly.rows.filter((row) => row.observedFor <= hourlyTo);
+
+  const fillable = ["2026-06-02", "2026-06-03"];
+  const unfillable = Array.from({ length: 18 }, (_, i) => `2026-08-${String(i + 1).padStart(2, "0")}`);
+  const eligibleDays = { A: [...fillable, ...unfillable], B: [...fillable, ...unfillable] };
+  const trades = [observedTrade("2026-03-01", "A"), observedTrade("2026-03-02", "A")];
+
+  const result = runPermutation({
+    rule: rule(), history, plannerConfig: CFG, trades, eligibleDays,
+    cutoffMs: Date.UTC(2026, 8, 30), slippageBps: 0, runs: 1_000, seed: 20260917,
+  });
+  assert.equal(result.runsAttempted, 1_000);
+  assert.equal(result.meanRs.length, 1_000, "90% unfillable days must not fail runs any more");
+  assert.ok(result.drawnDays.length > 0);
+  assert.ok(result.drawnDays.every((d) => fillable.includes(d)), `drew non-fillable days: ${result.drawnDays.join(", ")}`);
+});
+
+test("AC-97: a cluster with zero fillable days completes zero runs (fail closed → insufficient_data)", () => {
+  const history = buildHistory(Date.UTC(2026, 0, 1), Date.UTC(2026, 5, 1), Date.UTC(2026, 5, 11));
+  const eligibleDays = { A: ["2026-08-01", "2026-08-02"], B: ["2026-08-01", "2026-08-02"] }; // no bars in August
+  const result = runPermutation({
+    rule: rule(), history, plannerConfig: CFG, trades: [observedTrade("2026-03-01", "A")], eligibleDays,
+    cutoffMs: Date.UTC(2026, 8, 30), slippageBps: 0, runs: 50, seed: 1,
+  });
+  assert.equal(result.runsAttempted, 50);
+  assert.equal(result.meanRs.length, 0);
+  assert.deepEqual(result.drawnDays, []);
+});
+
+test("AC-97: a two-symbol cluster only draws days fillable for both symbols", () => {
+  const dailyFrom = Date.UTC(2026, 0, 1);
+  const hourlyFrom = Date.UTC(2026, 5, 1);
+  const history = buildHistory(dailyFrom, hourlyFrom, hourlyFrom + 20 * DAY);
+  // B's 1h bars stop after 5 June, so later days fill for A only.
+  const hourly = history.find((h) => h.sourceId === "bybit-klines-1h")!;
+  hourly.rows = hourly.rows.filter((row) => row.key !== "B" || row.observedFor <= Date.UTC(2026, 5, 5, 23));
+
+  const days = ["2026-06-02", "2026-06-10", "2026-06-11", "2026-06-12"];
+  const result = runPermutation({
+    rule: rule(), history, plannerConfig: CFG, trades: [observedTrade("2026-03-01", "A"), observedTrade("2026-03-01", "B")],
+    eligibleDays: { A: days, B: days }, cutoffMs: hourlyFrom + 20 * DAY, slippageBps: 0, runs: 200, seed: 7,
+  });
+  assert.equal(result.meanRs.length, 200);
+  assert.deepEqual(result.drawnDays, ["2026-06-02"]);
+});
