@@ -15,7 +15,9 @@ import type { SyncResult } from "./exchange-sync.ts";
 
 // ── Shared fill/PnL helpers (also used by src/journal/breaker.ts) ─────────────────────────────
 
-function weightedAvgPrice(fills: readonly Fill[]): number | null {
+/** Exported for reviewsToCsv (§5.16 item 3), which needs the same weighted entry/exit price a
+ *  review's `entrySlippagePct` is computed against. */
+export function weightedAvgPrice(fills: readonly Fill[]): number | null {
   const qty = fills.reduce((sum, f) => sum + f.qty, 0);
   if (qty === 0) return null;
   return fills.reduce((sum, f) => sum + f.qty * f.price, 0) / qty;
@@ -369,4 +371,63 @@ export function aggregate(reviews: readonly ClosedTradeReview[], venue: ManualTr
     venue, closedTrades, winRate, expectancyR, totalNetPnlUsd, maxDrawdownR, adherenceRate,
     byRule, byOrigin, byAiStance, chosenByPersona,
   };
+}
+
+// ── CSV export (§5.16 item 3) ───────────────────────────────────────────────────────────────────
+
+/** RFC 4180 quoting: a field containing a comma, double quote or newline is wrapped in double
+ *  quotes with every internal double quote doubled. */
+function csvField(value: string): string {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+function csvCell(v: string | number | boolean | null): string {
+  return csvField(v === null ? "" : String(v));
+}
+
+const REVIEWS_CSV_HEADER = [
+  "tradeId", "symbol", "side", "planId", "ruleId", "origin", "aiStanceAtPlan",
+  "entryTime", "exitTime", "entryPrice", "exitPrice", "quantity",
+  "rMultiple", "netPnlUsd", "fundingUsd", "feesUsd", "exitKind", "followedPlan",
+  "entrySlippagePct", "sizeDeviationPct", "maePct", "mfePct", "notes",
+] as const;
+
+/** One row per entry, joining a `ManualTrade`'s identity/timing fields with its
+ *  `reviewClosedTrade` result — GET /api/reviews.csv (§5.16 item 3). The header row is always
+ *  present, even with zero data rows; every line (header included) ends `\r\n`. */
+export function reviewsToCsv(rows: readonly { trade: ManualTrade; review: ClosedTradeReview }[]): string {
+  const lines = [REVIEWS_CSV_HEADER.join(",")];
+  for (const { trade, review } of rows) {
+    const entryTime = firstEntryTime(trade);
+    const exitTime = lastExitTime(trade);
+    const entryPrice = weightedAvgPrice(trade.entryFills);
+    const exitPrice = weightedAvgPrice(trade.exitFills);
+    const quantity = sumQty(trade.entryFills);
+    lines.push([
+      csvCell(trade.id),
+      csvCell(trade.symbol),
+      csvCell(trade.side),
+      csvCell(trade.planId),
+      csvCell(review.ruleId),
+      csvCell(review.origin),
+      csvCell(review.aiStanceAtPlan),
+      csvCell(entryTime > 0 ? new Date(entryTime).toISOString() : ""),
+      csvCell(exitTime > 0 ? new Date(exitTime).toISOString() : ""),
+      csvCell(entryPrice),
+      csvCell(exitPrice),
+      csvCell(quantity),
+      csvCell(review.rMultiple),
+      csvCell(review.netPnlUsd),
+      csvCell(review.fundingUsd),
+      csvCell(review.feesUsd),
+      csvCell(review.exitKind),
+      csvCell(review.followedPlan),
+      csvCell(review.entrySlippagePct),
+      csvCell(review.sizeDeviationPct),
+      csvCell(review.maePct),
+      csvCell(review.mfePct),
+      csvCell(trade.notes),
+    ].join(","));
+  }
+  return `${lines.join("\r\n")}\r\n`;
 }

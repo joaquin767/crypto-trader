@@ -6,13 +6,16 @@
 // has an identical shape to the one a live snapshot would have produced (buildFeatures runs
 // unchanged either way) — only `availableAt` differs, per §10.3's declared backfill lags.
 //
-// Sources NOT backfilled (A8, §10.3): bybit-oi (no usable free history — forwardOnly until
-// Phase 6) and unlocks-manual (no free point-in-time history — forwardOnly, X5). Any rule using
-// those features is `forwardOnly` and Gate D0 refuses forwardOnly rules outright.
+// Sources NOT backfilled (A8, §10.3): bybit-oi (no usable free history, still true after Phase 7
+// — coinalyze-oi below is the deeper-history OI source oiChange3dPct falls back to instead, per
+// §5.16) and unlocks-manual (no free point-in-time history — forwardOnly, X5). Any rule using
+// unlocks-manual features is `forwardOnly` and Gate D0 refuses forwardOnly rules outright.
 //
 // Usage: node --experimental-strip-types scripts/backfill-history.ts --from 2024-01-01 --to
 //   2026-09-15 [--history-dir data/history] [--config ./config.json]
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadConfig } from "../src/config.ts";
@@ -27,6 +30,8 @@ import { parseStablecoinChart } from "../src/research/sources/defillama-stableco
 import { parseFearGreedList } from "../src/research/sources/fear-greed.ts";
 import { FRED_CPI_RELEASE_ID } from "../src/research/sources/fred-release-dates.ts";
 import { parseFarsideCsv, FARSIDE_BTC_CSV_PATH, FARSIDE_ETH_CSV_PATH } from "../src/research/sources/farside.ts";
+import { buildCoinalyzeSymbolMap, parseOiHistoryResponse } from "../src/research/sources/coinalyze-oi.ts";
+import { acquireCoinalyzeSlot } from "../src/research/sources/coinalyze-shared.ts";
 import { cpiReleaseInstantUtcMs } from "../src/research/features.ts";
 import type { HistoryFile } from "../src/backtest-daily/history-store.ts";
 import { saveHistoryFile } from "../src/backtest-daily/history-store.ts";
@@ -78,6 +83,20 @@ export interface SourceSummary {
   rows: number;
   coverage: string;
   failure: string | null;
+}
+
+/** Rows already on disk for a source, or 0 when there is no readable file yet — used to report what
+ *  a failed build kept instead of overwriting (see `build` below). Never throws: an unreadable or
+ *  malformed existing file counts as 0 for the summary, and the file itself is still left alone. */
+function existingRowCount(historyDir: string, sourceId: SourceId): number {
+  try {
+    const path = join(historyDir, `${sourceId}.json`);
+    if (!existsSync(path)) return 0;
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as { rows?: unknown };
+    return Array.isArray(parsed.rows) ? parsed.rows.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 function summaryOf(sourceId: SourceId, rows: SourceRow[], failure: string | null): SourceSummary {
@@ -299,6 +318,45 @@ function buildFomcSource(deps: Pick<AdapterDeps, "fileExists" | "readFile">): So
   return rows;
 }
 
+const COINALYZE_BASE = "https://api.coinalyze.net/v1";
+const COINALYZE_OI_HISTORY_PATH = "/open-interest-history";
+
+/** §5.16: reuses the exact same `parseOiHistoryResponse` the live adapter uses, so `availableAt`
+ *  doesn't even differ between live and backfilled rows here (unlike sources whose live
+ *  `availableAt` is a conservative `fetchedAt` stand-in) — Coinalyze's `from`/`to` window already
+ *  returns genuine historical daily candles. One request covers the whole window (daily
+ *  granularity is never deleted, so no paging is needed). */
+async function buildCoinalyzeOiSource(
+  symbols: readonly string[],
+  fromMs: number,
+  toMs: number,
+  deps: AdapterDeps,
+): Promise<SourceRow[] | { failure: string }> {
+  const apiKey = process.env["COINALYZE_API_KEY"];
+  if (!apiKey) return { failure: "COINALYZE_API_KEY not set" };
+
+  const appSymbolByCoinalyze = buildCoinalyzeSymbolMap(symbols);
+  const symbolsCsv = [...appSymbolByCoinalyze.keys()].join(",");
+  const fromS = Math.floor(fromMs / 1000);
+  const toS = Math.floor(toMs / 1000);
+  const url = `${COINALYZE_BASE}${COINALYZE_OI_HISTORY_PATH}?symbols=${encodeURIComponent(symbolsCsv)}` +
+    `&interval=daily&from=${fromS}&to=${toS}&api_key=${apiKey}`;
+
+  for (let i = 0; i < symbols.length; i++) await acquireCoinalyzeSlot();
+
+  const http = await fetchWithRetryPolicy(url, undefined, deps);
+  if (http.kind === "unavailable") return { failure: http.detail };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(http.body);
+  } catch {
+    return { failure: "non-JSON response from Coinalyze open-interest-history" };
+  }
+  const result = parseOiHistoryResponse(parsed, appSymbolByCoinalyze);
+  if (result.kind === "invalid") return { failure: result.detail };
+  return result.rows;
+}
+
 function buildFarsideSource(csvPath: string, currencyKey: "BTC" | "ETH", deps: Pick<AdapterDeps, "fileExists" | "readFile">): SourceRow[] | { failure: string } {
   if (!deps.fileExists(csvPath)) return { failure: `no manual CSV at ${csvPath}` };
   try {
@@ -324,11 +382,21 @@ export async function runBackfill(args: BackfillArgs, deps: AdapterDeps): Promis
 
   async function build(sourceId: SourceId, fn: () => Promise<SourceRow[] | { failure: string }> | SourceRow[] | { failure: string }): Promise<void> {
     const result = await fn();
-    const rows = "failure" in result ? [] : result;
     const failure = "failure" in result ? result.failure : null;
+    if (failure !== null) {
+      // A failed source must never overwrite history that was already backfilled: a transient
+      // network abort would otherwise replace a multi-year file with `rows: []`, and the D0 gate
+      // would then read a real data set as an empty one. The previous file is kept as-is and the
+      // failure is reported in the summary (found when a defillama network abort blanked a
+      // 3 000-row history in a Phase 7 backfill run).
+      const kept = existingRowCount(args.historyDir, sourceId);
+      summaries.push({ ...summaryOf(sourceId, [], failure), rows: kept, coverage: kept > 0 ? "kept previous file" : "-" });
+      return;
+    }
+    const rows = result as SourceRow[];
     const file: HistoryFile = { sourceId, builtAt, coverage: { from: fromMs, to: toMs }, rows };
     saveHistoryFile(args.historyDir, file);
-    summaries.push(summaryOf(sourceId, rows, failure));
+    summaries.push(summaryOf(sourceId, rows, null));
   }
 
   await build("bybit-klines-1d", () => buildKlinesSource("bybit-klines-1d", "D", DAY_MS, config.symbols, fromMs, toMs, deps));
@@ -341,6 +409,7 @@ export async function runBackfill(args: BackfillArgs, deps: AdapterDeps): Promis
   await build("macro-calendar-manual", () => buildFomcSource(deps));
   await build("farside-btc-etf", () => buildFarsideSource(FARSIDE_BTC_CSV_PATH, "BTC", deps));
   await build("farside-eth-etf", () => buildFarsideSource(FARSIDE_ETH_CSV_PATH, "ETH", deps));
+  await build("coinalyze-oi", () => buildCoinalyzeOiSource(config.symbols, fromMs, toMs, deps));
 
   return summaries;
 }

@@ -194,6 +194,85 @@ test("§5.3a oiChange3dPct: (oi_latest / oi_at_or_before(latest-3d) - 1) x 100",
   if (f.kind === "value") assert.ok(Math.abs(f.value - 10) < 1e-9); // (110/100 - 1) * 100
 });
 
+// ── §5.16 AC-126: oiChange3dPct fallback precedence (bybit-oi primary, coinalyze-oi fallback) ──
+
+function oiRows(sourceKey: string, values: readonly number[]): SourceRow[] {
+  return values.map((v, i) => ({
+    key: sourceKey, observedFor: T - i * DAY, availableAt: T - i * DAY, field: "oi", value: v,
+  }));
+}
+
+test("AC-126: bybit-oi sufficient — coinalyze-oi is not consulted even when present", () => {
+  const bybitRows = oiRows("BTC/USDT", [110, 105, 102, 100]); // sufficient: 4 rows, no gap
+  const coinalyzeRows = oiRows("BTC/USDT", [999, 999, 999, 999]); // would give a very different value
+  const snapshots = [
+    snapshot({ sourceId: "bybit-oi", rows: bybitRows }),
+    snapshot({ sourceId: "coinalyze-oi", rows: coinalyzeRows }),
+  ];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.oiChange3dPct;
+  assert.equal(f.kind, "value");
+  if (f.kind === "value") {
+    assert.equal(f.sourceId, "bybit-oi");
+    assert.ok(Math.abs(f.value - 10) < 1e-9); // (110/100 - 1) * 100, from bybit-oi's own rows
+  }
+});
+
+test("AC-126: bybit-oi unavailable, coinalyze-oi sufficient — falls back with sourceId coinalyze-oi", () => {
+  const coinalyzeRows = oiRows("BTC/USDT", [220, 210, 204, 200]); // (220/200 - 1) * 100 = 10
+  const snapshots = [
+    snapshot({ sourceId: "bybit-oi", status: "unavailable", statusDetail: "network error", rows: [] }),
+    snapshot({ sourceId: "coinalyze-oi", rows: coinalyzeRows }),
+  ];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.oiChange3dPct;
+  assert.equal(f.kind, "value");
+  if (f.kind === "value") {
+    assert.equal(f.sourceId, "coinalyze-oi");
+    assert.ok(Math.abs(f.value - 10) < 1e-9);
+  }
+});
+
+test("AC-126: bybit-oi has too few rows, coinalyze-oi sufficient — falls back", () => {
+  const bybitRows = oiRows("BTC/USDT", [110, 105]); // fewer than 4 -> insufficient
+  const coinalyzeRows = oiRows("BTC/USDT", [220, 210, 204, 200]);
+  const snapshots = [
+    snapshot({ sourceId: "bybit-oi", rows: bybitRows }),
+    snapshot({ sourceId: "coinalyze-oi", rows: coinalyzeRows }),
+  ];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.oiChange3dPct;
+  assert.equal(f.kind, "value");
+  if (f.kind === "value") assert.equal(f.sourceId, "coinalyze-oi");
+});
+
+test("AC-126: both bybit-oi and coinalyze-oi insufficient — missing, attributed to bybit-oi's own reason", () => {
+  const bybitRows = oiRows("BTC/USDT", [110, 105]); // fewer than 4
+  const coinalyzeRows = oiRows("BTC/USDT", [220]); // fewer than 4
+  const snapshots = [
+    snapshot({ sourceId: "bybit-oi", rows: bybitRows }),
+    snapshot({ sourceId: "coinalyze-oi", rows: coinalyzeRows }),
+  ];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.oiChange3dPct;
+  assert.equal(f.kind, "missing");
+  if (f.kind === "missing") {
+    assert.equal(f.sourceId, "bybit-oi");
+    assert.match(f.reason, /fewer than 4 OI observations/);
+  }
+});
+
+test("AC-126: bybit-oi unavailable and coinalyze-oi absent entirely — missing, bybit-oi's resolve-level reason", () => {
+  const snapshots = [snapshot({ sourceId: "bybit-oi", status: "unavailable", statusDetail: "network error", rows: [] })];
+  const [fv] = buildFeatures(snapshots, ["BTC/USDT"], T, DEFAULT_STALENESS_MS);
+  const f = fv!.features.oiChange3dPct;
+  assert.equal(f.kind, "missing");
+  if (f.kind === "missing") {
+    assert.equal(f.sourceId, "bybit-oi");
+    assert.match(f.reason, /network error/);
+  }
+});
+
 // ── market-wide: ETF flows, stablecoins, fear & greed ───────────────────────────────────────
 
 test("§5.3a btcEtfNetFlowUsd1d/5d: latest day and sum of latest 5 days, copied to every symbol", () => {

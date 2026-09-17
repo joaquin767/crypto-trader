@@ -22,6 +22,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas, via the `claude-cli` subscription by default (or `anthropic-api`) | ✅ Built — AC-54/AC-54a live-smoke sign-off pending |
 | 5 — Analyst persona | Interactive Claude Code skill to discuss reports and write or critique rules | ✅ Built — AC-39 owner check pending |
 | 6 — Persona decision channel | `npm run decide`: the persona picks today's plan (or none), the CLI validates/sizes/records it and writes a Plan Report telling you exactly what to place and when to come back | ✅ Built — AC-116 owner supervised cycle pending |
+| 7 — Hardening | `coinalyze-oi` deeper-history OI source (falls back for `oiChange3dPct`) + backfill, optional desktop notification when a report is written, `GET /api/reviews.csv` | ✅ Built — Coinalyze and CSV smoke-tested live 2026-09-17 (`docs/validation/phase7-smoke-2026-09-17.md`); notification fires once you set `manual.notifyOnReport: true` |
 
 This table is updated at the end of every phase.
 
@@ -156,6 +157,7 @@ If any check fails, stop: no live trade until it is fixed and the check passes a
 |------|-----|-----------|
 | `config.json` | Existing config; `symbols` drives which markets are researched | everything |
 | `FRED_API_KEY` | Free key from FRED, stored in the secrets file (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) | `hoursToNextCpi` |
+| `COINALYZE_API_KEY` | Free key from [coinalyze.net](https://coinalyze.net), stored in the secrets file | Deeper `oiChange3dPct` history (`coinalyze-oi`, Phase 7) — bybit-oi's own OI history is too short for a backtest window |
 | `data/manual/macro-calendar.json` | FOMC statement times (UTC). Seeded with the remaining 2026 meetings; keep `asOf` fresh (≤ 120 days) | `hoursToNextFomc` |
 | `data/manual/unlocks.json` | Token unlocks for your symbols' base assets; update `asOf` at least weekly | `daysToNextUnlock`, `nextUnlockPctOfFloat` |
 | Schedule | systemd user timer running `research:daily` at 00:15 UTC (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) | the daily cycle |
@@ -184,6 +186,7 @@ Manual file formats:
 
 ```
 FRED_API_KEY=...
+COINALYZE_API_KEY=...
 CLAUDE_CODE_OAUTH_TOKEN=...
 ANTHROPIC_API_KEY=...
 ```
@@ -263,7 +266,7 @@ If you skip the daily import, ETF rules simply show `not_evaluable` in that day'
 | `npm run research:daily -- --refetch` | Re-run today as a new revision; nothing is overwritten | same |
 | `npm run research:daily -- --no-ai` | Skip the AI step for this run only (`aiAnalyst.status: "disabled"`, reason `--no-ai`); the rules channel is unaffected | same |
 | `npm run journal` | Start the dashboard at <http://127.0.0.1:3082> (local only) | exits non-zero if the Bybit key has trade/withdraw permission or can't be verified; exit 5 from `research:daily` if the journal file is unreadable |
-| `npm run backfill -- --from 2024-01-01 --to <yesterday>` | Build point-in-time history in `data/history/` for backtests | prints a per-source summary; failed sources are empty with a reason, never partial |
+| `npm run backfill -- --from 2024-01-01 --to <yesterday>` | Build point-in-time history in `data/history/` for backtests, including `coinalyze-oi` (deeper OI history) when `COINALYZE_API_KEY` is set | prints a per-source summary; a failed source **keeps its previous history file** and reports the reason, so a transient network error never blanks a backfilled source |
 | `npm run backtest:daily -- --rule <id> --mode dev` | Backtest a rule on the development period only (before 2025-09-16); free to repeat | 0 on completion |
 | `npm run backtest:daily -- --rule <id> --mode holdout` | **Gate D0.** Uses 1 of the rule's 3 attempts, recorded before it runs | 0 only for `edge_confirmed` · 1 otherwise or refused |
 | `npm run backtest:daily -- --rule <id> --mode d1-check` | **Gate D1** from your paper trades | 0 only for `paper_passed` |
@@ -616,7 +619,7 @@ An invalid file stops the run with every problem listed — fix them all, then r
 | `close`, `return1d`, `return7d` | Latest daily close and % returns | Bybit daily candles |
 | `atr14d`, `realizedVol7d` | Volatility: average true range; annualized realized vol % | Bybit daily candles |
 | `fundingRate8hAvg3d`, `fundingRatePercentile90d` | Funding level and how extreme it is vs 90 days | Bybit funding history |
-| `oiChange3dPct` | Open-interest change over 3 days | Bybit open interest |
+| `oiChange3dPct` | Open-interest change over 3 days | Bybit open interest, falling back to Coinalyze OI history (Phase 7) when Bybit's own is too short |
 | `btcEtfNetFlowUsd1d`, `btcEtfNetFlowUsd5d`, `ethEtfNetFlowUsd1d` | Spot ETF net flows (USD) | Farside |
 | `stablecoinSupplyChange7dPct` | Total stablecoin supply change | DefiLlama |
 | `fearGreed` | Sentiment index 0–100 | alternative.me |
@@ -624,6 +627,29 @@ An invalid file stops the run with every problem listed — fix them all, then r
 | `daysToNextUnlock`, `nextUnlockPctOfFloat` | Next token unlock (999 / 0 when none within 90 days) | manual unlocks file |
 
 Exact formulas: spec §5.3a. Evidence strength behind each data family: spec §2.2.
+
+---
+
+## Phase 7 — Hardening
+
+Three independent, optional additions (spec §5.16). None changes a gate, a rule, or a shipped number.
+
+**Coinalyze OI (deeper open-interest history).** `bybit-oi`'s own history is only 10 daily points —
+too short for a stable D0 backtest window. With `COINALYZE_API_KEY` set (free key, see
+[Setup](#one-time)), `oiChange3dPct` automatically falls back to Coinalyze's OI history whenever
+Bybit's own rows are insufficient, and `npm run backfill` also backfills `coinalyze-oi` so a rule
+using `oiChange3dPct` can be evaluated over a real backtest window without `forwardOnly`. Without the
+key, nothing changes — `oiChange3dPct` behaves exactly as it did before this phase.
+
+**Desktop notification.** Set `manual.notifyOnReport: true` in `config.json`, or pass `--notify` to
+`research:daily` for one run, to get a `notify-send` desktop notification
+(`"<date> report written: <n> rule plans, <m> AI plans, ai <status>"`) once the report is written.
+Off by default; a missing `notify-send` binary or any other failure is silently ignored (one line to
+stderr) and never affects the report or the exit code.
+
+**CSV export.** The journal dashboard's "Closed trades" section has an **Export CSV** link
+(`GET /api/reviews.csv`) — one row per closed trade (both venues), the same numbers shown in the
+dashboard's review panel, for spreadsheet analysis.
 
 ---
 

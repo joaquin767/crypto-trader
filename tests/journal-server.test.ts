@@ -533,3 +533,48 @@ test("a closed trade's chart is not cached after a failed kline fetch: the next 
     assert.equal(calls, callsAfterOk);
   });
 });
+
+// ── §5.16 item 3: GET /api/reviews.csv (AC-130, AC-131, AC-132) ─────────────────────────────────
+
+test("AC-130: an empty journal returns 200, the right headers, and header row only", async () => {
+  await withTempDir(async (dir) => {
+    const now = 1_700_000_000_000;
+    const { app } = createJournalApp(baseDeps(dir, { now: () => now }, 34620));
+    const res = await app.request("/api/reviews.csv", { headers: { Host: "127.0.0.1:34620" } });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/csv/);
+    const expectedDate = new Date(now).toISOString().slice(0, 10);
+    assert.equal(res.headers.get("content-disposition"), `attachment; filename="reviews-${expectedDate}.csv"`);
+    const body = await res.text();
+    assert.equal(body, "tradeId,symbol,side,planId,ruleId,origin,aiStanceAtPlan,entryTime,exitTime,entryPrice,exitPrice,quantity,rMultiple,netPnlUsd,fundingUsd,feesUsd,exitKind,followedPlan,entrySlippagePct,sizeDeviationPct,maePct,mfePct,notes\r\n");
+  });
+});
+
+test("AC-131: one closed trade produces one row; a note with a comma and a quote is RFC-4180 quoted; an open trade is excluded", async () => {
+  await withTempDir(async (dir) => {
+    const entryT = 1_700_000_000_000;
+    const exitT = entryT + 3_600_000;
+    const closedTrade = openPaperTrade({
+      id: "closed-1", status: "closed", exitKind: "target", updatedAt: exitT,
+      exitFills: [{ execId: "x1", time: exitT, price: 110, qty: 2, feeUsd: 0.22, side: "sell" }],
+      notes: 'He said "size down", so I did',
+    });
+    const openTrade = openPaperTrade({ id: "open-1", planId: null, plannedSnapshot: null });
+    saveManualJournal([closedTrade, openTrade], { path: join(dir, "manual-journal.json") });
+    const { app } = createJournalApp(baseDeps(dir, {}, 34621));
+    const res = await app.request("/api/reviews.csv", { headers: { Host: "127.0.0.1:34621" } });
+    assert.equal(res.status, 200);
+    const lines = (await res.text()).split("\r\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 2); // header + exactly one data row (the open trade is excluded)
+    assert.ok(lines[1]!.startsWith("closed-1,BTC/USDT,long,"));
+    assert.ok(lines[1]!.endsWith('"He said ""size down"", so I did"'));
+  });
+});
+
+test("AC-132: GET /api/reviews.csv with a mismatched Host header returns 403", async () => {
+  await withTempDir(async (dir) => {
+    const { app } = createJournalApp(baseDeps(dir, {}, 34622));
+    const res = await app.request("/api/reviews.csv", { headers: { Host: "evil.example:34622" } });
+    assert.equal(res.status, 403);
+  });
+});

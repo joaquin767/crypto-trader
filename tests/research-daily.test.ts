@@ -15,7 +15,7 @@ import type { AdapterDeps } from "../src/research/http.ts";
 import {
   decideResearchDailyAction, latestReportRevision, parseResearchDailyArgs, runResearchDaily,
 } from "../scripts/research-daily.ts";
-import type { ResearchDailyArgs } from "../scripts/research-daily.ts";
+import type { NotifySpawnFn, ResearchDailyArgs } from "../scripts/research-daily.ts";
 import type { ManualTrade } from "../src/journal/types.ts";
 import type { AiAnalystConfig, AiCallResult, AiClientPort } from "../src/research/ai/types.ts";
 
@@ -106,6 +106,7 @@ function makeArgs(dir: string, overrides: Partial<ResearchDailyArgs> = {}): Rese
     aiRulesRoot: join(dir, "ai-rules"),
     promptPath: join(dir, "prompt.md"),
     decisionsRoot: join(dir, "decisions"),
+    notify: false,
     ...overrides,
   };
 }
@@ -562,5 +563,94 @@ test("AC-41: rule-origin plans are byte-identical between an AI-enabled run and 
   } finally {
     rmSync(dirA, { recursive: true, force: true });
     rmSync(dirB, { recursive: true, force: true });
+  }
+});
+
+// ── §5.16 item 2: desktop notification (AC-128, AC-129) ─────────────────────────────────────────
+
+interface FakeSpawnRecord { calls: { command: string; args: string[] }[] }
+
+function fakeSpawn(record: FakeSpawnRecord, opts: { throwSync?: boolean; emitError?: boolean } = {}): NotifySpawnFn {
+  return ((command: string, args: readonly string[]) => {
+    if (opts.throwSync) throw new Error("spawn failed synchronously");
+    record.calls.push({ command, args: [...args] });
+    return {
+      on(event: string, listener: (err: Error) => void) {
+        if (event === "error" && opts.emitError) listener(new Error("ENOENT: notify-send not found"));
+      },
+    };
+  }) as unknown as NotifySpawnFn;
+}
+
+test("AC-128: notification disabled (no config flag, no --notify) never calls spawnFn", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir);
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    const record: FakeSpawnRecord = { calls: [] };
+    const result = await runResearchDaily(args, deps, undefined, fakeSpawn(record));
+    assert.equal(result.exitCode, 0);
+    assert.equal(record.calls.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-128: manual.notifyOnReport true calls spawnFn once with the expected notify-send args", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir, { configPath: writeTempConfig(dir, { manual: { notifyOnReport: true } }) });
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    const record: FakeSpawnRecord = { calls: [] };
+    const result = await runResearchDaily(args, deps, undefined, fakeSpawn(record));
+    assert.equal(result.exitCode, 0);
+    assert.equal(record.calls.length, 1);
+    assert.equal(record.calls[0]!.command, "notify-send");
+    assert.equal(record.calls[0]!.args[0], "crypto-trader");
+    assert.equal(record.calls[0]!.args[1], "2026-09-16 report written: 0 rule plans, 0 AI plans, ai disabled");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-128: --notify flag alone (config false) also calls spawnFn once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir, { notify: true });
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    const record: FakeSpawnRecord = { calls: [] };
+    const result = await runResearchDaily(args, deps, undefined, fakeSpawn(record));
+    assert.equal(result.exitCode, 0);
+    assert.equal(record.calls.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-129: a synchronously-throwing spawnFn never changes the exit code or the written report", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir, { notify: true });
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    const result = await runResearchDaily(args, deps, undefined, fakeSpawn({ calls: [] }, { throwSync: true }));
+    assert.equal(result.exitCode, 0);
+    assert.ok(existsSync(join(args.reportsRoot, "2026-09-16.json")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-129: a spawnFn whose child emits an 'error' event (missing binary) never changes the exit code", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  try {
+    const args = makeArgs(dir, { notify: true });
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    const record: FakeSpawnRecord = { calls: [] };
+    const result = await runResearchDaily(args, deps, undefined, fakeSpawn(record, { emitError: true }));
+    assert.equal(result.exitCode, 0);
+    assert.equal(record.calls.length, 1); // spawn was still attempted
+    assert.ok(existsSync(join(args.reportsRoot, "2026-09-16.json")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -13,6 +13,10 @@ import { createBybitFundingAdapter } from "../src/research/sources/bybit-funding
 import { createBybitInstrumentsAdapter } from "../src/research/sources/bybit-instruments.ts";
 import { createBybitKlines1dAdapter } from "../src/research/sources/bybit-klines.ts";
 import { createBybitOiAdapter } from "../src/research/sources/bybit-oi.ts";
+import {
+  coinalyzeSymbolFor, createCoinalyzeOiAdapter, parseOiHistoryResponse,
+} from "../src/research/sources/coinalyze-oi.ts";
+import { createCoinalyzeRateLimiter } from "../src/research/sources/coinalyze-shared.ts";
 import { createDefillamaStablecoinsAdapter } from "../src/research/sources/defillama-stablecoins.ts";
 import {
   createFarsideBtcAdapter, FARSIDE_BTC_CSV_PATH, parseFarsideCsv, parseFarsideHtml,
@@ -116,6 +120,131 @@ test("bybit-oi: parses open-interest rows", async () => {
   assert.equal(snap.status, "ok");
   assert.equal(snap.rows.length, 4);
   assert.equal(snap.rows[0]!.field, "oi");
+});
+
+// ── coinalyze-oi (§5.16, AC-123..AC-125) ────────────────────────────────────────────────────────
+
+async function withCoinalyzeKey<T>(key: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env["COINALYZE_API_KEY"];
+  if (key === undefined) delete process.env["COINALYZE_API_KEY"];
+  else process.env["COINALYZE_API_KEY"] = key;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env["COINALYZE_API_KEY"];
+    else process.env["COINALYZE_API_KEY"] = prev;
+  }
+}
+
+test("AC-123: coinalyze-oi parses a recorded response into rows shaped like bybit-oi's", async () => {
+  await withCoinalyzeKey("test-key", async () => {
+    const deps = fakeDeps({ fetch: jsonFetch(readFixture("coinalyze-oi-history-response.json")) });
+    const adapter = createCoinalyzeOiAdapter(deps);
+    const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+    assert.equal(snap.status, "ok");
+    assert.equal(snap.rows.length, 5);
+    const first = snap.rows[0]!;
+    assert.equal(first.key, "BTC/USDT");
+    assert.equal(first.field, "oi");
+    assert.equal(first.value, 100500); // fixture's first candle's `c`
+    assert.equal(first.observedFor, 1_788_998_400_000); // fixture's first candle's `t` * 1000
+    assert.equal(first.availableAt, first.observedFor + 25 * 60 * 60 * 1000); // day close + 1h cushion
+  });
+});
+
+test("AC-124: coinalyze-oi fails closed — missing key, network error, bad shape", async () => {
+  await withCoinalyzeKey(undefined, async () => {
+    const deps = fakeDeps({ fetch: rejectingFetch("test forgot to stub fetch") });
+    const adapter = createCoinalyzeOiAdapter(deps);
+    const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+    assert.equal(snap.status, "unavailable");
+    assert.match(snap.statusDetail, /COINALYZE_API_KEY not set/);
+    assert.deepEqual(snap.rows, []);
+  });
+
+  await withCoinalyzeKey("test-key", async () => {
+    const deps = fakeDeps({ fetch: rejectingFetch("DNS failure") });
+    const adapter = createCoinalyzeOiAdapter(deps);
+    const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+    assert.equal(snap.status, "unavailable");
+    assert.match(snap.statusDetail, /DNS failure/);
+  });
+
+  await withCoinalyzeKey("test-key", async () => {
+    const deps = fakeDeps({ fetch: jsonFetch(JSON.stringify({ not: "an array" })) });
+    const adapter = createCoinalyzeOiAdapter(deps);
+    const snap = await adapter.fetch(NOW, ["BTC/USDT"]);
+    assert.equal(snap.status, "invalid");
+    assert.deepEqual(snap.rows, []);
+  });
+});
+
+test("coinalyzeSymbolFor: app symbol maps to Bybit's Coinalyze exchange code", () => {
+  assert.equal(coinalyzeSymbolFor("BTC/USDT"), "BTCUSDT.6");
+  assert.equal(coinalyzeSymbolFor("ETH/USDT"), "ETHUSDT.6");
+});
+
+test("parseOiHistoryResponse: unknown coinalyze symbol in the response is invalid, not silently dropped", () => {
+  const result = parseOiHistoryResponse(
+    [{ symbol: "SOLUSDT.6", history: [{ t: 1, c: 1 }] }],
+    new Map([["BTCUSDT.6", "BTC/USDT"]]),
+  );
+  assert.equal(result.kind, "invalid");
+});
+
+test("AC-133a: an HTTP 200 whose array covers none/not all requested symbols is unavailable, never ok with no rows", async () => {
+  await withCoinalyzeKey("test-key", async () => {
+    // Coinalyze answers 200 `[]` for a symbol grammar it does not recognise — the first live run
+    // of the adapter did exactly this, and an `ok` snapshot with zero rows would have read as a
+    // data gap instead of a fixable source problem.
+    const empty = createCoinalyzeOiAdapter(fakeDeps({ fetch: jsonFetch("[]") }));
+    const snapEmpty = await empty.fetch(NOW, ["BTC/USDT", "ETH/USDT"]);
+    assert.equal(snapEmpty.status, "unavailable");
+    assert.match(snapEmpty.statusDetail, /BTC\/USDT, ETH\/USDT/);
+    assert.deepEqual(snapEmpty.rows, []);
+
+    // Partial coverage fails closed the same way, naming only the symbol that is missing.
+    const partial = createCoinalyzeOiAdapter(fakeDeps({ fetch: jsonFetch(readFixture("coinalyze-oi-history-response.json")) }));
+    const snapPartial = await partial.fetch(NOW, ["BTC/USDT", "ETH/USDT"]);
+    assert.equal(snapPartial.status, "unavailable");
+    assert.match(snapPartial.statusDetail, /ETH\/USDT/);
+    assert.doesNotMatch(snapPartial.statusDetail, /BTC\/USDT,/);
+  });
+});
+
+test("AC-125: coinalyze rate limiter queues once exhausted, then proceeds after a simulated refill", async () => {
+  let now = 0;
+  let sleepCalls = 0;
+  const limiter = createCoinalyzeRateLimiter({
+    capacity: 2,
+    refillPerMinute: 60, // 1 token/sec, easy math
+    deps: {
+      now: () => now,
+      sleep: async (ms) => { sleepCalls++; now += ms; },
+    },
+  });
+  await limiter.acquire();
+  await limiter.acquire();
+  // Bucket is now empty — the 3rd acquire must wait for a refill.
+  await limiter.acquire();
+  assert.equal(sleepCalls, 1);
+});
+
+test("AC-125: the live adapter acquires one rate-limiter slot per requested symbol before its single fetch call", async () => {
+  await withCoinalyzeKey("test-key", async () => {
+    let fetchCalls = 0;
+    const deps = fakeDeps({
+      fetch: (async () => {
+        fetchCalls++;
+        return new Response(readFixture("coinalyze-oi-history-response.json"), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    const adapter = createCoinalyzeOiAdapter(deps);
+    await adapter.fetch(NOW, ["BTC/USDT", "ETH/USDT"]);
+    // One HTTP round trip regardless of symbol count — the rate limiter (module-level, exercised
+    // above in isolation) is what accounts for the 2 credits, not 2 fetch calls.
+    assert.equal(fetchCalls, 1);
+  });
 });
 
 // ── bybit-instruments ────────────────────────────────────────────────────────────────────────

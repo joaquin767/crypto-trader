@@ -417,6 +417,7 @@ Invalid JSON or shape → snapshot `invalid`; missing file → `unavailable`.
 | defillama-stablecoins | 48 h | `GET https://stablecoins.llama.fi/stablecoincharts/all` |
 | fear-greed | 26 h | `GET https://api.alternative.me/fng/?limit=10&format=json` |
 | unlocks-manual | 7 d (by `asOf`) | file |
+| coinalyze-oi (Phase 7, §5.16) | 26 h | `GET https://api.coinalyze.net/v1/open-interest-history?symbols=<BASE>USDT.6[,...]&interval=daily&from=<unix s>&to=<unix s>&api_key=$COINALYZE_API_KEY` (`.6` is Coinalyze's exchange code for Bybit) |
 
 Symbol mapping uses the existing `appSymbolToBybit` (`src/bybit/adapters.ts:117`). Request timeout 10 s.
 
@@ -1115,6 +1116,7 @@ export interface ManualTradingConfig {
   fundingSignVerified: boolean;   // default false; owner sets true after §12.13
   breakerResetAt: string | null;  // ISO-8601 UTC; owner-set to clear drawdown/consecutiveLosses latches (§5.8a), default null
   journalPort: number;            // default 3082
+  notifyOnReport: boolean;        // default false; desktop notification when research:daily writes a report (§5.16), overridable per run with --notify
 }
 // Config gains `manual?: Partial<ManualTradingConfig>`; loadConfig validates and throws `ConfigError` (src/config.ts:176) on violation.
 
@@ -1166,14 +1168,15 @@ export interface PersonaConfig {
 ```
 
 - `snapshot:daily [--date YYYY-MM-DD] [--revision N] [--snapshot-root DIR]` (Phase 1; later called internally by `research:daily`) — scheduled decision time is `<date>T00:15:00Z` (default: today UTC). **Effective decision time** (used for features, reports and plans): if every snapshot's `fetchedAt` lies in `[scheduled, scheduled + 2h]` it is the latest `fetchedAt` (`mode: "live"`); otherwise it is the scheduled time (`mode: "scheduled"`, e.g. backdated runs). Without this, sources whose `availableAt` is `fetchedAt` would always be filtered by P2 in live runs. Output adds `scheduledDecisionTime`, `decisionTime`, `decisionMode`; runs every adapter for `config.symbols`, writes snapshots, prints `{ sources: [{sourceId,status,statusDetail,rows}], features: FeatureVector[] }` as JSON to stdout. Exit 0 whenever snapshots were written (any status); exit 3 if any snapshot for the date exists and no `--revision`; exit 4 if decision time is in the future.
-- `research:daily [--date YYYY-MM-DD] [--refetch]` — exit 0 on report written (complete or incomplete); exit 2 on rule-set validation failure; exit 3 if report for the date exists and `--refetch` not given.
+- `research:daily [--date YYYY-MM-DD] [--refetch] [--notify]` — exit 0 on report written (complete or incomplete); exit 2 on rule-set validation failure; exit 3 if report for the date exists and `--refetch` not given. `--notify` (or `manual.notifyOnReport: true`) fires a best-effort desktop notification once the report is written (§5.16).
 - `backtest:daily --rule <id> --mode dev|holdout|d1-check` — `dev` never touches holdout data (asserts every sim trade's `entryTime < holdoutStart`); `holdout` runs `runGateD0` and writes `data/validation/daily/gate-d0-<ruleId>-<date>.json`; `d1-check` reads `manual-journal.json`, the rule's latest `edge_confirmed` gate-d0 artifact and `docs/validation/d1-<ruleId>.md`, runs `runGateD1`, and writes `data/validation/daily/gate-d1-<ruleId>-<date>.json`. Exit code 0 only when the verdict is `edge_confirmed` / `paper_passed`; 1 otherwise.
 - `journal` HTTP: `GET /` (journal.html), `GET /events` (SSE: `live` every sync, `trade` on change, `: keepalive` 30s),
   `GET /api/trades?venue=`, `GET /api/review/:tradeId`, `GET /api/stats?venue=`, `POST /api/trades/:id/link {planId}`,
   `POST /api/paper/entry {planId, fillPrice, time}`, `POST /api/paper/exit {tradeId, fillPrice, time, exitKind}`,
   `PATCH /api/trades/:id/notes {notes}`,
   `PATCH /api/trades/:id/exit-kind {exitKind: "thesis_invalidated"}` (409 unless the current `exitKind` is `discretionary` and the trade is closed),
-  `GET /api/state` → `{ liveSync: "enabled" | "disabled"; liveSyncReason: string; lastSync: SyncResult | null; fundingSignVerified: boolean; breaker: { tripped: boolean; trigger: string | null; details: string }; openViews: LiveTradeView[] }`.
+  `GET /api/state` → `{ liveSync: "enabled" | "disabled"; liveSyncReason: string; lastSync: SyncResult | null; fundingSignVerified: boolean; breaker: { tripped: boolean; trigger: string | null; details: string }; openViews: LiveTradeView[] }`,
+  `GET /api/reviews.csv` (Phase 7, §5.16) → `text/csv`, one row per closed trade (both venues), `Content-Disposition: attachment; filename="reviews-<today>.csv"`.
   Server binds `127.0.0.1` only. All error responses are `{ error: string }` with status 400 (bad body), 403 (Host/Origin), 404 (unknown id), 409 (state conflict).
 - `research:daily` order of operations: snapshots → features → rule outcomes → rule plans → `buildReport` → write
   `reports/<date>.json` + `.md` (**the rules report is persisted before any AI call**) → if `ai.enabled`: `runAiAnalyst`
@@ -1874,6 +1877,214 @@ window, gap rule, the two come-back cases) so the persona's chat answers and the
 
 ---
 
+### 5.16 Phase 7 hardening
+
+Three independent, P2, additive items. None changes a shipped number, a gate, or any existing rule's
+`forwardOnly`. §9's Phase 7 row names them; this section is their contract.
+
+#### Item 1 — Coinalyze OI (`coinalyze-oi`)
+
+`coinalyze-oi` is already a valid `SourceId` (§5.1) with a declared `maxStalenessMs` of 26 h
+(`src/research/features.ts`'s `DEFAULT_STALENESS_MS`, unchanged) but no adapter before this phase. It exists to
+give `oiChange3dPct` real point-in-time OI history: `bybit-oi`'s own history is only 10 daily points
+(§10.3), too short for a stable D0 backtest window, while Coinalyze's `interval=daily` granularity is
+**never deleted** (its docs: "For daily timeframe/granularity we do not delete the old data" — only
+intraday granularities age out after ~1500–2000 points).
+
+```ts
+// src/research/sources/coinalyze-oi.ts
+export const COINALYZE_BYBIT_EXCHANGE_CODE = "6"; // Coinalyze's exchange code for Bybit — verified
+  // 2026-09-16 by loading https://coinalyze.net/markets/?exchange=6 and confirming the page renders
+  // as "Bybit Live Prices and Charts" (Coinalyze's own market browser keys off this exact code;
+  // the API gives no unauthenticated way to list exchange codes, since /exchanges requires a key).
+
+export function coinalyzeSymbolFor(appSymbol: string): string;
+  // "BTC/USDT" -> "BTCUSDT.6" (appSymbolToBybit's base+quote + "." + Coinalyze's exchange code;
+  // verified live against GET /v1/future-markets, 2026-09-17: Bybit USDT perps carry no infix).
+  // There is no cross-exchange "aggregated" symbol in Coinalyze's contract; every symbol names one
+  // exchange, so this always names Bybit specifically, matching what bybit-oi.ts itself measures.
+
+export function buildCoinalyzeSymbolMap(symbols: readonly string[]): Map<string, string>;
+  // coinalyze symbol -> app symbol, for the reverse lookup a parsed response needs. Shared between
+  // the live adapter and scripts/backfill-history.ts so both build the exact same request.
+
+export function parseOiHistoryResponse(
+  parsed: unknown,
+  appSymbolByCoinalyze: ReadonlyMap<string, string>,
+): { kind: "ok"; rows: SourceRow[] } | { kind: "invalid"; detail: string };
+  // Pure parser reused verbatim by the live adapter and the backfill script (the file-header
+  // convention every other backfilled source already follows). One input row per returned daily
+  // candle: `{ key: appSymbol, observedFor: candle.t * 1000, availableAt: observedFor + 25h,
+  // field: "oi", value: candle.c }` — `c` (the candle's closing OI, Coinalyze's
+  // `candlestick_oi` shape: `{t,o,h,l,c}`) is used as the day's OI reading, the same role
+  // `bybit-oi.ts`'s single point-in-time `openInterest` value plays for `computeOiChange3dPct`
+  // (which only ever reads one `value` per row, sorted by `observedFor`). `observedFor` is the
+  // candle's own start (UTC day boundary, matching every other daily row in this system, e.g.
+  // `bybit-klines-1d`'s bar-open convention). `+ 25h` is documented below.
+
+export function createCoinalyzeOiAdapter(deps: AdapterDeps): SourceAdapter;
+  // id "coinalyze-oi", maxStalenessMs 26h (DEFAULT_STALENESS_MS, unchanged). fetch() reads
+  // `COINALYZE_API_KEY` from the environment only — never from config.json (same rule as every
+  // other credential in this system, §10.2) — and returns `unavailable` with detail
+  // "COINALYZE_API_KEY not set" when it is absent, never throwing. When set, it requests the last
+  // 10 daily candles per symbol (matching bybit-oi.ts's own `limit=10`, comfortably above
+  // oiChange3dPct's 4-row minimum) in ONE HTTP call for all of `symbols` (Coinalyze's `symbols`
+  // param is comma-separated, up to 20):
+  //   GET https://api.coinalyze.net/v1/open-interest-history
+  //     ?symbols=<coinalyze symbols, comma-separated>&interval=daily
+  //     &from=<decisionTime/1000 - 10*86400>&to=<decisionTime/1000>&api_key=<COINALYZE_API_KEY>
+  // The key travels as the `api_key` query parameter (Coinalyze's own documented auth: header OR
+  // query param, both named `api_key`) — it matches http.ts's existing `SECRET_QUERY_PARAM` regex
+  // (`api[_-]?key`), so `redactUrl`/the network-error path already redact it with no adapter-side
+  // change, the same as FRED's `api_key`. A non-2xx/network failure or unparseable body ->
+  // `unavailable` via `fetchWithRetryPolicy` (§7/AC-7a: 10s timeout, one 429 retry ≤ 60s). An
+  // array whose shape doesn't match (§10.2's declared contract) -> `invalid`, zero rows.
+```
+
+**Rate limiting.** Coinalyze's free tier is 40 API calls per minute per key (§10.2), and Coinalyze's own
+accounting charges **one credit per symbol named in `symbols`**, even though the whole request is a
+single HTTP round trip — so a 2-symbol (BTC+ETH) request costs 2 of the 40. `src/bybit/rate-limiter.ts`'s
+`EndpointRateLimiter` is Bybit-specific (keyed off `src/bybit/types.ts`'s per-path budgets) and is not
+reused; instead:
+
+```ts
+// src/research/sources/coinalyze-shared.ts
+export interface CoinalyzeRateLimiterDeps { now: () => number; sleep: (ms: number) => Promise<void>; }
+export interface CoinalyzeRateLimiter { acquire(): Promise<void>; }
+export function createCoinalyzeRateLimiter(options?: {
+  capacity?: number; refillPerMinute?: number; deps?: CoinalyzeRateLimiterDeps;
+}): CoinalyzeRateLimiter;
+  // Token bucket; capacity/refillPerMinute default to the documented 40/min budget. `deps`
+  // defaults to the real clock/timer — overridable so tests never sleep in real time.
+export function acquireCoinalyzeSlot(): Promise<void>;
+  // One module-level shared instance (capacity 40, refill 40/min) — same "one shared bucket per
+  // process" pattern as bybit-shared.ts's acquireBybitSlot. The live adapter and the backfill
+  // script both `await acquireCoinalyzeSlot()` once per symbol in the request, before the single
+  // `fetch` call, so the credit accounting matches Coinalyze's, not the HTTP call count.
+```
+
+**Feature wiring — precedence (`src/research/features.ts`).** `oiChange3dPct` keeps `bybit-oi` as the
+primary source and falls back to `coinalyze-oi` only when `bybit-oi` cannot produce a value:
+
+1. If `bybit-oi`'s snapshot resolves (`status: "ok"`, not stale) **and** `computeOiChange3dPct` over its
+   rows succeeds (≥ 4 observations, ≤ 24 h gap to the target `latest − 3d` row), that value is used —
+   `FeatureValue.sourceId: "bybit-oi"`. `coinalyze-oi` is not even inspected in this case.
+2. Otherwise, if `coinalyze-oi`'s snapshot resolves **and** `computeOiChange3dPct` over *its* rows
+   succeeds, that value is used instead — `FeatureValue.sourceId: "coinalyze-oi"`. This is the "sourceId
+   recorded on the FeatureValue is the one actually used" rule from §9's Phase 7 row.
+3. Otherwise the feature is `{kind:"missing"}` with `sourceId: "bybit-oi"` (the nominal primary,
+   matching `FEATURE_SOURCE_ID.oiChange3dPct`, which is **not** changed by this section) and the reason
+   is `bybit-oi`'s own failure reason — never a compound message blending both sources' failures.
+
+`FEATURE_SOURCE_ID.oiChange3dPct` stays `"bybit-oi"`: it names the nominal/primary source for
+Gate D1's `unexplainedIncompleteDays` bookkeeping (§5.10a), which is out of scope for this section. A day
+on which `oiChange3dPct` was actually populated via the `coinalyze-oi` fallback still counts as
+"sourced from bybit-oi" for that bookkeeping — an accepted approximation (the feature genuinely had a
+value that day), not a defect, and not something this section's tests assert against.
+
+**Backfill (`scripts/backfill-history.ts`).** A new `coinalyze-oi` history source is added to
+`runBackfill`, built with the exact same `parseOiHistoryResponse` the live adapter uses (this file's
+existing convention: "only `availableAt` differs" — here it doesn't even differ, since Coinalyze's
+`from`/`to` window already returns genuine historical daily candles, unlike sources whose live
+`availableAt` is a conservative `fetchedAt` stand-in). One request covers the whole `[--from, --to]`
+window (daily granularity is never deleted, so no paging is needed). Missing `COINALYZE_API_KEY` records
+`{ sourceId: "coinalyze-oi", rows: [], failure: "COINALYZE_API_KEY not set" }` — same non-fatal-to-the-run
+contract as every other backfilled source. `bybit-oi` itself is still **not** backfilled (its own history
+is too short to be worth requesting, unchanged) — `coinalyze-oi` is the new, separate, deeper-history
+source `oiChange3dPct` can fall back to once its history is backfilled.
+
+**Declared availability lag (extends §10.3).** A daily OI candle's own close is `observedFor + 24h`
+(the candle covers one UTC day); Coinalyze's docs don't publish a settlement/processing lag for the
+daily granularity the way FRED or DefiLlama do for theirs, so this reuses the existing "+1h cushion"
+convention already used for `fear-greed` (§10.3: "D at 00:00 UTC + 1h") rather than inventing a new
+unverified number: **`availableAt = observedFor + 24h + 1h`** (25h total), for both the live adapter and
+the backfill. Once a rule's D0 window is covered by a `coinalyze-oi` backfill run (`npm run backfill
+--from <date> --to <yesterday>`, same command as every other source), that rule no longer *needs*
+`forwardOnly: true` on account of `oiChange3dPct` — stated here as a capability, not a retroactive
+edit: no existing rule's `forwardOnly` flag is changed by this section (none of the 3 shipped example
+rules reference `oiChange3dPct`).
+
+**Docs (`docs/DAILY_WORKFLOW.md`).** `COINALYZE_API_KEY` (free key from coinalyze.net) is added next to
+`FRED_API_KEY` in the secrets-file section, with a one-line note on what it adds (deeper OI history for
+`oiChange3dPct`, and D0 backtests that no longer need `forwardOnly` for it) and the backfill command.
+
+#### Item 2 — Desktop notification when a report is written
+
+```ts
+// src/config.ts — ManualTradingConfig gains:
+notifyOnReport: boolean; // default false. Best-effort desktop notification once research:daily
+  // finishes writing a report (rules-only or, when the AI step ran, the final report).
+```
+
+```ts
+// scripts/research-daily.ts
+export interface ResearchDailyArgs {
+  // ...existing fields...
+  notify: boolean; // --notify flag; ORed with manual.notifyOnReport (either one turns it on for this run)
+}
+export type NotifySpawnFn = (
+  command: string, args: readonly string[],
+) => { on(event: "error", listener: (err: Error) => void): void };
+export async function runResearchDaily(
+  args: ResearchDailyArgs,
+  deps: AdapterDeps,
+  aiClientFactory?: (cfg: AiAnalystConfig, snapshotRoot: string) => AiClientPort,
+  spawnFn?: NotifySpawnFn, // defaults to node:child_process's real `spawn`
+): Promise<ResearchDailyResult>;
+```
+
+After the report is written — the rules-only report when the AI step doesn't run (`aiDisabledReason !==
+null`), otherwise the final report after `attachAiAnalyst` — and only when `manual.notifyOnReport ||
+args.notify`, `runResearchDaily` calls
+`spawnFn("notify-send", ["crypto-trader", "<date> report written: <n> rule plans, <m> AI plans, ai
+<status>"], { stdio: "ignore" })`, where `<n>`/`<m>` count that report's `plans` entries with
+`kind:"plan"` and `origin:"rules-file"`/`"ai-analyst"` respectively, and `<status>` is
+`report.aiAnalyst.status`. This is **best-effort and fire-and-forget**: it never `await`s the child, it
+attaches only an `"error"` listener (fired for a missing `notify-send` binary — `ENOENT` — or any other
+spawn failure), and both that listener and a synchronous `spawnFn` throw are caught and print one
+`console.error` line; neither ever changes `runResearchDaily`'s return value, exit code, or the report
+files already written on disk. A run with notification disabled never calls `spawnFn` at all.
+
+#### Item 3 — CSV export of reviews
+
+```ts
+// src/journal/trade-analytics.ts
+export function reviewsToCsv(rows: readonly { trade: ManualTrade; review: ClosedTradeReview }[]): string;
+```
+
+One row per entry, columns in this fixed order: `tradeId, symbol, side, planId, ruleId, origin,
+aiStanceAtPlan, entryTime, exitTime, entryPrice, exitPrice, quantity, rMultiple, netPnlUsd, fundingUsd,
+feesUsd, exitKind, followedPlan, entrySlippagePct, sizeDeviationPct, maePct, mfePct, notes` — the first 7
+and `notes` come from the trade itself (`entryTime`/`exitTime` are the earliest entry / latest exit fill
+time, ISO-8601 UTC; `entryPrice`/`exitPrice` are the fill-quantity-weighted average price of the entry /
+exit fills; `quantity` is the summed entry fill quantity), the rest verbatim from that trade's
+`reviewClosedTrade` result (§5.9). `null` fields render as an empty CSV field. Quoting is RFC 4180: a
+field containing a comma, double quote or newline is wrapped in double quotes with every internal double
+quote doubled — `notes` is free text and is the field most likely to need it. The header row is always
+present, even with zero data rows; every line (header included) ends `\r\n`.
+
+```ts
+// src/server/journal-server.ts — new endpoint
+// GET /api/reviews.csv
+```
+
+One row per **closed** journal trade (the same set `/api/stats?venue=` reviews, both venues combined
+here — this is a raw export, not a venue-filtered statistic), reusing the same per-trade `reviewOne`
+cache the existing `/api/review/:tradeId` and `/api/stats` handlers already use (no repeated kline
+fetches). Response: `Content-Type: text/csv; charset=utf-8`,
+`Content-Disposition: attachment; filename="reviews-<date>.csv"` where `<date>` is today's UTC date
+(`deps.now()`, `YYYY-MM-DD`) — not any one trade's date, since the export always covers the whole
+journal. Subject to the same Host-header check as every other endpoint (the existing global
+middleware); GET needs no Origin check, same as every other `GET`. An empty journal (or one with no
+closed trades) returns 200 with the header row only.
+
+```html
+<!-- public/journal.html — "Closed trades — review" heading gains a plain link -->
+<a href="/api/reviews.csv">Export CSV</a>
+```
+
+---
+
 ## 6. Acceptance criteria
 
 Each item maps to at least one test in `tests/` (root level, per E11) unless marked **[manual]**.
@@ -2069,6 +2280,24 @@ listed last because it is the owner's end-to-end run, not a unit test.
 - [x] AC-122: **`--revise` requires a fresh journal sync.** Given `manual.staleAfterMs` 120 000 and `manual-journal.sync.json` holding `{liveSync:"enabled", status:"ok", syncedAt: now − 300_000}`, then `--mode plan --revise` and `--mode manage --trade A --revise` both exit **5** with a message containing `journal_stale: run the journal server sync first`, and nothing is written; with `syncedAt: now − 60_000` both proceed to the normal "already acted on" checks; with `status:"failed"`, or the file missing, or the file unparseable, then exit 5 (never treated as fresh); with `liveSync:"disabled"` (paper-only mode) the check is skipped and the run proceeds regardless of `syncedAt`; a **first** run without `--revise` never consults the file and never exits 5 for staleness.
 - [ ] AC-116 [manual]: **First supervised cycle.** The owner runs one full cycle end to end and signs it off in `docs/validation/persona-decision-cycle-<date>.md`: (1) `npm run research:daily`; (2) asks the persona for today's decision and reads the JSON block before it runs anything; (3) `npm run decide -- --date <date>` succeeds and the owner confirms the Plan Report's numbers against `reports/<date>.json` by hand; (4) the owner places the paper orders inside the execute window and records the entry via `POST /api/paper/entry`; (5) at the next daily report the owner runs `manage open position` for that trade (`--trade <id>`) and confirms the artifact `data/decisions/<date>.manage.<tradeId>.json` matches what the persona said in chat — and, if a second position is open, that it produced its own separate artifact; (6) after the position closes, `review closed trade` produces an artifact whose `rMultiple` equals the dashboard's. The sign-off states explicitly whether the Plan Report answered "what do I place" and "when do I come back" without the owner asking a follow-up question — that is what requirement 4 is for.
 
+### 6.10 Phase 7 hardening (P2)
+
+Numbering continues from AC-122. None of these touch the rules, AI or persona channels; every test is a
+unit test against a fixture — no network, no real `notify-send`, no real clock.
+
+- [x] AC-123: **Coinalyze OI parses.** Given a recorded `open-interest-history` response (`tests/fixtures/research/coinalyze-oi-history-response.json`, shaped from the documented `open_interest_history`/`candlestick_oi` schema) for one symbol's daily candles, `createCoinalyzeOiAdapter(...).fetch(...)` returns `status: "ok"` with one row per candle: `field: "oi"`, `value` equal to that candle's `c`, `observedFor` equal to `candle.t * 1000`, and `availableAt` equal to `observedFor + 25h`.
+- [x] AC-124: **Coinalyze OI fails closed.** Given `COINALYZE_API_KEY` unset, the snapshot is `unavailable` with a detail containing `COINALYZE_API_KEY not set` and the adapter never calls `fetch`; given a network error, `unavailable` (never throws); given a response whose shape doesn't match (missing `history`, non-array top level, non-numeric `t`/`c`), `invalid` with zero rows.
+- [x] AC-125: **Coinalyze rate limiting.** `createCoinalyzeRateLimiter({capacity, refillPerMinute, deps})`'s `acquire()` resolves immediately while tokens remain; once exhausted, it calls the injected `deps.sleep` at least once before resolving, and resolves without a further sleep once the injected `deps.now()` has advanced enough for a token to refill. The live adapter calls `acquireCoinalyzeSlot()` once per requested symbol before its single HTTP request (2 symbols -> 2 acquisitions, 1 fetch call).
+- [x] AC-126: **`oiChange3dPct` fallback precedence.** Given `bybit-oi` snapshot `ok` with ≥ 4 gap-free rows, the feature is a value with `sourceId: "bybit-oi"` regardless of what `coinalyze-oi`'s snapshot holds. Given `bybit-oi` `unavailable` (or `ok` with < 4 rows, or a gap) and `coinalyze-oi` snapshot `ok` with ≥ 4 gap-free rows, the feature is a value with `sourceId: "coinalyze-oi"` computed from `coinalyze-oi`'s own rows. Given both insufficient, the feature is `missing` with `sourceId: "bybit-oi"` and `reason` equal to what `bybit-oi` alone would have produced.
+- [x] AC-127: **Coinalyze OI backfill.** Given a fetch stub returning the same fixture as AC-123 for the Coinalyze URL, `runBackfill` writes `data/history/coinalyze-oi.json` whose rows satisfy the same `availableAt = observedFor + 25h` formula as the live adapter (same `parseOiHistoryResponse`); given `COINALYZE_API_KEY` unset, that source's summary has `rows: 0` and a non-null `failure`, and every other source's backfill still completes (one source's failure is never fatal to the run, per this file's existing header comment).
+- [x] AC-128: **Notification fires (or doesn't) on the right condition.** Given `manual.notifyOnReport: false` and no `--notify`, an injected `spawnFn` is never called after a successful run. Given either is `true`, `spawnFn` is called exactly once with `("notify-send", ["crypto-trader", "<date> report written: <n> rule plans, <m> AI plans, ai <status>"], ...)`, where `<n>`/`<m>`/`<status>` match that run's written report.
+- [x] AC-129: **Notification failure is invisible to the caller.** Given a `spawnFn` that throws synchronously, or one that returns an object whose registered `"error"` listener is invoked (simulating `ENOENT`), `runResearchDaily`'s exit code and returned `report`/`markdown` are unchanged from the same run with notification disabled, and the report files on disk are identical.
+- [x] AC-130: **CSV export, empty case.** Given a journal with no closed trades, `GET /api/reviews.csv` returns 200, `Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="reviews-<today>.csv"`, and a body equal to exactly the header row followed by `\r\n`.
+- [x] AC-131: **CSV export, one row and quoting.** Given one closed trade whose `notes` contains both a comma and a double quote (e.g. `He said "size down", so I did`), `GET /api/reviews.csv` returns exactly one data row whose columns match `reviewsToCsv`'s documented order and that trade's `reviewClosedTrade` result, and whose `notes` field is wrapped in double quotes with the internal double quote doubled (RFC 4180); an open trade in the same journal contributes no row.
+- [x] AC-132: **CSV export Host check.** `GET /api/reviews.csv` with a mismatched `Host` header returns 403, identically to every other endpoint (AC-66).
+- [x] AC-133 [manual]: **Live Coinalyze smoke.** With a real `COINALYZE_API_KEY`, `npm run backfill -- --from <date> --to <yesterday>` produces non-empty `data/history/coinalyze-oi.json` rows for BTC and ETH, and a live `research:daily` run's `oiChange3dPct` resolves to a value (not `missing`) for at least one symbol. **Run 2026-09-17** with the owner's key: live adapter `ok`, 10 daily rows per symbol; backfill `coinalyze-oi` 1 978 rows over 2024-01-01..2026-09-15; record and the two defects it exposed (the `_PERP` symbol grammar, and a failed source overwriting history) in `docs/validation/phase7-smoke-2026-09-17.md`. The `research:daily` half is the owner's to confirm on the next scheduled run (the daily feature still prefers `bybit-oi`, which is `ok` today).
+- [x] AC-133a: **Symbol-incomplete Coinalyze response fails closed.** Given an HTTP 200 whose array omits a requested symbol (Coinalyze's answer for an unknown symbol grammar), then the snapshot is `unavailable` with a detail naming the missing symbols and `rows` empty — never `ok` with zero rows (`tests/research-sources.test.ts`).
+
 ---
 
 ## 7. Error & edge behavior (fail-closed table)
@@ -2129,6 +2358,13 @@ Default for every row: **halt the dependent output and surface it; never substit
 | Persona: `manage` block asserts a `thesis` the CLI's own `evaluateThesis` does not produce for that trade | Exit **2** (`thesis_mismatch`), detail naming both states; nothing written. The persona reports the system's state, it never asserts one — the same rule as the review mode's R check. | Closed |
 | Persona: `--revise` (modes `plan`/`manage`) while the journal's last sync is missing, unparseable, `failed`, or older than `manual.staleAfterMs` | Exit **5**, `journal_stale: run the journal server sync first`; nothing written. "Already acted on" is judged from the journal, so a stale journal makes that judgement worthless — a fill may simply not be imported yet. Skipped in paper-only mode (`liveSync: "disabled"`), where there is no exchange state to be stale about. | Closed |
 | Persona: `review` reports an R, exit kind or adherence that differs from the journal's computed review | Exit **2** (`out_of_range`) — the persona reports the system's numbers, it never authors them. | Closed |
+| **(Phase 7)** Coinalyze: `COINALYZE_API_KEY` unset | Snapshot `unavailable`, detail names the missing env var; `oiChange3dPct` still resolves from `bybit-oi` if that alone is sufficient, else `missing` (§5.16). | Closed |
+| Coinalyze: HTTP error, timeout, or response shape mismatch | Same as any other source (`unavailable` / `invalid`, zero rows); never crashes `research:daily` or `backfill`. | Closed |
+| Coinalyze: 40 req/min budget exhausted | The shared token bucket queues the request until a credit refills; never surfaces a 429 to the caller. | Closed |
+| `oiChange3dPct`: both `bybit-oi` and `coinalyze-oi` insufficient or unavailable | `missing`, `sourceId: "bybit-oi"`, reason is `bybit-oi`'s own — never a compound message blending both sources' failures. | Closed |
+| Desktop notification: `notify-send` missing, or the spawned/attempted call fails | One `console.error` line; `research:daily`'s exit code and the already-written report files are unaffected. | Closed |
+| `GET /api/reviews.csv` on a journal with no closed trades | 200, header row only. | n/a |
+| `GET /api/reviews.csv` with a mismatched Host header | 403, identically to every other endpoint. | Closed |
 
 ---
 
@@ -2216,7 +2452,7 @@ Default for every row: **halt the dependent output and surface it; never substit
 | **4b — AI analyst** | §4.15–4.19, §5.13, `ai` config, report/Markdown integration, journal `aiStanceAtPlan`, `byOrigin`/`byAiStance`. AC-40..54. Depends on Phases 2–3. | P0 (AI channel only) |
 | **5 — Persona** | §4.7 via gentle-ai `skill-creator`, sharing `prompts/ai-analyst.md`. AC-39. | P1 |
 | **6 — Persona decision channel** (revision 3) | §4.20–4.23, §5.6a, §5.15: `src/decision/{types,decide,plan-report}.ts`, `scripts/decide-daily.ts`, `persona` config (§5.11), `PlanOrigin` widened to `"persona"` across `src/research/planner.ts`, `src/research/rules.ts` and `src/journal/trade-analytics.ts` (`byOrigin.persona`, `chosenByPersona`, `ClosedTradeReview.basedOnRuleKey`), the three new persona gates + `references/decision-protocol.md`, and `config.symbols` / `research-rules.json` narrowed to BTC + ETH. **Also modifies shipped Phase 2–3 code:** `src/server/journal-server.ts` resolves a `persona-*` `planId` from `data/decisions/` for `POST /api/trades/:id/link` and `POST /api/paper/entry` (§5.8a, revision-3 paragraph) **and calls `writeSyncStatus` after every sync attempt** (the sync-freshness sidecar, §5.15; `src/journal/manual-journal.ts` gains `readSyncStatus`/`writeSyncStatus`), and `src/research/report.ts`'s `openTradeThesis` step loads an open persona trade's rule from that file's `personaRule`. AC-98..AC-122. **Depends on Phases 2–5** (report, journal, gates, AI plans to choose from, and the persona skill itself). Does **not** modify `planTrade`'s body or any shipped number. | P0 (persona channel only) |
-| **7 — Hardening** | Coinalyze OI backfill (longer OI history), optional desktop notification when report is written, CSV export of reviews. | P2 |
+| **7 — Hardening** | §5.16: `coinalyze-oi` adapter + backfill (longer OI history, `oiChange3dPct` fallback), optional desktop notification when a report is written, `GET /api/reviews.csv`. AC-123..AC-133. | P2 |
 | **8 — Retire scalper** | Separate spec decides whether to delete `src/main.ts` auto-trading loop and 5m harness. | P3 |
 
 Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules produce plans; Gate D1 needs calendar time, Gate D0 does not.
@@ -2242,7 +2478,7 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - Tests must live directly in `tests/` (glob `tests/*.test.ts` is non-recursive, E11). Tests never hit the network: adapters are tested against recorded fixtures in `tests/fixtures/research/`.
 - FRED requires `FRED_API_KEY` env var; missing key → source `unavailable` (not a crash). Limit 120 req/min.
 - Bybit read-only key via `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`; distinct env names from the auto-trader's keys so the two cannot be confused.
-- Coinalyze free API: 40 req/min, requires key `COINALYZE_API_KEY` (Phase 7 — "Hardening" — only; renumbered from 6 in revision 3).
+- Coinalyze free API: 40 req/min, requires key `COINALYZE_API_KEY` (Phase 7 — "Hardening" — only; renumbered from 6 in revision 3). Daily-granularity history is never deleted (only intraday granularities age out), which is why it is the deeper-history OI source (§5.16).
 - AI credentials: never written to config, logs, reports, or snapshots. Provider `claude-cli` (default):
   `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), falling back to `ANTHROPIC_API_KEY` if unset —
   when the OAuth token IS set, `ANTHROPIC_API_KEY` is removed from the spawned CLI's environment so the
@@ -2267,7 +2503,8 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 |--------|-------------------------------|--------------|
 | bybit klines 1d | bar close | yes |
 | bybit funding | settlement time | yes |
-| bybit OI | not usable before snapshots start (history too short, X6) | no → rules using `oiChange3dPct` are `forwardOnly` until Phase 7 (Hardening; renumbered from 6 in revision 3) |
+| bybit OI | not usable before snapshots start (history too short, X6) | no → rules using `oiChange3dPct` are `forwardOnly` unless backfilled via `coinalyze-oi` (Phase 7, §5.16); `bybit-oi` itself is still not backfilled |
+| coinalyze-oi (Phase 7, §5.16) | candle close (day end) + 1h cushion (no documented settlement lag published; reuses the fear-greed "+1h" convention) | yes, once backfilled (`npm run backfill`); a rule using `oiChange3dPct` no longer needs `forwardOnly` on that account once its D0 window is covered |
 | farside ETF flows for US trading day D | D+1 at 12:00 UTC | yes, with lag |
 | FRED release dates | scheduled release time (08:30 ET converted to UTC with DST) — schedule published ahead | yes |
 | FOMC dates (manual JSON) | statement time 14:00 ET; schedule known a year ahead | yes |
@@ -2315,6 +2552,8 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 14. **(Revision 3)** `rg -n "writeFile|appendFile|mkdir|fs\." src/decision` — every hit is in `scripts/decide-daily.ts`'s call path only: `src/decision/decide.ts` and `src/decision/plan-report.ts` are pure and must contain none (the sole exception is `skillHash`, which reads the skill files and may live in its own `src/decision/skill-hash.ts`).
 15. **(Revision 3)** `rg -n "data/decisions|reports/.*decision\.md" src scripts --glob '!scripts/decide-daily.ts'` — returns nothing: only the `decide` CLI writes those paths (P9).
 16. **[manual, Phase 6]** AC-116's supervised cycle, signed off in `docs/validation/persona-decision-cycle-<date>.md`, plus 7 consecutive days on which the owner reads only the Plan Report before acting and records any question it failed to answer.
+17. **(Phase 7)** `rg -n "COINALYZE_API_KEY=" src scripts data/history` — returns nothing (no credential leakage; the key is read only from `process.env`, never written to config, snapshots, history files, or reports).
+18. **[manual, Phase 7]** Live smoke: `npm run backfill -- --from <date> --to <yesterday>` with a real `COINALYZE_API_KEY` produces non-empty `data/history/coinalyze-oi.json` rows; `notify-send` fires a real desktop notification when `manual.notifyOnReport: true`; `GET /api/reviews.csv` opens in a spreadsheet application with the expected columns.
 
 ---
 

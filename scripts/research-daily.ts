@@ -20,9 +20,11 @@
 // §5.8a) — no report written.
 //
 // Usage: node --experimental-strip-types scripts/research-daily.ts --config ./config.json
-//   [--date YYYY-MM-DD] [--refetch] [--no-ai] [--snapshot-root <dir>] [--reports-root <dir>]
+//   [--date YYYY-MM-DD] [--refetch] [--no-ai] [--notify] [--snapshot-root <dir>] [--reports-root <dir>]
 //   [--rules-path <file>] [--journal-path <file>] [--ai-ledger-path <file>]
 //   [--ai-rules-root <dir>] [--prompt-path <file>]
+// --notify (or config.manual.notifyOnReport) fires a best-effort desktop notification once the
+// report is written (§5.16 item 2).
 // (--snapshot-root/--reports-root/--rules-path/--journal-path/--ai-ledger-path/--ai-rules-root/
 // --prompt-path are not in the spec's CLI list — like snapshot-daily.ts's --snapshot-root, they
 // exist so tests and scratch smoke runs never touch the committed data/snapshots, reports/,
@@ -30,6 +32,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -78,7 +81,17 @@ export interface ResearchDailyArgs {
   aiRulesRoot: string;
   promptPath: string;
   decisionsRoot: string;
+  /** §5.16 item 2: --notify flag, ORed with manual.notifyOnReport (either one turns it on). */
+  notify: boolean;
 }
+
+/** §5.16 item 2: the subset of node:child_process's `spawn` signature the desktop notification
+ *  needs — injectable so tests never spawn a real process. */
+export type NotifySpawnFn = (
+  command: string,
+  args: readonly string[],
+  options?: { stdio?: "ignore" },
+) => { on(event: "error", listener: (err: Error) => void): void };
 
 function flagValue(argv: readonly string[], flag: string): string | undefined {
   const i = argv.indexOf(flag);
@@ -103,7 +116,26 @@ export function parseResearchDailyArgs(argv: readonly string[], now: number): Re
     aiRulesRoot: flagValue(argv, "--ai-rules-root") ?? "data/ai-rules",
     promptPath: flagValue(argv, "--prompt-path") ?? "prompts/ai-analyst.md",
     decisionsRoot: flagValue(argv, "--decisions-root") ?? "data/decisions",
+    notify: argv.includes("--notify"),
   };
+}
+
+/** §5.16 item 2: best-effort, fire-and-forget desktop notification once a report is written.
+ *  Never awaits the child, never throws, never changes the caller's exit code — a missing
+ *  `notify-send` binary or any other spawn failure prints one stderr line and is otherwise
+ *  ignored. */
+function notifyReportWritten(date: string, report: DailyReport, spawnFn: NotifySpawnFn): void {
+  const ruleCount = report.plans.filter((p) => p.kind === "plan" && p.origin === "rules-file").length;
+  const aiCount = report.plans.filter((p) => p.kind === "plan" && p.origin === "ai-analyst").length;
+  const message = `${date} report written: ${ruleCount} rule plans, ${aiCount} AI plans, ai ${report.aiAnalyst.status}`;
+  try {
+    const child = spawnFn("notify-send", ["crypto-trader", message], { stdio: "ignore" });
+    child.on("error", (err) => {
+      console.error(`[research:daily] desktop notification failed: ${(err as Error).message}`);
+    });
+  } catch (err) {
+    console.error(`[research:daily] desktop notification failed: ${(err as Error).message}`);
+  }
 }
 
 function reportFilePath(reportsRoot: string, date: string, revision: number, ext: "json" | "md"): string {
@@ -186,6 +218,10 @@ export async function runResearchDaily(
   // callers/tests may still inject their own factory (e.g. a fake port) regardless of provider.
   aiClientFactory: (cfg: AiAnalystConfig, snapshotRoot: string) => AiClientPort = (cfg, snapshotRoot) =>
     cfg.provider === "claude-cli" ? createClaudeCliAiClient(cfg, snapshotRoot) : createAnthropicAiClient(cfg, snapshotRoot),
+  // §5.16 item 2: real node:child_process spawn by default; tests inject a fake. Cast because
+  // node:child_process's `spawn` is a large overloaded type that TS won't structurally match
+  // against this narrower call shape — the (command, args, options) call below is a real overload.
+  spawnFn: NotifySpawnFn = spawn as unknown as NotifySpawnFn,
 ): Promise<ResearchDailyResult> {
   const now = deps.now();
   const latestExisting = latestReportRevision(args.reportsRoot, args.date);
@@ -340,7 +376,10 @@ export async function runResearchDaily(
   writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx" });
   writeFileSync(mdPath, markdown, { flag: "wx" });
 
+  const notifyEnabled = manual.notifyOnReport || args.notify;
+
   if (aiDisabledReason !== null) {
+    if (notifyEnabled) notifyReportWritten(args.date, report, spawnFn);
     return { exitCode: 0, report, markdown };
   }
 
@@ -403,6 +442,8 @@ export async function runResearchDaily(
   const finalMarkdown = renderReportMarkdown(finalReport);
   writeFileSync(jsonPath, `${JSON.stringify(finalReport, null, 2)}\n`);
   writeFileSync(mdPath, finalMarkdown);
+
+  if (notifyEnabled) notifyReportWritten(args.date, finalReport, spawnFn);
 
   return { exitCode: 0, report: finalReport, markdown: finalMarkdown };
 }

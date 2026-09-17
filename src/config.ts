@@ -237,6 +237,7 @@ export interface ManualTradingConfig {
   fundingSignVerified: boolean; // default false; owner sets true after §12.13
   breakerResetAt: string | null; // ISO-8601 UTC; owner-set to clear drawdown/consecutiveLosses latches (§5.8a), default null
   journalPort: number; // default 3082
+  notifyOnReport: boolean; // default false; desktop notification when research:daily writes a report (§5.16), overridable per run with --notify
 }
 
 export const DEFAULT_MANUAL_TRADING_CONFIG: ManualTradingConfig = {
@@ -254,6 +255,7 @@ export const DEFAULT_MANUAL_TRADING_CONFIG: ManualTradingConfig = {
   fundingSignVerified: false,
   breakerResetAt: null,
   journalPort: 3082,
+  notifyOnReport: false,
 };
 
 /** Merges `config.manual` (if any) over the spec's revision-1 defaults. loadConfig already
@@ -608,6 +610,9 @@ function validateManualTradingConfig(manual: Partial<ManualTradingConfig>): void
     if (typeof manual.breakerResetAt !== "string" || Number.isNaN(Date.parse(manual.breakerResetAt))) {
       throw new ConfigError("config.manual.breakerResetAt must be an ISO-8601 date string or null if set");
     }
+  }
+  if (manual.notifyOnReport !== undefined && typeof manual.notifyOnReport !== "boolean") {
+    throw new ConfigError("config.manual.notifyOnReport must be a boolean if set");
   }
 }
 

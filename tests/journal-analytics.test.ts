@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { aggregate, liveView, reviewClosedTrade } from "../src/journal/trade-analytics.ts";
+import { aggregate, liveView, reviewClosedTrade, reviewsToCsv } from "../src/journal/trade-analytics.ts";
 import type { ClosedTradeReview } from "../src/journal/trade-analytics.ts";
 import type { SyncResult } from "../src/journal/exchange-sync.ts";
 import type { ManualTrade } from "../src/journal/types.ts";
@@ -207,4 +207,34 @@ test("revision 3: chosenByPersona groups closed persona-origin trades by basedOn
   assert.equal(key.closed, 2);
   assert.equal(key.netPnlUsd, 3);
   assert.ok(Math.abs(key.expectancyR! - 0.5) < 1e-9);
+});
+
+// ── §5.16 item 3: reviewsToCsv ──────────────────────────────────────────────────────────────────
+
+test("reviewsToCsv: header row only for an empty list", () => {
+  const csv = reviewsToCsv([]);
+  assert.equal(csv, "tradeId,symbol,side,planId,ruleId,origin,aiStanceAtPlan,entryTime,exitTime,entryPrice,exitPrice,quantity,rMultiple,netPnlUsd,fundingUsd,feesUsd,exitKind,followedPlan,entrySlippagePct,sizeDeviationPct,maePct,mfePct,notes\r\n");
+});
+
+test("reviewsToCsv: one data row matches the trade and its review, RFC 4180 quoting on a comma+quote note", () => {
+  const trade = openTrade({
+    id: "t1", venue: "paper", status: "closed", exitKind: "target",
+    entryFills: [{ execId: "e1", time: 1_700_000_000_000, price: 100, qty: 1, feeUsd: 0.05, side: "buy" }],
+    exitFills: [{ execId: "x1", time: 1_700_003_600_000, price: 110, qty: 1, feeUsd: 0.06, side: "sell" }],
+    notes: 'He said "size down", so I did',
+  });
+  const review = reviewClosedTrade(trade, []);
+  const csv = reviewsToCsv([{ trade, review }]);
+  const lines = csv.split("\r\n");
+  assert.equal(lines.length, 3); // header + 1 row + trailing empty string after the final \r\n
+  const cols = lines[1]!.split(",");
+  assert.equal(cols[0], "t1");
+  assert.equal(cols[1], "BTC/USDT");
+  assert.equal(cols[2], "long");
+  assert.equal(cols[7], new Date(1_700_000_000_000).toISOString());
+  assert.equal(cols[8], new Date(1_700_003_600_000).toISOString());
+  // The notes field contains a comma and a double quote, so it must be quoted with the internal
+  // quote doubled — split(",") above would otherwise have split it into extra columns, so its
+  // exact rendering is checked directly against the raw line instead.
+  assert.ok(lines[1]!.endsWith('"He said ""size down"", so I did"'));
 });
