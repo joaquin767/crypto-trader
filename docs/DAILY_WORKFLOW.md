@@ -19,7 +19,7 @@ Nothing trades automatically, and no plan may use real money or leverage until i
 | 3 — Journal & dashboard | `npm run journal`: read-only fill import, live view, post-trade review | ✅ Built |
 | 3b — Trade chart & replay | Price chart per trade with plan levels, volatility range, live follow and candle-by-candle replay | ✅ Built |
 | 4 — Backtest & gates | `npm run backfill` + `npm run backtest:daily`: dev backtests, Gate D0 (holdout) and Gate D1 (paper) verdicts | ✅ Built |
-| 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas | ✅ Built |
+| 4b — AI analyst | Claude assesses each rule plan and proposes up to 3 ideas, via the `claude-cli` subscription by default (or `anthropic-api`) | ✅ Built — AC-54/AC-54a live-smoke sign-off pending |
 | 5 — Analyst persona | Interactive Claude Code skill to write and critique rules | ⏳ Planned |
 
 This table is updated at the end of every phase.
@@ -161,7 +161,8 @@ If any check fails, stop: no live trade until it is fixed and the check passes a
 | `research-rules.json` | Your rule set. Ships with 3 `EXAMPLE` rules — replace them with your own (format below) | rules channel |
 | Read-only Bybit key | Create an API key with **read-only** permission (no Trade, no Withdraw) and export `BYBIT_READONLY_API_KEY` / `BYBIT_READONLY_API_SECRET`. The journal refuses to start with any other key | live sync |
 | `manual.journalStartTime` | ISO time in `config.json` (e.g. `"2026-09-17T00:00:00Z"`). Only executions after it are journaled, so old auto-trader history stays out | live sync |
-| `ANTHROPIC_API_KEY` | Stored in the secrets file (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) — never in `config.json`. Set `config.ai.enabled: true` to turn the channel on (off by default) | AI analyst channel — see [below](#ai-analyst-channel) |
+| `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) | From `claude setup-token`, stored in the secrets file (see [Secrets and the daily schedule](#secrets-and-the-daily-schedule)) — never in `config.json`. Set `config.ai.enabled: true` to turn the channel on (off by default) | AI analyst channel, default provider `claude-cli` — see [below](#ai-analyst-channel) |
+| `claude` CLI installed next to `node` | The systemd job has no `PATH`, so `claude` must sit in the same bin dir as the `node` used to run it (true by default for an nvm install) — or set `config.ai.cliPath` explicitly | AI analyst channel, provider `claude-cli` |
 
 Without the read-only key the dashboard runs in **paper-only mode** — useful for the whole paper phase (Gate D1).
 
@@ -182,8 +183,15 @@ Manual file formats:
 
 ```
 FRED_API_KEY=...
+CLAUDE_CODE_OAUTH_TOKEN=...
 ANTHROPIC_API_KEY=...
 ```
+
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) is one long token that wraps over two lines on
+screen — paste it whole on a single `KEY=value` line; pasting only the visible first line gives
+`401 OAuth access token is invalid` at run time. `ANTHROPIC_API_KEY` here is only needed as a
+fallback (provider `claude-cli` with no OAuth token) or when `config.ai.provider` is
+`"anthropic-api"`.
 
 - Interactive terminals load it from `~/.bashrc`:
   `set -a; [ -f ~/.config/crypto-trader/secrets.env ] && . ~/.config/crypto-trader/secrets.env; set +a`
@@ -361,26 +369,46 @@ open trades. It writes its findings into the same report, under the heading
   system's backtest window, so no backtest of it would be honest. It only earns trust the same way a
   rule does — Gate D1, forward, on paper.
 
+**Provider (`config.ai.provider`):** two ways to run the same analysis —
+
+| Provider | How it runs | Cost |
+|----------|-------------|------|
+| `"claude-cli"` (default) | Through the `claude` CLI already installed for this Claude Code session, under **your Claude subscription** | `costUsd` is always `0` (nothing is billed per call); `listCostUsd` records what the CLI itself estimates the call would cost at list price, for comparison only — it never counts against `monthlyBudgetUsd` |
+| `"anthropic-api"` | Directly via `@anthropic-ai/sdk`, pay-as-you-go | `costUsd` is the real, budget-gated spend — roughly **$9–28/month** at `claude-opus-5` list prices for one call/day (§13 A15), capped by `monthlyBudgetUsd` |
+
+Switching `provider` changes `promptVersionHash` (it's a genuine behaviour change — different
+execution path, different model-serving mechanics) and restarts the AI channel's Gate D1 track record.
+
 **Config (`config.ai`, all optional — every field has a default):**
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `enabled` | `false` | Turns the channel on. Off means every report shows `aiAnalyst.status: "disabled"` |
+| `provider` | `"claude-cli"` | `"claude-cli"` (subscription, via the local CLI) or `"anthropic-api"` (pay-as-you-go SDK) — see table above |
+| `cliPath` | `null` | Path to the `claude` executable, only used when `provider` is `"claude-cli"`. `null` auto-resolves to the `claude` binary next to the running `node` binary (nvm installs both in the same bin dir, and the systemd service has no `PATH`), falling back to the bare name `"claude"` resolved via `PATH` |
 | `model` | `"claude-opus-5"` | Model id |
 | `effort` | `"high"` | Reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`) |
 | `maxTokens` | `32000` | Max output tokens for the streamed request |
 | `webSearchMaxUses` | `5` | Max web searches per call; `0` disables the tool |
 | `maxIdeasPerDay` | `3` | Cap on new AI-origin ideas per day (0..3) |
-| `monthlyBudgetUsd` | `15` | Hard cap on month-to-date spend before the call is skipped |
-| `inputUsdPerMTok` / `outputUsdPerMTok` / `webSearchUsdPerRequest` | `5` / `25` / `0.01` | Pricing used to estimate `costUsd` |
+| `monthlyBudgetUsd` | `15` | Hard cap on month-to-date **real** spend (`costUsd`) before the call is skipped — never sees `provider: "claude-cli"` calls, since those always cost `0` |
+| `inputUsdPerMTok` / `outputUsdPerMTok` / `webSearchUsdPerRequest` | `5` / `25` / `0.01` | Pricing used to estimate `costUsd` under `provider: "anthropic-api"` only |
 | `channelStatus` | `"experimental"` | Set to `"paper-passed"` only after the AI channel passes its own Gate D1 |
 | `passedPromptHash` | `null` | The exact `promptVersionHash` that passed D1 — required when `channelStatus` is `"paper-passed"` |
-| `timeoutMs` | `600000` | Request timeout (the call is streamed and can take minutes) |
+| `timeoutMs` | `600000` | Request/CLI-call timeout (the call is streamed and can take minutes) |
 
-The API key is **never** read from `config.json` — only from `ANTHROPIC_API_KEY` in the secrets file
-(same place as `FRED_API_KEY`), or the SDK's own default credential chain. No key means the channel
-reports `aiAnalyst.status: "unavailable"`, reason `no_api_key` — the run still exits 0 and the rules
-report is untouched.
+**Credentials are never read from `config.json`.** For `provider: "claude-cli"` (default): from
+`CLAUDE_CODE_OAUTH_TOKEN` in the secrets file, or `ANTHROPIC_API_KEY` as a fallback — when the OAuth
+token is set, `ANTHROPIC_API_KEY` is deliberately removed from the CLI's environment so the
+subscription is always used and no API billing can happen by accident. For `provider: "anthropic-api"`:
+from `ANTHROPIC_API_KEY` (same place as `FRED_API_KEY`), or the SDK's own default credential chain. No
+credential for the active provider means the channel reports `aiAnalyst.status: "unavailable"`, reason
+`no_api_key` — the run still exits 0 and the rules report is untouched. A `claude` CLI that isn't
+installed, or isn't logged in, behaves the same way: `unavailable`, exit code unaffected.
+
+Get the OAuth token once with `claude setup-token` and paste the whole thing into the secrets file —
+it's long and wraps over two lines on screen, but it's one token; pasting only the visible first line
+gives `401 OAuth access token is invalid` at run time, not a helpful "truncated" error.
 
 **Budget ledger:** every call attempt (success or failure, whenever token usage is known) appends one
 line to `data/ai-usage.jsonl` — time, model, usage, estimated cost, and outcome. This file is
@@ -418,11 +446,19 @@ per stance bucket, `oppose` trades do no worse than `support` trades in expectan
 earning it.
 
 **Cost, honestly (§13 A15):** the owner explicitly asked for this — Claude participating in every
-daily call is a deliberate choice, not a default. Estimated cost per call is roughly $0.20–$0.60
-(≈30–60k input tokens, 5–15k output, ≤5 searches), i.e. **6–18% of a $100 account per month**. That's
-real money relative to this account's size; `byOrigin`/`byAiStance` exist so you can tell, in numbers,
-whether the channel is earning it back. Nothing in this system lowers `effort` or switches models on
-its own if the answer is no — that decision is yours.
+daily call is a deliberate choice, not a default. Under `provider: "anthropic-api"`, estimated cost
+per call is roughly $0.20–$0.60 (≈30–60k input tokens, 5–15k output, ≤5 searches), i.e. **$9–28/month**
+at one call/day — real money relative to this account's size; `byOrigin`/`byAiStance` exist so you can
+tell, in numbers, whether the channel is earning it back. Under `provider: "claude-cli"` (default),
+nothing is billed per call — `listCostUsd` still records what the same call would have cost at list
+price, so switching providers later doesn't lose that visibility. Nothing in this system lowers
+`effort` or switches models or providers on its own — that decision is yours.
+
+**Run it inside the point-in-time window.** Like the rules channel, the AI channel reads the same
+`decisionTime`-gated snapshot — a run made hours after 00:15 UTC still works, but sources whose
+availability is their own fetch time (fear & greed, stablecoin supply, the FRED/CPI schedule, the
+Farside ETF-flow import) will show `missing` if they weren't fetched inside the window, same as for
+any rule. A late AI run is honest, just data-thin — never back-dated.
 
 ---
 

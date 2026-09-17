@@ -18,7 +18,7 @@ import type { AiAnalystConfig, AiAnalystInput } from "../src/research/ai/types.t
 
 function aiCfg(overrides: Partial<AiAnalystConfig> = {}): AiAnalystConfig {
   return {
-    enabled: true, model: "claude-opus-5", effort: "high", maxTokens: 32_000, webSearchMaxUses: 5,
+    enabled: true, provider: "anthropic-api", cliPath: null, model: "claude-opus-5", effort: "high", maxTokens: 32_000, webSearchMaxUses: 5,
     maxIdeasPerDay: 3, monthlyBudgetUsd: 15, inputUsdPerMTok: 5, outputUsdPerMTok: 25,
     webSearchUsdPerRequest: 0.01, channelStatus: "experimental", passedPromptHash: null, timeoutMs: 600_000,
     ...overrides,

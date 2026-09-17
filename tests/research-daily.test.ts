@@ -362,14 +362,17 @@ test("a complete existing report (not pending) still gets the generic exit-3 mes
   }
 });
 
-test("AC-51: no ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN -> exits 0 with aiAnalyst.status unavailable, reason no_api_key, no network call", async () => {
+test("AC-51 (anthropic-api): no ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN -> exits 0 with aiAnalyst.status unavailable, reason no_api_key, no network call", async () => {
   const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
   const savedKey = process.env["ANTHROPIC_API_KEY"];
   const savedToken = process.env["ANTHROPIC_AUTH_TOKEN"];
   delete process.env["ANTHROPIC_API_KEY"];
   delete process.env["ANTHROPIC_AUTH_TOKEN"];
   try {
-    const args = makeArgs(dir, { configPath: writeTempConfig(dir, { ai: { enabled: true } }) });
+    // provider forced to "anthropic-api" — the production default is "claude-cli" (see the
+    // complementary test below), and this test is specifically about the SDK adapter's
+    // no-api-key path.
+    const args = makeArgs(dir, { configPath: writeTempConfig(dir, { ai: { enabled: true, provider: "anthropic-api" } }) });
     writeFileSync(args.promptPath, "system prompt");
     const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
     // No third argument -> uses the real createAnthropicAiClient default factory. Its own
@@ -382,6 +385,33 @@ test("AC-51: no ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN -> exits 0 with aiAnalyst
   } finally {
     if (savedKey !== undefined) process.env["ANTHROPIC_API_KEY"] = savedKey;
     if (savedToken !== undefined) process.env["ANTHROPIC_AUTH_TOKEN"] = savedToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AC-51 (claude-cli, the default provider): no CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY -> exits 0 with aiAnalyst.status unavailable, reason no_api_key, claude CLI never spawned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "research-daily-test-"));
+  const savedKey = process.env["ANTHROPIC_API_KEY"];
+  const savedToken = process.env["ANTHROPIC_AUTH_TOKEN"];
+  const savedOAuth = process.env["CLAUDE_CODE_OAUTH_TOKEN"];
+  delete process.env["ANTHROPIC_API_KEY"];
+  delete process.env["ANTHROPIC_AUTH_TOKEN"];
+  delete process.env["CLAUDE_CODE_OAUTH_TOKEN"];
+  try {
+    const args = makeArgs(dir, { configPath: writeTempConfig(dir, { ai: { enabled: true } }) });
+    writeFileSync(args.promptPath, "system prompt");
+    const deps = fakeDeps({ readFile: (p) => (p === args.rulesPath ? JSON.stringify(VALID_RULES) : (() => { throw new Error("unexpected path"); })()) });
+    // No third argument -> the default factory picks createClaudeCliAiClient for the default
+    // provider "claude-cli". Its own no-credential check runs before any process is spawned, so
+    // no real `claude` CLI process is ever started by this test.
+    const result = await runResearchDaily(args, deps);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.report!.aiAnalyst.status, "unavailable");
+    assert.ok(result.report!.aiAnalyst.reason.includes("no_api_key"));
+  } finally {
+    if (savedKey !== undefined) process.env["ANTHROPIC_API_KEY"] = savedKey;
+    if (savedToken !== undefined) process.env["ANTHROPIC_AUTH_TOKEN"] = savedToken;
+    if (savedOAuth !== undefined) process.env["CLAUDE_CODE_OAUTH_TOKEN"] = savedOAuth;
     rmSync(dir, { recursive: true, force: true });
   }
 });

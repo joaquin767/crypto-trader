@@ -5,10 +5,11 @@
 // two separate ways a throw could otherwise escape:
 //  1. Building the request and awaiting the response (`callOnce`/its 400-retry) — a thrown
 //     `APIError`/network/timeout error is mapped by `mapThrownError`.
-//  2. Everything done WITH a successful response — `writeRawResponseOnce` (fs write-once, whose
-//     mkdirSync/writeFileSync rethrow anything but EEXIST) plus reading usage/content off it —
-//     is wrapped in its own try/catch below, so a write failure (e.g. an unwritable
-//     `snapshotRoot`) resolves `{kind:"failed", reason:"api_error", ...}` instead of rejecting.
+//  2. Everything done WITH a successful response — `writeRawResponseOnce` (./raw-response.ts,
+//     shared with src/research/ai/claude-cli-client.ts; its mkdirSync/writeFileSync rethrow
+//     anything but EEXIST) plus reading usage/content off it — is wrapped in its own try/catch
+//     below, so a write failure (e.g. an unwritable `snapshotRoot`) resolves
+//     `{kind:"failed", reason:"api_error", ...}` instead of rejecting.
 //
 // Testability seam (`deps.makeClient`): the default constructs `new Anthropic({timeout})`, same
 // as before; a test passes a fake object shaped like `{ beta: { messages: { stream } } }` so
@@ -52,10 +53,9 @@
 // is set, because the client is never constructed.
 
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 import { AI_OUTPUT_JSON_SCHEMA, aiAnalystOutputSchema } from "./output-schema.ts";
+import { writeRawResponseOnce } from "./raw-response.ts";
 import type { AiAnalystConfig, AiAnalystInput, AiAnalystOutput, AiCallResult, AiClientPort } from "./types.ts";
 
 /** The minimal shape this module actually calls — deliberately looser than the SDK's own
@@ -80,24 +80,6 @@ interface AnthropicMessage {
 
 function hasSyncCredential(): boolean {
   return Boolean(process.env["ANTHROPIC_API_KEY"] || process.env["ANTHROPIC_AUTH_TOKEN"]);
-}
-
-/** Write-once raw response, path from `snapshotRoot` (§5.13, §10.2 "gitignored like other
- *  snapshots" — the caller decides the root, this never writes outside it). Never includes the
- *  API key (the raw SDK response body never carries request credentials). Any throw here (e.g.
- *  an unwritable `snapshotRoot`) propagates to the caller's own try/catch — see file header. */
-function writeRawResponseOnce(snapshotRoot: string, dateUtc: string, data: unknown): string {
-  const dir = join(snapshotRoot, dateUtc);
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, "ai-analyst.raw.json");
-  if (!existsSync(path)) {
-    try {
-      writeFileSync(path, JSON.stringify(data, null, 2), { flag: "wx" });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    }
-  }
-  return path;
 }
 
 function usageOf(message: AnthropicMessage) {

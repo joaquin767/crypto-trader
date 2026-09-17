@@ -62,10 +62,16 @@ export interface AiAnalystSection {
   // shows "AI analyst: did not complete".
   reason: string; // empty only when status is "ok"
   model: string | null;
+  /** Which adapter ran this call; `null` for "pending"/"disabled" (no call was made). */
+  provider: "claude-cli" | "anthropic-api" | null;
   servedByModel: string | null;
   promptVersionHash: string | null;
-  costUsd: number;
+  costUsd: number; // real API spend only — 0 under provider "claude-cli" (the subscription bills separately)
   monthToDateUsd: number;
+  /** The provider's own list-price estimate for this call, informational only: under
+   *  provider "claude-cli" this is the CLI's `total_cost_usd` (what the call would have cost at
+   *  list price if it had been billed per-call); under "anthropic-api" it equals `costUsd`. */
+  listCostUsd: number;
   regimeSummary: string | null;
   assessments: AiPlanAssessment[]; // verified only
   plans: TradePlan[]; // origin "ai-analyst", produced by planTrade from aiIdeaToRule(...)
@@ -109,6 +115,10 @@ export type AiCallResult =
       usage: { inputTokens: number; outputTokens: number; webSearchRequests: number };
       servedByModel: string;
       rawResponsePath: string;
+      /** The provider's own list-price cost estimate for this call, when it reports one (the
+       *  claude-cli adapter's `total_cost_usd`). The Anthropic API adapter leaves this
+       *  undefined — `runAiAnalyst` falls back to its own `estimateCallCostUsd` in that case. */
+      listCostUsd?: number;
     }
   | {
       kind: "failed";
@@ -124,6 +134,16 @@ export interface AiClientPort {
 
 export interface AiAnalystConfig {
   enabled: boolean; // default false until the owner turns it on
+  /** default "claude-cli" — runs through the locally installed Claude Code CLI under the
+   *  owner's subscription (no per-call API billing); "anthropic-api" is the pay-as-you-go
+   *  alternative via @anthropic-ai/sdk. A provider switch is a behaviour change (§5.13) and is
+   *  hashed into `promptVersionHash`. */
+  provider: "claude-cli" | "anthropic-api";
+  /** Path to the `claude` executable, only consulted when `provider` is "claude-cli". `null`
+   *  (default) auto-resolves: `<dirname(process.execPath)>/claude` if it exists (nvm installs
+   *  node and claude in the same bin dir, and the systemd service has no PATH), else the bare
+   *  string `"claude"` (resolved via PATH by the OS at spawn time). */
+  cliPath: string | null;
   model: string; // default "claude-opus-5"
   effort: "low" | "medium" | "high" | "xhigh" | "max"; // default "high"
   maxTokens: number; // default 32000 (request is streamed)

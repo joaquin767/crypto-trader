@@ -237,6 +237,8 @@ export type { AiAnalystConfig } from "./research/ai/types.ts";
  *  leverage 1 / paper venue. */
 export const DEFAULT_AI_ANALYST_CONFIG: AiAnalystConfig = {
   enabled: false,
+  provider: "claude-cli",
+  cliPath: null,
   model: "claude-opus-5",
   effort: "high",
   maxTokens: 32_000,
@@ -571,10 +573,17 @@ function validateManualTradingConfig(manual: Partial<ManualTradingConfig>): void
 
 const AI_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 const AI_CHANNEL_STATUSES = ["experimental", "paper-passed"] as const;
+const AI_PROVIDERS = ["claude-cli", "anthropic-api"] as const;
 
 function validateAiAnalystConfig(ai: Partial<AiAnalystConfig>): void {
   if (ai.enabled !== undefined && typeof ai.enabled !== "boolean") {
     throw new ConfigError("config.ai.enabled must be a boolean if set");
+  }
+  if (ai.provider !== undefined && !(AI_PROVIDERS as readonly string[]).includes(ai.provider)) {
+    throw new ConfigError(`config.ai.provider must be one of ${AI_PROVIDERS.join(", ")} if set`);
+  }
+  if (ai.cliPath !== undefined && ai.cliPath !== null && typeof ai.cliPath !== "string") {
+    throw new ConfigError("config.ai.cliPath must be a string or null if set");
   }
   if (ai.model !== undefined && (typeof ai.model !== "string" || ai.model.length === 0)) {
     throw new ConfigError("config.ai.model must be a non-empty string if set");

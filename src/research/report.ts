@@ -45,8 +45,8 @@ export interface DailyReport {
 
 function emptyAiSection(status: "pending" | "disabled", reason: string): AiAnalystSection {
   return {
-    status, reason, model: null, servedByModel: null, promptVersionHash: null,
-    costUsd: 0, monthToDateUsd: 0, regimeSummary: null,
+    status, reason, model: null, provider: null, servedByModel: null, promptVersionHash: null,
+    costUsd: 0, monthToDateUsd: 0, listCostUsd: 0, regimeSummary: null,
     assessments: [], plans: [], ideas: [], openTradeNotes: [], risks: [], dataGaps: [], rejected: [],
   };
 }
@@ -271,7 +271,12 @@ export function renderReportMarkdown(r: DailyReport): string {
     lines.push("");
     lines.push(`Status: ${r.aiAnalyst.status}${r.aiAnalyst.reason ? ` — ${r.aiAnalyst.reason}` : ""}`);
     if (r.aiAnalyst.model) lines.push(`Model: ${r.aiAnalyst.model}${r.aiAnalyst.servedByModel && r.aiAnalyst.servedByModel !== r.aiAnalyst.model ? ` (served by ${r.aiAnalyst.servedByModel})` : ""}`);
-    lines.push(`Cost: $${fmtNum(r.aiAnalyst.costUsd)} (month to date: $${fmtNum(r.aiAnalyst.monthToDateUsd)})`);
+    // provider "claude-cli" bills nothing per call (owner subscription) — costUsd is always 0
+    // there, so the list-price estimate (listCostUsd) is shown alongside it instead of hidden.
+    const costLine = r.aiAnalyst.provider === "claude-cli"
+      ? `Cost: $${fmtNum(r.aiAnalyst.costUsd)} (subscription; list-equivalent $${fmtNum(r.aiAnalyst.listCostUsd)})`
+      : `Cost: $${fmtNum(r.aiAnalyst.costUsd)}`;
+    lines.push(`${costLine} (month to date: $${fmtNum(r.aiAnalyst.monthToDateUsd)})`);
     lines.push("");
     if (r.aiAnalyst.regimeSummary) {
       lines.push("### Regime summary");

@@ -55,7 +55,7 @@ test("appendLedgerLine creates the parent directory and appends without truncati
   const dir = mkdtempSync(join(tmpdir(), "ai-budget-test-"));
   try {
     const path = join(dir, "nested", "ai-usage.jsonl");
-    const entry = { time: 1, dateUtc: "2026-09-16", model: "m", usage: { inputTokens: 1, outputTokens: 1, webSearchRequests: 0 }, costUsd: 0.01, resultKind: "ok" as const };
+    const entry = { time: 1, dateUtc: "2026-09-16", model: "m", usage: { inputTokens: 1, outputTokens: 1, webSearchRequests: 0 }, costUsd: 0.01, listCostUsd: 0.01, resultKind: "ok" as const };
     appendLedgerLine(path, entry);
     appendLedgerLine(path, { ...entry, time: 2 });
     const lines = readFileSync(path, "utf-8").trim().split("\n");

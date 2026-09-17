@@ -1,0 +1,39 @@
+{
+  "id": "ai-analyst-cf9500cb",
+  "version": 1,
+  "description": "Momentum-continuation short in the weakest configured name, faded into a bounce. APT/USDT is down return7d -11.654974489795912 from close 0.5541 while SOL lost only -2.8472906403940845 over the same window, and today's return1d 1.3165112452002248 is a shallow bounce inside that downtrend rather than a trend change. Positioning gives no squeeze cushion to bears: fundingRate8hAvg3d 0.000006003333333333336 is marginally positive (longs still paying) with fundingRatePercentile90d 35.18518518518518, and oiChange3dPct 1.1493557109280905 shows open interest grinding higher into a falling price — late longs adding, not capitulating. The supply catalyst is the recurring monthly Aptos unlock cadence: ~11.31M APT (~0.65% of circulating supply) released on Sept 11-12, 2026, with the vesting schedule continuing on a monthly cadence thereafter. I hold this at low confidence deliberately: spec evidence rates unlock-driven declines as weak and plausibly pre-priced by participants reading the same public schedule, and the Confidential APT mainnet launch on Sept 8, 2026 is a genuine offsetting positive. This is a relative-weakness trade with an unlock overlay, not an unlock-timing trade. Stop must respect realizedVol7d 77.94764652251865 and atr14d 0.04397142857142859 (~7.9% of spot per ATR).",
+  "evidence": [],
+  "status": "experimental",
+  "symbols": [
+    "APT/USDT"
+  ],
+  "side": "short",
+  "entryWhenAll": [],
+  "invalidateWhenAny": [
+    {
+      "feature": "close",
+      "op": ">",
+      "value": 0.62
+    },
+    {
+      "feature": "return1d",
+      "op": ">",
+      "value": 7
+    },
+    {
+      "feature": "return7d",
+      "op": ">",
+      "value": 5
+    },
+    {
+      "feature": "fundingRatePercentile90d",
+      "op": "<",
+      "value": 8
+    }
+  ],
+  "stopAtrMultiple": 1.5,
+  "targetRMultiple": 1.8,
+  "maxHoldDays": 10,
+  "forwardOnly": true,
+  "origin": "ai-analyst"
+}

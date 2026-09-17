@@ -15,7 +15,12 @@ export interface AiLedgerEntry {
   dateUtc: string;
   model: string;
   usage: { inputTokens: number; outputTokens: number; webSearchRequests: number };
+  /** Real API spend — 0 under provider "claude-cli" (§5.13). `monthToDateSpendUsd` sums this
+   *  field only, so the `monthlyBudgetUsd` gate never sees subscription-billed calls. */
   costUsd: number;
+  /** The provider's own list-price estimate, informational only — never summed by
+   *  `monthToDateSpendUsd`. Equal to `costUsd` for the anthropic-api adapter. */
+  listCostUsd: number;
   resultKind: "ok" | "failed";
 }
 

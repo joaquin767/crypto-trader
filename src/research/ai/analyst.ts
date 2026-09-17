@@ -54,8 +54,11 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-/** SHA-256 over canonical JSON of every setting that changes AI behaviour (§5.13). Budget,
- *  pricing, timeout, channelStatus and passedPromptHash are deliberately excluded. */
+/** SHA-256 over canonical JSON of every setting that changes AI behaviour (§5.13). `provider` is
+ *  included: switching between the claude-cli and anthropic-api adapters is a behaviour change
+ *  (different execution path, different model-serving mechanics) and must restart the AI
+ *  channel's Gate D1 track record, same as a model/effort/prompt change. Budget, pricing,
+ *  `cliPath`, timeout, channelStatus and passedPromptHash are deliberately excluded. */
 export function promptVersionHash(systemPrompt: string, outputJsonSchema: string, cfg: AiAnalystConfig): string {
   const canonical = canonicalize({
     systemPrompt,
@@ -65,6 +68,7 @@ export function promptVersionHash(systemPrompt: string, outputJsonSchema: string
     maxTokens: cfg.maxTokens,
     webSearchMaxUses: cfg.webSearchMaxUses,
     maxIdeasPerDay: cfg.maxIdeasPerDay,
+    provider: cfg.provider,
   });
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
@@ -140,10 +144,16 @@ export function buildAiAnalystInput(params: {
 
 // ── runAiAnalyst ─────────────────────────────────────────────────────────────────────────────
 
-function emptySection(status: AiAnalystSection["status"], reason: string, model: string | null): AiAnalystSection {
+/** Real API spend (§5.13): 0 under provider "claude-cli" — the subscription bills separately,
+ *  never per call — else the SDK adapter's list-price estimate via `estimateCallCostUsd`. */
+function costOf(cfg: AiAnalystConfig, usage: { inputTokens: number; outputTokens: number; webSearchRequests: number }): number {
+  return cfg.provider === "claude-cli" ? 0 : estimateCallCostUsd(usage, cfg);
+}
+
+function emptySection(status: AiAnalystSection["status"], reason: string, cfg: AiAnalystConfig): AiAnalystSection {
   return {
-    status, reason, model, servedByModel: null, promptVersionHash: null,
-    costUsd: 0, monthToDateUsd: 0, regimeSummary: null,
+    status, reason, model: cfg.model, provider: cfg.provider, servedByModel: null, promptVersionHash: null,
+    costUsd: 0, monthToDateUsd: 0, listCostUsd: 0, regimeSummary: null,
     assessments: [], plans: [], ideas: [], openTradeNotes: [], risks: [], dataGaps: [], rejected: [],
   };
 }
@@ -191,13 +201,13 @@ export async function runAiAnalyst(
   try {
     monthToDateBefore = monthToDateSpendUsd(planner.ledgerPath, planner.now);
   } catch (err) {
-    return emptySection("unavailable", `ledger_unreadable: ${(err as Error).message}`, cfg.model);
+    return emptySection("unavailable", `ledger_unreadable: ${(err as Error).message}`, cfg);
   }
   if (monthToDateBefore >= cfg.monthlyBudgetUsd) {
     const section = emptySection(
       "skipped_budget",
       `month-to-date spend $${monthToDateBefore.toFixed(2)} >= budget $${cfg.monthlyBudgetUsd.toFixed(2)}`,
-      cfg.model,
+      cfg,
     );
     section.monthToDateUsd = monthToDateBefore;
     return section;
@@ -206,30 +216,35 @@ export async function runAiAnalyst(
   const result = await port.analyze(input);
 
   if (result.usage !== null) {
-    const costUsd = estimateCallCostUsd(result.usage, cfg);
+    const costUsd = costOf(cfg, result.usage);
+    const listCostUsd = (result.kind === "ok" ? result.listCostUsd : undefined) ?? costUsd;
     try {
       appendLedgerLine(planner.ledgerPath, {
-        time: planner.now, dateUtc: planner.dateUtc, model: cfg.model, usage: result.usage, costUsd,
+        time: planner.now, dateUtc: planner.dateUtc, model: cfg.model, usage: result.usage, costUsd, listCostUsd,
         resultKind: result.kind,
       });
     } catch (err) {
       // Fail closed (§5.13 "MUST resolve, never throws"): an unrecorded call is a budget-tracking
       // integrity problem, not something to paper over by proceeding as if it succeeded.
-      const section = emptySection("unavailable", `ledger_write_failed: ${(err as Error).message}`, cfg.model);
+      const section = emptySection("unavailable", `ledger_write_failed: ${(err as Error).message}`, cfg);
       section.promptVersionHash = input.promptVersionHash;
       return section;
     }
   }
-  const monthToDateUsd = result.usage !== null ? monthToDateBefore + estimateCallCostUsd(result.usage, cfg) : monthToDateBefore;
+  const monthToDateUsd = result.usage !== null ? monthToDateBefore + costOf(cfg, result.usage) : monthToDateBefore;
 
   if (result.kind === "failed") {
-    const section = emptySection("unavailable", `${result.reason}: ${result.detail}`, cfg.model);
+    const section = emptySection("unavailable", `${result.reason}: ${result.detail}`, cfg);
     section.promptVersionHash = input.promptVersionHash;
     section.monthToDateUsd = monthToDateUsd;
     return section;
   }
 
-  const costUsd = estimateCallCostUsd(result.usage, cfg);
+  // costUsd is real API spend, 0 under the subscription (§5.13); listCostUsd is always the
+  // provider's own list-price estimate, falling back to costUsd when the port doesn't supply one
+  // (the anthropic-api adapter never does — costUsd already IS the list-price estimate there).
+  const costUsd = costOf(cfg, result.usage);
+  const listCostUsd = result.listCostUsd ?? costUsd;
   const verified = verifyAiOutput(result.output, input, result.webResults, cfg.maxIdeasPerDay);
   const rejected: AiRejectedItem[] = [...verified.rejected];
 
@@ -270,7 +285,7 @@ export async function runAiAnalyst(
         // nothing went wrong — a later evaluateThesis for its open trade would have no rule to
         // load anyway (AC-53's "not_evaluable" path is for a missing file, not a write failure
         // this run silently swallowed). Abort the whole section rather than a partial one.
-        const section = emptySection("unavailable", `ai_rule_persist_failed: ${(err as Error).message}`, cfg.model);
+        const section = emptySection("unavailable", `ai_rule_persist_failed: ${(err as Error).message}`, cfg);
         section.promptVersionHash = input.promptVersionHash;
         section.monthToDateUsd = monthToDateUsd;
         return section;
@@ -284,10 +299,12 @@ export async function runAiAnalyst(
     status: "ok",
     reason: "",
     model: cfg.model,
+    provider: cfg.provider,
     servedByModel: result.servedByModel,
     promptVersionHash: input.promptVersionHash,
     costUsd,
     monthToDateUsd,
+    listCostUsd,
     regimeSummary: verified.output.regimeSummary,
     assessments: verified.output.planAssessments,
     plans,

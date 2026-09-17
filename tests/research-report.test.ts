@@ -139,8 +139,8 @@ test("AC-14a: maxOpenManualTrades=3, 1 open trade, 4 triggering rules -> exactly
 
 function emptyAiSection(overrides: Partial<AiAnalystSection> = {}): AiAnalystSection {
   return {
-    status: "ok", reason: "", model: "claude-opus-5", servedByModel: "claude-opus-5", promptVersionHash: "hash",
-    costUsd: 0.1, monthToDateUsd: 0.1, regimeSummary: "calm", assessments: [], plans: [], ideas: [],
+    status: "ok", reason: "", model: "claude-opus-5", provider: "anthropic-api", servedByModel: "claude-opus-5", promptVersionHash: "hash",
+    costUsd: 0.1, monthToDateUsd: 0.1, listCostUsd: 0.1, regimeSummary: "calm", assessments: [], plans: [], ideas: [],
     openTradeNotes: [], risks: [], dataGaps: [], rejected: [],
     ...overrides,
   };

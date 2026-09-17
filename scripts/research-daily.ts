@@ -56,6 +56,7 @@ import type { AiAnalystConfig, AiAnalystSection, AiClientPort } from "../src/res
 import { AI_OUTPUT_JSON_SCHEMA } from "../src/research/ai/output-schema.ts";
 import { buildAiAnalystInput, promptVersionHash, runAiAnalyst } from "../src/research/ai/analyst.ts";
 import { createAnthropicAiClient } from "../src/research/ai/anthropic-client.ts";
+import { createClaudeCliAiClient } from "../src/research/ai/claude-cli-client.ts";
 
 // §5.8a / report.ts's LADDER_RESET_BY_BREAKER: until the breaker trip log exists (Phase 4's
 // journal-only scope never added one), `ladderResetByBreaker` stays hardcoded `true` for every
@@ -178,7 +179,10 @@ function pendingAiMessage(reportsRoot: string, date: string, revision: number): 
 export async function runResearchDaily(
   args: ResearchDailyArgs,
   deps: AdapterDeps,
-  aiClientFactory: (cfg: AiAnalystConfig, snapshotRoot: string) => AiClientPort = createAnthropicAiClient,
+  // Default picks the adapter by cfg.provider ("claude-cli" default — see AiAnalystConfig);
+  // callers/tests may still inject their own factory (e.g. a fake port) regardless of provider.
+  aiClientFactory: (cfg: AiAnalystConfig, snapshotRoot: string) => AiClientPort = (cfg, snapshotRoot) =>
+    cfg.provider === "claude-cli" ? createClaudeCliAiClient(cfg, snapshotRoot) : createAnthropicAiClient(cfg, snapshotRoot),
 ): Promise<ResearchDailyResult> {
   const now = deps.now();
   const latestExisting = latestReportRevision(args.reportsRoot, args.date);
@@ -372,7 +376,8 @@ export async function runResearchDaily(
   } catch (err) {
     aiSection = {
       status: "unavailable", reason: `unexpected error: ${(err as Error).message}`, model: aiCfg.model,
-      servedByModel: null, promptVersionHash: hash, costUsd: 0, monthToDateUsd: 0, regimeSummary: null,
+      provider: aiCfg.provider, servedByModel: null, promptVersionHash: hash,
+      costUsd: 0, monthToDateUsd: 0, listCostUsd: 0, regimeSummary: null,
       assessments: [], plans: [], ideas: [], openTradeNotes: [], risks: [], dataGaps: [], rejected: [],
     };
   }

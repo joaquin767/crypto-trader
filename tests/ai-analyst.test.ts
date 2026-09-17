@@ -40,9 +40,12 @@ function fv(symbol: string, close = 60000, atr14d = 1000): FeatureVector {
   };
 }
 
+// provider defaults to "anthropic-api" here (not the production default "claude-cli") so the
+// existing cost-accounting assertions in this file keep exercising estimateCallCostUsd's
+// nonzero-cost path; the "claude-cli costs 0" behavior has its own dedicated test below.
 function aiCfg(overrides: Partial<AiAnalystConfig> = {}): AiAnalystConfig {
   return {
-    enabled: true, model: "claude-opus-5", effort: "high", maxTokens: 32_000, webSearchMaxUses: 5,
+    enabled: true, provider: "anthropic-api", cliPath: null, model: "claude-opus-5", effort: "high", maxTokens: 32_000, webSearchMaxUses: 5,
     maxIdeasPerDay: 3, monthlyBudgetUsd: 15, inputUsdPerMTok: 5, outputUsdPerMTok: 25,
     webSearchUsdPerRequest: 0.01, channelStatus: "experimental", passedPromptHash: null, timeoutMs: 600_000,
     ...overrides,
@@ -109,13 +112,14 @@ test("AC-49: promptVersionHash changes with system prompt, schema, model, effort
   assert.notEqual(promptVersionHash("prompt v1", AI_OUTPUT_JSON_SCHEMA, aiCfg({ maxTokens: 1000 })), base);
   assert.notEqual(promptVersionHash("prompt v1", AI_OUTPUT_JSON_SCHEMA, aiCfg({ webSearchMaxUses: 0 })), base);
   assert.notEqual(promptVersionHash("prompt v1", AI_OUTPUT_JSON_SCHEMA, aiCfg({ maxIdeasPerDay: 1 })), base);
+  assert.notEqual(promptVersionHash("prompt v1", AI_OUTPUT_JSON_SCHEMA, aiCfg({ provider: "claude-cli" })), base);
 });
 
-test("AC-49: promptVersionHash is identical across monthlyBudgetUsd, pricing, timeoutMs, channelStatus, passedPromptHash", () => {
+test("AC-49: promptVersionHash is identical across monthlyBudgetUsd, pricing, cliPath, timeoutMs, channelStatus, passedPromptHash", () => {
   const base = promptVersionHash("prompt v1", AI_OUTPUT_JSON_SCHEMA, aiCfg());
   const changed = promptVersionHash("prompt v1", AI_OUTPUT_JSON_SCHEMA, aiCfg({
     monthlyBudgetUsd: 999, inputUsdPerMTok: 1, outputUsdPerMTok: 1, webSearchUsdPerRequest: 1,
-    timeoutMs: 1, channelStatus: "paper-passed", passedPromptHash: "whatever",
+    timeoutMs: 1, channelStatus: "paper-passed", passedPromptHash: "whatever", cliPath: "/usr/local/bin/claude",
   }));
   assert.equal(changed, base);
 });
@@ -192,7 +196,7 @@ test("AC-47: month-to-date spend >= budget skips the call entirely", async () =>
     const { appendLedgerLine } = await import("../src/research/ai/budget.ts");
     appendLedgerLine(bag.ledgerPath, {
       time: NOW, dateUtc: "2026-09-16", model: cfg.model,
-      usage: { inputTokens: 0, outputTokens: 0, webSearchRequests: 0 }, costUsd: 5, resultKind: "ok",
+      usage: { inputTokens: 0, outputTokens: 0, webSearchRequests: 0 }, costUsd: 5, listCostUsd: 5, resultKind: "ok",
     });
     const port = fakePort({ kind: "failed", reason: "api_error", detail: "should never be called", usage: null });
     const section = await runAiAnalyst(aiInput(), port, cfg, bag);
@@ -254,6 +258,61 @@ test("a verified idea produces exactly one plan and persists its rule to data/ai
       const rule = JSON.parse(readFileSync(rulePath, "utf-8"));
       assert.equal(rule.origin, "ai-analyst");
     }
+  });
+});
+
+// ── cost accounting: real spend vs. list-price estimate (§5.13) ────────────────────────────
+
+test("provider anthropic-api: costUsd is the estimated price, listCostUsd defaults to costUsd", async () => {
+  await withTempDir(async (dir) => {
+    const bag = plannerBag(dir);
+    const usage = { inputTokens: 1_000_000, outputTokens: 0, webSearchRequests: 0 }; // 1 MTok in @ $5/MTok
+    const port = fakePort({
+      kind: "ok",
+      output: { regimeSummary: "calm", planAssessments: [], ideas: [], openTradeNotes: [], risks: [], dataGaps: [] },
+      webResults: [], usage, servedByModel: "claude-opus-5", rawResponsePath: "/tmp/x.json",
+    });
+    const section = await runAiAnalyst(aiInput(), port, aiCfg({ provider: "anthropic-api" }), bag);
+    assert.equal(section.status, "ok");
+    assert.ok(Math.abs(section.costUsd - 5) < 1e-9);
+    assert.equal(section.listCostUsd, section.costUsd);
+  });
+});
+
+test("provider claude-cli: costUsd is always 0; listCostUsd is the port's own estimate", async () => {
+  await withTempDir(async (dir) => {
+    const bag = plannerBag(dir);
+    const usage = { inputTokens: 1_000_000, outputTokens: 0, webSearchRequests: 0 };
+    const port = fakePort({
+      kind: "ok",
+      output: { regimeSummary: "calm", planAssessments: [], ideas: [], openTradeNotes: [], risks: [], dataGaps: [] },
+      webResults: [], usage, servedByModel: "claude-opus-5", rawResponsePath: "/tmp/x.json",
+      listCostUsd: 0.014,
+    });
+    const section = await runAiAnalyst(aiInput(), port, aiCfg({ provider: "claude-cli" }), bag);
+    assert.equal(section.status, "ok");
+    assert.equal(section.costUsd, 0);
+    assert.equal(section.listCostUsd, 0.014);
+
+    const lines = readFileSync(bag.ledgerPath, "utf-8").trim().split("\n");
+    const entry = JSON.parse(lines[0]!);
+    assert.equal(entry.costUsd, 0);
+    assert.equal(entry.listCostUsd, 0.014);
+  });
+});
+
+test("provider claude-cli with no port-reported listCostUsd: ledger falls back to costUsd (0)", async () => {
+  await withTempDir(async (dir) => {
+    const bag = plannerBag(dir);
+    const port = fakePort({
+      kind: "failed", reason: "api_error", detail: "boom",
+      usage: { inputTokens: 100, outputTokens: 50, webSearchRequests: 0 },
+    });
+    await runAiAnalyst(aiInput(), port, aiCfg({ provider: "claude-cli" }), bag);
+    const lines = readFileSync(bag.ledgerPath, "utf-8").trim().split("\n");
+    const entry = JSON.parse(lines[0]!);
+    assert.equal(entry.costUsd, 0);
+    assert.equal(entry.listCostUsd, 0);
   });
 });
 
