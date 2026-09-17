@@ -571,7 +571,11 @@ export async function startJournalServer(deps: JournalAppDeps): Promise<{ close:
   const timer = deps.rest !== null
     ? setInterval(() => { handle.syncOnce().catch(() => {}); }, deps.manual.syncIntervalMs)
     : null;
-  if (deps.rest !== null) await handle.syncOnce();
+  // Always run one sync at startup, paper-only mode included: that branch does no network I/O but
+  // writes the revision-3 sync sidecar with `liveSync: "disabled"`, which `decide --revise` reads
+  // to skip the freshness check. Without it a paper-only owner could never revise (found on the
+  // first real --revise: the file was missing, so decide exited 5).
+  await handle.syncOnce();
 
   const { serve } = await import("@hono/node-server");
   return new Promise((resolve) => {

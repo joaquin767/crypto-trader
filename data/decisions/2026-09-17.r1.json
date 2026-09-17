@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "dateUtc": "2026-09-17",
+  "revision": 1,
+  "decidedAt": 1789675430860,
+  "skillHash": "4b92ab52bb02e3190240c027de5587333dd77edd133bbd8d3a057f95d7f76418",
+  "reportPath": "reports/2026-09-17.r2.json",
+  "reportSha256": "9bd8f7fe1b1f4444cc24a2022cbdde6d0c71796a7e4af8ab773abb083577d02a",
+  "reportDecisionTime": 1789604100000,
+  "input": {
+    "dateUtc": "2026-09-17",
+    "choice": {
+      "kind": "no-trade",
+      "reason": "Report r2 (all sources ok, decision time 00:15 UTC) still has no executable plan: the three rules are not_evaluable (btcEtfNetFlowUsd5d and hoursToNextCpi are hidden at the 00:15 UTC decision time for a run made in the afternoon) or not_triggered (funding percentiles 71.5 BTC / 61.5 ETH), and the AI channel's BTC short (confidence 0.34, stop 1.5 x ATR, about 3,404 USD per BTC) is again rejected by the planner as size_below_min: at a 3 USD risk budget it sizes 0.00088 BTC, below Bybit's 0.001 minimum, and at 1x the 0.001 lot (about 76 USD) also exceeds the 75 USD margin budget. No evidence-backed direction exists today (X2 Moderate: FOMC moves volatility, not direction; X4 Weak: funding is not extreme), so a persona idea would be narrative, not thesis. No trade; the scheduled 00:15 UTC run tonight restores the flow and CPI features."
+    },
+    "stances": [],
+    "news": [
+      {
+        "title": "FOMC hikes 25 bp to 3.75-4.00% on Sept 16, unanimous; dot plot implies another hike in 2026",
+        "url": "https://www.kucoin.com/news/insight/BTC/6aab7f137d10fa0007ce1530",
+        "date": "2026-09-16",
+        "tag": "confirmed"
+      },
+      {
+        "title": "Bitcoin holds below $80,000 on the day the Fed raised rates; spot BTC ETFs -$296M Wed after -$450M Tue",
+        "url": "https://www.riotimesonline.com/crypto-markets-bitcoin-majors-thursday-september-17-2026/",
+        "date": "2026-09-17",
+        "tag": "unconfirmed"
+      },
+      {
+        "title": "Ethereum range holds below $2.5K after FOMC; Glamsterdam hard fork targeted Q4 2026",
+        "url": "https://usethebitcoin.com/eth/ethereum-price-september-17-2026/",
+        "date": "2026-09-17",
+        "tag": "contradicts"
+      },
+      {
+        "title": "Bitcoin spot ETFs lose $463M in the week of Sept 8-11 while Ether ETFs attract $197M",
+        "url": "https://www.kucoin.com/news/flash/bitcoin-spot-etfs-lose-463m-as-ether-etfs-attract-197m",
+        "date": "2026-09-12",
+        "tag": "unconfirmed"
+      },
+      {
+        "title": "House Financial Services Committee advances Strategic Bitcoin Reserve bill 28-21",
+        "url": "https://bitcoinnewsdigest.substack.com/p/bitcoin-news-digest-september-17-401",
+        "date": "2026-09-17",
+        "tag": "unconfirmed"
+      }
+    ],
+    "rationale": "Order of examination: completeness complete on r2 (ETF flow, CPI, Fear & Greed, stablecoin features missing at the 00:15 UTC decision time); breaker not tripped; no open trades. Positioning: BTC funding percentile 71.5 with OI +4.5% over 3 days (longs building into a down week), ETH flat at 61.5 - neither crowded (X4 Weak/mixed). Calendar: FOMC passed on Sept 16 (hoursToNextFomc 1001.75 -> next ~Oct 28); next CPI unknown to the system today. Catalysts: no triggered rule; the AI's BTC short is a narrative overlay on a -2.7% week and was rejected on size. Sentiment: fearGreed missing. News: the hike was priced (muted reaction), ETF flows negative this week but unverified by the system. No thesis today passes the checklist (no measurable catalyst, no evidence stronger than Weak for direction); no-trade."
+  },
+  "validation": {
+    "ok": true,
+    "rejections": [],
+    "unverifiedWebRefs": []
+  },
+  "plan": null,
+  "personaRule": null,
+  "basedOnPlanId": null,
+  "basedOnRuleKey": null,
+  "ownerProtocol": null,
+  "ownerTimeZone": "America/Argentina/Buenos_Aires",
+  "disclaimer": "Generated analysis for the owner's review. Not investment advice."
+}
