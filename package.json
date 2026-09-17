@@ -13,7 +13,8 @@
     "research:daily": "node --experimental-strip-types scripts/research-daily.ts --config ./config.json",
     "journal": "node --experimental-strip-types src/server/journal-server.ts --config ./config.json",
     "backfill": "node --experimental-strip-types scripts/backfill-history.ts --config ./config.json",
-    "backtest:daily": "node --experimental-strip-types scripts/backtest-daily.ts --config ./config.json"
+    "backtest:daily": "node --experimental-strip-types scripts/backtest-daily.ts --config ./config.json",
+    "farside:import": "node --experimental-strip-types scripts/farside-import.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
