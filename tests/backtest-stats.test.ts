@@ -4,9 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { bootstrapCi90, mulberry32, permutationPValue, topSymbolShare } from "../src/backtest-daily/stats.ts";
+import { bootstrapCi90, mulberry32, percentile, permutationPValue, topSymbolShare } from "../src/backtest-daily/stats.ts";
 import type { SimTrade } from "../src/backtest-daily/simulate.ts";
-import { percentile } from "../src/strategy/walkforward.ts";
 
 function trade(overrides: Partial<SimTrade> = {}): SimTrade {
   return {

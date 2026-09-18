@@ -8,10 +8,18 @@
 // opened on the same decision day share that day's market-wide features and are correlated, so
 // resampling individual trades would understate uncertainty (§5.10a).
 
-import { percentile } from "../strategy/walkforward.ts";
 import type { SimTrade } from "./simulate.ts";
 
 export const DEFAULT_SEED = 20260917;
+
+/** Nearest-rank quantile: the value at index floor(n·q), clamped to the last element.
+ *  Moved verbatim from src/strategy/walkforward.ts:109 when the 5m harness was deleted
+ *  (specs/retire-scalper.md §5.9); it is the only symbol the daily system used from there. */
+export function percentile(xs: number[], q: number): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(s.length * q))]!;
+}
 
 /**
  * mulberry32 PRNG. Returns a function producing floats in [0, 1). Standard public-domain

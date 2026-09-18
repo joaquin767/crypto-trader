@@ -1,14 +1,12 @@
 {
   "name": "crypto-trader",
   "version": "0.2.0",
-  "description": "Expert crypto trading assistant with multi-indicator strategy, learning system, and real-time web dashboard.",
+  "description": "Daily catalyst research, AI and persona analysis, manually executed leveraged trades, with a local trade journal and validation gates.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types \"tests/*.test.ts\"",
     "verify": "npm run typecheck && npm run test",
-    "start": "node --experimental-strip-types src/main.ts --config ./config.json",
-    "dashboard": "node --experimental-strip-types src/main.ts --config ./config.json --port 3081",
     "snapshot:daily": "node --experimental-strip-types scripts/snapshot-daily.ts --config ./config.json",
     "research:daily": "node --experimental-strip-types scripts/research-daily.ts --config ./config.json",
     "journal": "node --experimental-strip-types src/server/journal-server.ts --config ./config.json",
