@@ -189,3 +189,23 @@ test("unverified web refs are listed in section 6 with the word 'unverified'", (
   assert.match(md, /https:\/\/example\.com\/news/);
   assert.match(md, /unverified/);
 });
+
+test("AC-134: a report-plan choice's execute window is capped at the chosen plan's expiresAt", () => {
+  const { decision, report } = makeDecision();
+  const sourceExpiry = report.plans.find((p) => p.kind === "plan")!.expiresAt;
+  // Decide 20 minutes before the plan expires: the 6 h window must not outlive the plan (the
+  // uncapped version advertised 17:53 for a plan that expired at 12:15 on 2026-09-18).
+  const lateDecidedAt = sourceExpiry - 20 * 60_000;
+  const capped = buildOwnerProtocol(decision.plan!, 1000, PERSONA_CFG, lateDecidedAt, sourceExpiry);
+  assert.equal(capped.executeUntil, sourceExpiry);
+  assert.ok(capped.executeUntil - lateDecidedAt < PERSONA_CFG.executionWindowMs);
+
+  // Early in the plan's life the window is the full config value, unchanged.
+  const earlyDecidedAt = sourceExpiry - 11 * 60 * 60_000;
+  const uncapped = buildOwnerProtocol(decision.plan!, 1000, PERSONA_CFG, earlyDecidedAt, sourceExpiry);
+  assert.equal(uncapped.executeUntil, earlyDecidedAt + PERSONA_CFG.executionWindowMs);
+
+  // AC-105: a persona idea passes capAt null and keeps its own window past the plans' expiry.
+  const idea = buildOwnerProtocol(decision.plan!, 1000, PERSONA_CFG, sourceExpiry + 60_000, null);
+  assert.equal(idea.executeUntil, sourceExpiry + 60_000 + PERSONA_CFG.executionWindowMs);
+});

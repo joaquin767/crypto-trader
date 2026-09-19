@@ -300,6 +300,10 @@ export function validateDecision(input: DailyDecisionInput, ctx: DecisionContext
     if (attempt && attempt.plan.kind === "rejected") {
       rejections.push(reject("replan_rejected", "choice", attempt.plan.reason));
     }
+    // No expiry check on a persona idea: AC-105 deliberately lets a fresh idea carry its own
+    // window (`decidedAt + executionWindowMs`) past the report plans' 12 h staleness, because the
+    // idea is new even when the day's rule plans are stale. Only a `report-plan` choice inherits
+    // that plan's expiry — see the branch above, and `buildOwnerProtocol`'s `capAt`.
   }
 
   return { ok: rejections.length === 0, rejections, unverifiedWebRefs };
@@ -314,8 +318,24 @@ function nextReportAtAfter(decidedAt: number): number {
   return candidate;
 }
 
-/** Pure. Builds the owner protocol from the sized plan and config. */
-export function buildOwnerProtocol(plan: PlanRow, atr14d: number, cfg: PersonaConfig, decidedAt: number): OwnerProtocol {
+/** Pure. Builds the owner protocol from the sized plan and config.
+ *
+ *  `capAt` is the chosen **report plan's** own `expiresAt` for a `report-plan` choice, and `null`
+ *  for a `persona-idea` (AC-105: a fresh idea carries its own window even when the day's rule plans
+ *  are already stale). When given, `executeUntil` is `min(decidedAt + executionWindowMs, capAt)`,
+ *  per §13 A29 ("the owner may raise executionWindowMs up to the plan's expiresAt").
+ *
+ *  Without that cap a decision taken late in a plan's 12 h life advertised a window outliving the
+ *  plan itself, and the journal accepted an entry against an expired plan: on 2026-09-18 a decision
+ *  at 11:53 UTC printed 17:53 for a plan that expired at 12:15, and a paper entry was then recorded
+ *  at 12:31 as if it were inside the window. */
+export function buildOwnerProtocol(
+  plan: PlanRow,
+  atr14d: number,
+  cfg: PersonaConfig,
+  decidedAt: number,
+  capAt: number | null = null,
+): OwnerProtocol {
   const maxEntryGapAbs = cfg.maxEntryGapAtr * atr14d;
   const entryBand: [number, number] = [plan.referencePrice - maxEntryGapAbs, plan.referencePrice + maxEntryGapAbs];
   const isLong = plan.side === "long";
@@ -329,7 +349,7 @@ export function buildOwnerProtocol(plan: PlanRow, atr14d: number, cfg: PersonaCo
   return {
     decidedAt,
     executeFrom: decidedAt,
-    executeUntil: decidedAt + cfg.executionWindowMs,
+    executeUntil: capAt === null ? decidedAt + cfg.executionWindowMs : Math.min(decidedAt + cfg.executionWindowMs, capAt),
     referencePrice: plan.referencePrice,
     atr14d,
     maxEntryGapAbs,

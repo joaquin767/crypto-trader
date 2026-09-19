@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "dateUtc": "2026-09-19",
+  "revision": 0,
+  "decidedAt": 1789777639137,
+  "skillHash": "4b92ab52bb02e3190240c027de5587333dd77edd133bbd8d3a057f95d7f76418",
+  "reportPath": "reports/2026-09-19.json",
+  "reportSha256": "60c1cb8b6a150f10e1baaaf30bedf921f052cc969e97cf941f335c8274065768",
+  "reportDecisionTime": 1789776923111,
+  "input": {
+    "dateUtc": "2026-09-19",
+    "choice": {
+      "kind": "no-trade",
+      "reason": "Both of today's plans are ETH/USDT and the account already holds an open ETH/USDT long (tradeId 62d98153, entered 2026-09-18 at 2500, thesis intact). The long plan would double correlated exposure in the same instrument at the most crowded funding reading in 90 days (fundingRatePercentile90d 100, oiChange3dPct +9.09%) the day after a +6.72% session; the short plan would oppose that same open position and its target (1591.28, about 10 ATR away in a 7-day hold) is not reachable, so its stated 2R is fiction. The AI's only idea (BTC long) is a continuation bet on a one-day catalyst move with no §2.2 evidence row, which its own risk list concedes. No new position today; the open trade is managed separately (tighten stop, data/decisions/2026-09-19.manage.62d98153-01ae-409e-b738-0dd417452d9b.json)."
+    },
+    "stances": [
+      {
+        "planId": "2026-09-19:pre-fomc-cpi-derisk:ETH/USDT",
+        "stance": "oppose",
+        "reasons": [
+          "Adding a second ETH long on top of the open one concentrates the book in a single instrument. The plan's geometry is fine (stop 2458.06 is 1.5x atr14d 101.97 below reference, target 2916.94 is 2R), so this is about exposure, not mechanics.",
+          "It buys the most crowded leverage in the book: fundingRatePercentile90d 100 and oiChange3dPct +9.09% mean the bounce is financed by newly added longs. X4 (Weak/mixed) is the only evidence row for funding and gives no directional edge, so crowding here is a risk without an offsetting measured signal.",
+          "Spot flow contradicts the move: ethEtfNetFlowUsd1d -224,100,000 and stablecoinSupplyChange7dPct -0.17. X1 (Moderate) makes same-day flow coincident, so this is a hostile entry environment rather than a forward short signal.",
+          "The rule's own premise is not what is firing. It keys on event proximity, but hoursToNextFomc 953.74 (~40 days) and hoursToNextCpi 612.24 (~26 days) put nothing inside the hold; X2 (Moderate) supports event-vol timing, never direction, so what triggered is effectively a momentum long with no evidence row behind it.",
+          "Sentiment is the wrong side of the distribution for adding: fearGreed 71 (greed). No evidence in §2.2 for fearGreed as a directional signal, so this is context, not a reason on its own."
+        ]
+      },
+      {
+        "planId": "2026-09-19:funding-extreme-contrarian:ETH/USDT",
+        "stance": "oppose",
+        "reasons": [
+          "The trigger is a relative percentile, not an absolute extreme: fundingRatePercentile90d 100 sits on a 3-day average funding of 0.0000456 per 8h, below a neutral 0.01% baseline. A 90-day window that was mostly negative makes the 100th percentile a weak claim, and X4 (Weak/mixed) has no out-of-sample confirmation to begin with.",
+          "The target is unreachable in the hold: 1591.28 is about 1,020 points below reference 2611.02, roughly 10x atr14d 101.97 inside maxHoldDays 7. The realistic outcomes are stop-out or time exit, so the plan's 4R geometry overstates what it can deliver - a rule defect worth fixing, not a trade to take.",
+          "It shorts directly into an identified upside catalyst with the stop only ~2.5 ATR above spot: the SEC's five-year Innovation Exemption landed on 2026-09-17 and the session ran +6.72%. No evidence in §2.2 for a regulatory catalyst, so I weight it as narrative - but narrative that cuts against the short.",
+          "Book-level conflict: it is the opposite side of the same symbol the account is already long. Taking it would pay round-trip fees to be net flat rather than express a view."
+        ]
+      }
+    ],
+    "news": [
+      {
+        "title": "SEC releases the long-awaited five-year 'innovation exemption' for tokenized securities venues",
+        "url": "https://www.theblock.co/news/regulation/2026-09-17-sec-releases-innovation-exemption-415324",
+        "date": "2026-09-17",
+        "tag": "unconfirmed"
+      },
+      {
+        "title": "Bitcoin climbs over $80,000 as the rally accelerates at the US market open; ETH +5.6% to ~$2,587",
+        "url": "https://www.coindesk.com/tech/2026/09/18/live-updates-hype-leads-altcoin-rally-as-bitcoin-recovers-toward-usd78-000",
+        "date": "2026-09-18",
+        "tag": "confirmed"
+      },
+      {
+        "title": "ETH aggregate futures open interest $34.09B (+39.7% over 90d), 68.3% of Binance accounts long, Fear & Greed 73",
+        "url": "https://www.coinglass.com/currencies/ETH/futures",
+        "date": "2026-09-19",
+        "tag": "confirmed"
+      },
+      {
+        "title": "ETH funding 0.0090%/day, above the 90-day average 0.0042% but below the 0.03% crowded-leverage level",
+        "url": "https://www.coinglass.com/currencies/ETH/futures",
+        "date": "2026-09-19",
+        "tag": "contradicts"
+      }
+    ],
+    "rationale": "Order of examination (references/theory.md). Completeness: complete, all 13 sources ok, breaker not tripped, one open trade with thesis intact. Positioning first, and it dominates today: ETH fundingRatePercentile90d 100 with oiChange3dPct +9.09% - leverage crowding into a bounce, the precondition for a mean-reverting flush (X4 Weak/mixed, so a risk flag rather than a signal). BTC is cleaner at the 85.9th percentile. Calendar: empty, nothing inside any hold (X2 Moderate, timing only). Flows: still negative and divergent from price - ethEtfNetFlowUsd1d -224,100,000, btcEtfNetFlowUsd1d -295,900,000, stablecoin supply -0.17% over 7d (X1 Moderate, coincident). Sentiment: fearGreed 71, greed, no evidence row. News confirms the price move and the independent positioning picture (OI $34.09B, 68.3% accounts long, F&G 73); one source puts ETH funding below the crowded-leverage threshold in absolute terms, which contradicts reading the 100th percentile as an extreme - the report's feature wins for the number, and the contradiction is exactly why the short is opposed. Decision: no new position. Both plans are ETH, one doubles a crowded long I already hold and the other opposes it with an unreachable target, and the AI's BTC continuation idea has no evidence row. The right action today is on the open position, not a new one: it is managed in a separate per-trade call."
+  },
+  "validation": {
+    "ok": true,
+    "rejections": [],
+    "unverifiedWebRefs": []
+  },
+  "plan": null,
+  "personaRule": null,
+  "basedOnPlanId": null,
+  "basedOnRuleKey": null,
+  "ownerProtocol": null,
+  "ownerTimeZone": "America/Argentina/Buenos_Aires",
+  "disclaimer": "Generated analysis for the owner's review. Not investment advice."
+}
