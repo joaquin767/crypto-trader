@@ -599,6 +599,27 @@ rule is `not_evaluable` — it never fires on partial data.
 
 An invalid file stops the run with every problem listed — fix them all, then re-run.
 
+### Is your target actually reachable?
+
+`stopAtrMultiple × targetRMultiple` is the target's distance **in ATRs**, and `maxHoldDays` is how long
+the market has to travel it. Nothing validates that pairing, so a rule can advertise an R-multiple the
+market has never delivered in that time. All three example rules did exactly that until 2026-09-19 —
+`funding-extreme-contrarian` asked for **10 ATR in 7 days**, which happened in **0 of 968 windows**.
+
+Measured on the backfilled daily bars (2024-01-01 → 2026-09-15, BTC and ETH, ~970 windows each): how
+far price travels in your favour before the hold expires, in ATRs.
+
+| Hold | median | p75 | p90 |
+|------|--------|-----|-----|
+| 3 days | 0.7 | 1.2 | 2.0 |
+| 5 days | 0.9 | 1.6 | 2.6 |
+| 7 days | 1.0 | 1.9 | 3.1 |
+
+A target at the **p75** distance is reached from a *random* entry about a quarter of the time — so a rule
+with a real edge should beat that, and one that needs p90+ is asking the market for a rare event. Adverse
+excursions are near-symmetric (median ≈ 1.0 ATR over 7 days), so a stop inside ~1 ATR will be hit by
+ordinary noise. Rebuild the numbers yourself after a backfill if you want them fresher than this table.
+
 ## How a plan is sized
 
 1. Risk per trade = `maxCapitalUsd × riskPerTradePercent` (capped at 1%).
