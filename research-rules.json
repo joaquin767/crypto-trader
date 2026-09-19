@@ -3,63 +3,114 @@
   "rules": [
     {
       "id": "etf-flow-momentum",
-      "version": 1,
-      "description": "EXAMPLE — not a recommendation: format fixture for A10/X1. BTC spot-ETF net inflows are a market-wide risk-on signal (§2.2 X1); this rule goes long when the trailing 5-day flow is strongly positive and invalidates on a sharp single-day reversal. Not backtested; status stays \"experimental\" until Gate D0/D1.",
-      "evidence": ["X1"],
+      "version": 2,
+      "description": "EXAMPLE — not a recommendation: format fixture for A10/X1. BTC spot-ETF net inflows are a market-wide risk-on signal (§2.2 X1); this rule goes long when the trailing 5-day flow is strongly positive and invalidates on a sharp single-day reversal. Not backtested; status stays \"experimental\" until Gate D0/D1. Geometry fixed 2026-09-19: the previous 2 ATR stop x 3R put the target 6 ATR away, a distance BTC reached in 1.1% and ETH in 1.5% of 970 five-day windows (2024-01-01..2026-09-15) — the target was decorative and every trade resolved on the stop or the time exit. Target is now 1.6 ATR, the measured p75 favourable five-day move (BTC 1.58, ETH 1.59), with a 1.0 ATR stop (~p60 adverse), i.e. R:R 1.6. Not backtested.",
+      "evidence": [
+        "X1"
+      ],
       "status": "experimental",
-      "symbols": ["BTC/USDT", "ETH/USDT"],
+      "symbols": [
+        "BTC/USDT",
+        "ETH/USDT"
+      ],
       "side": "long",
       "entryWhenAll": [
-        { "feature": "btcEtfNetFlowUsd5d", "op": ">", "value": 100000000 }
+        {
+          "feature": "btcEtfNetFlowUsd5d",
+          "op": ">",
+          "value": 100000000
+        }
       ],
       "invalidateWhenAny": [
-        { "feature": "btcEtfNetFlowUsd1d", "op": "<", "value": -50000000 }
+        {
+          "feature": "btcEtfNetFlowUsd1d",
+          "op": "<",
+          "value": -50000000
+        }
       ],
-      "stopAtrMultiple": 2,
-      "targetRMultiple": 3,
+      "stopAtrMultiple": 1,
+      "targetRMultiple": 1.6,
       "maxHoldDays": 5,
       "forwardOnly": false,
       "origin": "rules-file"
     },
     {
       "id": "pre-fomc-cpi-derisk",
-      "version": 1,
-      "description": "EXAMPLE — not a recommendation: format fixture for A10/X2. Encodes \"no new entries within 24h of a scheduled macro event\" as an entry gate rather than a separate blocking mechanism (this engine only expresses entry rules): entryWhenAll requires both hoursToNextFomc and hoursToNextCpi to exceed 24h, so the rule simply cannot trigger — and therefore proposes no new plan — inside that 24h pre-event window; a modest already-trending filter (return1d > 0) supplies the rest of the entry thesis so the example has a real signal, not just a calendar gate. Not backtested.",
-      "evidence": ["X2"],
+      "version": 2,
+      "description": "EXAMPLE — not a recommendation: format fixture for A10/X2. Encodes \"no new entries within 24h of a scheduled macro event\" as an entry gate rather than a separate blocking mechanism (this engine only expresses entry rules): entryWhenAll requires both hoursToNextFomc and hoursToNextCpi to exceed 24h, so the rule simply cannot trigger — and therefore proposes no new plan — inside that 24h pre-event window; a modest already-trending filter (return1d > 0) supplies the rest of the entry thesis so the example has a real signal, not just a calendar gate. Geometry fixed 2026-09-19: the previous 1.5 ATR stop x 2R put the target 3 ATR away, reached in 3.1% (BTC) / 2.9% (ETH) of 972 three-day windows. Target is now 1.2 ATR, the measured p75 favourable three-day move (BTC 1.22, ETH 1.19), with a 0.8 ATR stop (~p60 adverse), i.e. R:R 1.5. Not backtested.",
+      "evidence": [
+        "X2"
+      ],
       "status": "experimental",
-      "symbols": ["BTC/USDT", "ETH/USDT"],
+      "symbols": [
+        "BTC/USDT",
+        "ETH/USDT"
+      ],
       "side": "long",
       "entryWhenAll": [
-        { "feature": "hoursToNextFomc", "op": ">", "value": 24 },
-        { "feature": "hoursToNextCpi", "op": ">", "value": 24 },
-        { "feature": "return1d", "op": ">", "value": 0 }
+        {
+          "feature": "hoursToNextFomc",
+          "op": ">",
+          "value": 24
+        },
+        {
+          "feature": "hoursToNextCpi",
+          "op": ">",
+          "value": 24
+        },
+        {
+          "feature": "return1d",
+          "op": ">",
+          "value": 0
+        }
       ],
       "invalidateWhenAny": [
-        { "feature": "hoursToNextFomc", "op": "<", "value": 24 },
-        { "feature": "hoursToNextCpi", "op": "<", "value": 24 }
+        {
+          "feature": "hoursToNextFomc",
+          "op": "<",
+          "value": 24
+        },
+        {
+          "feature": "hoursToNextCpi",
+          "op": "<",
+          "value": 24
+        }
       ],
-      "stopAtrMultiple": 1.5,
-      "targetRMultiple": 2,
+      "stopAtrMultiple": 0.8,
+      "targetRMultiple": 1.5,
       "maxHoldDays": 3,
       "forwardOnly": false,
       "origin": "rules-file"
     },
     {
       "id": "funding-extreme-contrarian",
-      "version": 1,
-      "description": "EXAMPLE — not a recommendation: format fixture for A10/X4. Extreme positive funding (>95th percentile of the trailing 90 days) implies crowded leveraged longs; this rule fades that crowding with a short, and invalidates once funding normalizes back under the 50th percentile. Not backtested.",
-      "evidence": ["X4"],
+      "version": 2,
+      "description": "EXAMPLE — not a recommendation: format fixture for A10/X4. Extreme positive funding (>95th percentile of the trailing 90 days) implies crowded leveraged longs; this rule fades that crowding with a short, and invalidates once funding normalizes back under the 50th percentile. Geometry fixed 2026-09-19: the previous 2.5 ATR stop x 4R put the target 10 ATR away — reached in 0.0% of 968 seven-day windows on both symbols, i.e. never in 2.7 years, so the advertised 4R was arithmetically impossible and the rule could only ever stop out or time out. Target is now ~2.0 ATR, the measured p75 favourable seven-day short move (BTC 1.90, ETH 2.02), with a 1.2 ATR stop (~p55 adverse), i.e. R:R 1.67. Not backtested.",
+      "evidence": [
+        "X4"
+      ],
       "status": "experimental",
-      "symbols": ["BTC/USDT", "ETH/USDT"],
+      "symbols": [
+        "BTC/USDT",
+        "ETH/USDT"
+      ],
       "side": "short",
       "entryWhenAll": [
-        { "feature": "fundingRatePercentile90d", "op": ">", "value": 95 }
+        {
+          "feature": "fundingRatePercentile90d",
+          "op": ">",
+          "value": 95
+        }
       ],
       "invalidateWhenAny": [
-        { "feature": "fundingRatePercentile90d", "op": "<", "value": 50 }
+        {
+          "feature": "fundingRatePercentile90d",
+          "op": "<",
+          "value": 50
+        }
       ],
-      "stopAtrMultiple": 2.5,
-      "targetRMultiple": 4,
+      "stopAtrMultiple": 1.2,
+      "targetRMultiple": 1.67,
       "maxHoldDays": 7,
       "forwardOnly": false,
       "origin": "rules-file"

@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": 1789782106771,
+  "command": "backtest:daily --rule pre-fomc-cpi-derisk --mode dev",
+  "ruleId": "pre-fomc-cpi-derisk",
+  "ruleHash": "0e6b09c85c089fc57fa4710b906642c295f0619e27046cbc3aa5dfc7a1f3a84e",
+  "mode": "dev",
+  "firstDecisionDay": "2024-01-11",
+  "lastDecisionDay": "2025-09-11",
+  "cutoffMs": 1757980800000,
+  "closedTrades": 239,
+  "decisionDaysWithTrades": 198,
+  "meanR": -0.016880561375686668,
+  "bootstrapCi90": [
+    -0.14264173979342368,
+    0.10475499119370164
+  ],
+  "permutationPValue": 0.5574425574425574,
+  "permutationRunsCompleted": 1000,
+  "topSymbolShare": 1,
+  "maxDrawdownR": 29.553840677323866,
+  "seed": 20260917,
+  "slippageBps": 5,
+  "unfilledCount": 540,
+  "symbols": [
+    {
+      "symbol": "BTC/USDT",
+      "firstKlineTime": 1704067200000
+    },
+    {
+      "symbol": "ETH/USDT",
+      "firstKlineTime": 1704067200000
+    }
+  ],
+  "historyCoverage": {
+    "bybit-funding": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 6000
+    },
+    "bybit-instruments": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 6
+    },
+    "bybit-klines-1d": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 9890
+    },
+    "bybit-klines-1h": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 237360
+    },
+    "coinalyze-oi": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 1978
+    },
+    "defillama-stablecoins": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 3215
+    },
+    "farside-btc-etf": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 688
+    },
+    "farside-eth-etf": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 550
+    },
+    "fear-greed": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 3147
+    },
+    "fred-release-dates": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 953
+    },
+    "macro-calendar-manual": {
+      "from": 1704067200000,
+      "to": 1789516799999,
+      "rows": 24
+    }
+  },
+  "verdict": "dev_only"
+}
