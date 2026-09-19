@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "dateUtc": "2026-09-19",
+  "tradeId": "62d98153-01ae-409e-b738-0dd417452d9b",
+  "revision": 0,
+  "writtenAt": 1789778311210,
+  "skillHash": "4b92ab52bb02e3190240c027de5587333dd77edd133bbd8d3a057f95d7f76418",
+  "input": {
+    "dateUtc": "2026-09-19",
+    "tradeId": "62d98153-01ae-409e-b738-0dd417452d9b",
+    "action": {
+      "kind": "tighten-stop",
+      "price": 2440
+    },
+    "thesis": "intact",
+    "reasons": [
+      "The plan's invalidation conditions have not fired: the report computes openTradeThesis.state intact for this trade, and the target 2732.73 is still about 121 above the decision-time close 2611.02, so the thesis has room to play out. Not close-now.",
+      "Crowding is the reason to protect rather than hold wide: ETH fundingRatePercentile90d 100 with oiChange3dPct +9.09% means this leg up is carried by newly added longs. X4 (Weak/mixed) gives no directional edge, so I treat it as elevated flush risk, not a reason to exit a working position.",
+      "Spot flow does not confirm the derivatives bid: ethEtfNetFlowUsd1d -224,100,000 and stablecoinSupplyChange7dPct -0.17 (X1 Moderate, coincident). Independent search agrees from outside the system: ETH open interest $34.09B (+39.7% over 90d), 68.3% of Binance accounts long, Fear & Greed 73.",
+      "2440 is the most protection this trade can take: the CLI caps a tightened stop below the plan's referencePrice 2446.50, and the entry was recorded at 2500 - outside the plan's own gap band 2422.65 to 2470.35 - so a stop at the actual fill is not available. That is a consequence of the out-of-band entry, not of today's reading.",
+      "It never widens risk and it is not a noise stop: from the 2500 fill the remaining downside falls from 196.62 to 60 per ETH ($3.93 to $1.20 on 0.02), while 2440 still sits about 1.68x atr14d 101.97 below the 2611.02 close.",
+      "The hard time exit stays 2026-09-21 (maxHoldDays 3 from the 2026-09-18 entry) whatever the stop does."
+    ],
+    "news": [
+      {
+        "title": "SEC releases the five-year 'innovation exemption' for tokenized securities venues",
+        "url": "https://www.theblock.co/news/regulation/2026-09-17-sec-releases-innovation-exemption-415324",
+        "date": "2026-09-17",
+        "tag": "unconfirmed"
+      },
+      {
+        "title": "ETH futures open interest $34.09B (+39.7% over 90d), 68.3% of accounts long, Fear & Greed 73",
+        "url": "https://www.coinglass.com/currencies/ETH/futures",
+        "date": "2026-09-19",
+        "tag": "confirmed"
+      }
+    ]
+  },
+  "validation": {
+    "ok": true,
+    "rejections": [],
+    "unverifiedWebRefs": []
+  },
+  "tradePlanId": "2026-09-18:persona-4b92ab52:ETH/USDT",
+  "currentStopPrice": 2303.3839285714284,
+  "disclaimer": "Generated analysis for the owner's review. Not investment advice."
+}

@@ -1488,7 +1488,7 @@ export interface OwnerProtocolOrder {
 }
 
 export interface OwnerProtocol {
-  decidedAt: number; executeFrom: number; executeUntil: number;   // executeFrom = decidedAt; executeUntil = decidedAt + persona.executionWindowMs
+  decidedAt: number; executeFrom: number; executeUntil: number;   // executeFrom = decidedAt; executeUntil = decidedAt + persona.executionWindowMs, CAPPED at the chosen report plan's own expiresAt for a "report-plan" choice (buildOwnerProtocol's `capAt`); uncapped for a "persona-idea" (AC-105: a fresh idea carries its own window). Revision-3 fix, AC-134
   referencePrice: number; atr14d: number; maxEntryGapAbs: number; // maxEntryGapAbs = persona.maxEntryGapAtr × atr14d
   entryBand: [number, number];                                    // [referencePrice − maxEntryGapAbs, referencePrice + maxEntryGapAbs]
   venueIntent: "paper" | "live"; leverage: number; marginMode: "isolated";
@@ -2297,6 +2297,7 @@ unit test against a fixture — no network, no real `notify-send`, no real clock
 - [x] AC-132: **CSV export Host check.** `GET /api/reviews.csv` with a mismatched `Host` header returns 403, identically to every other endpoint (AC-66).
 - [x] AC-133 [manual]: **Live Coinalyze smoke.** With a real `COINALYZE_API_KEY`, `npm run backfill -- --from <date> --to <yesterday>` produces non-empty `data/history/coinalyze-oi.json` rows for BTC and ETH, and a live `research:daily` run's `oiChange3dPct` resolves to a value (not `missing`) for at least one symbol. **Run 2026-09-17** with the owner's key: live adapter `ok`, 10 daily rows per symbol; backfill `coinalyze-oi` 1 978 rows over 2024-01-01..2026-09-15; record and the two defects it exposed (the `_PERP` symbol grammar, and a failed source overwriting history) in `docs/validation/phase7-smoke-2026-09-17.md`. The `research:daily` half is the owner's to confirm on the next scheduled run (the daily feature still prefers `bybit-oi`, which is `ok` today).
 - [x] AC-133a: **Symbol-incomplete Coinalyze response fails closed.** Given an HTTP 200 whose array omits a requested symbol (Coinalyze's answer for an unknown symbol grammar), then the snapshot is `unavailable` with a detail naming the missing symbols and `rows` empty — never `ok` with zero rows (`tests/research-sources.test.ts`).
+- [x] AC-134: **The execute window never outlives the chosen plan.** Given a `report-plan` choice decided 20 minutes before that plan's `expiresAt`, then `ownerProtocol.executeUntil === plan.expiresAt` (not `decidedAt + executionWindowMs`), and the Plan Report prints that capped instant; given the same choice decided 11 h earlier, then `executeUntil === decidedAt + executionWindowMs`; given a `persona-idea` decided after the report plans' `expiresAt`, then `executeUntil === decidedAt + executionWindowMs` (uncapped, AC-105). `tests/decision-plan-report.test.ts`.
 
 ---
 
@@ -2611,7 +2612,11 @@ Phase 3 is ordered before Phase 4 so paper tracking can start as soon as rules p
 - A29 **(revision 3)**: `persona.executionWindowMs` defaults to **6 h** — shorter than the plan's own 12 h `expiresAt`
   (A2), because the decision is taken some time after 00:15 and a stale *decision* is worse than a stale *plan*: the
   persona weighed news that keeps aging. The owner may raise it up to the plan's `expiresAt`; past that the report-plan
-  choice is `expired` anyway.
+  choice is `expired` anyway. **The window is therefore capped at the chosen plan's own `expiresAt`** (AC-134): a decision
+  taken 20 minutes before a plan expires gets a 20-minute window, not a 6-hour one. Found live — a decision at 11:53 UTC on
+  2026-09-18 advertised 17:53 for a plan that expired at 12:15, and because §5.8a's link window is
+  `[decidedAt, executeUntil]`, the journal then accepted a paper entry at 12:31 against an expired plan. A `persona-idea`
+  is deliberately **not** capped (AC-105): the idea is new even when the day's rule plans are stale.
 - A30 **(revision 3)**: `persona.maxEntryGapAtr` defaults to **0.25** ATR. Entering more than a quarter of a daily ATR
   away from `referencePrice` silently changes the trade's R: the stop distance is fixed in the plan, so the real risk and
   the real R-multiple drift from the printed ones. 0.25 is a starting value for owner veto, not a measured threshold —

@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "dateUtc": "2026-09-18",
+  "revision": 0,
+  "decidedAt": 1789732415061,
+  "skillHash": "4b92ab52bb02e3190240c027de5587333dd77edd133bbd8d3a057f95d7f76418",
+  "reportPath": "reports/2026-09-18.json",
+  "reportSha256": "fce2d9ef18d334119b42da8a3993d2da059999465485d18ab5e5ed5dbfbbe69e",
+  "reportDecisionTime": 1789690524034,
+  "input": {
+    "dateUtc": "2026-09-18",
+    "choice": {
+      "kind": "report-plan",
+      "planId": "2026-09-18:pre-fomc-cpi-derisk:ETH/USDT"
+    },
+    "stances": [
+      {
+        "planId": "2026-09-18:pre-fomc-cpi-derisk:ETH/USDT",
+        "stance": "caution",
+        "reasons": [
+          "The rule's own premise holds mechanically: hoursToNextCpi 636.24 (~26.5 days) and hoursToNextFomc 977.74 (~40.7 days) put no scheduled macro event inside the 3-day hold. X2 (Moderate) supports this as event-risk timing only, never as a directional edge.",
+          "Positioning is the strongest argument for the long and it is real: ETH fundingRate8hAvg3d -0.000006693 (shorts paying longs), fundingRatePercentile90d 35.56 (nowhere near crowded), oiChange3dPct -2.377 (leverage leaving into the move). X4 (Weak/mixed) caps how much this is worth.",
+          "The flow backdrop is hostile and is the reason this is caution rather than support: btcEtfNetFlowUsd1d -295,900,000, btcEtfNetFlowUsd5d -882,300,000, ethEtfNetFlowUsd1d -224,100,000, stablecoinSupplyChange7dPct -0.292. X1 (Moderate) treats same-day flow as coincident, so this is a bad entry environment rather than a forward signal.",
+          "Sentiment does not corroborate a washed-out bottom: fearGreed 56 is neutral, with room to deteriorate before any contrarian floor. No evidence in §2.2 for fearGreed as a directional signal.",
+          "Practical: the plan expires 2026-09-18 12:15 UTC, so the execute window is minutes, not hours. If the owner is not at the keyboard the trade simply is not entered, which is an acceptable outcome for a caution-stance paper plan.",
+          "The AI channel independently reached caution (0.45) on this same plan with a compatible reading, and its own BTC short idea was rejected by the planner as size_below_min, so there is no competing plan today."
+        ]
+      }
+    ],
+    "news": [
+      {
+        "title": "Bitcoin ETF net outflow of 4,300 BTC and Ethereum ETF -76,217 ETH on Sept 17; ETHA -$110.03M",
+        "url": "https://www.kucoin.com/news/flash/us-bitcoin-etf-sees-net-outflow-of-4-300-btc-ethereum-etf-loses-76-217-eth",
+        "date": "2026-09-17",
+        "tag": "confirmed"
+      },
+      {
+        "title": "Ethereum ETF outflows triggered by the Federal Reserve rate hike",
+        "url": "https://en.cryptonomist.ch/2026/09/17/ethereum-etf-outflows-federal-reserve/",
+        "date": "2026-09-17",
+        "tag": "confirmed"
+      },
+      {
+        "title": "ETH trading near $2,438 after the 25bp hike to 4.00%; muted reaction, -1.5% on the week",
+        "url": "https://www.coindesk.com/price/ethereum",
+        "date": "2026-09-18",
+        "tag": "unconfirmed"
+      },
+      {
+        "title": "Coinbase quotes ETH at $2,491.95 today",
+        "url": "https://www.coinbase.com/price/ethereum",
+        "date": "2026-09-18",
+        "tag": "contradicts"
+      }
+    ],
+    "rationale": "Order of examination (references/theory.md): completeness complete, every source ok, breaker not tripped, no open trades. Positioning first: ETH is de-leveraged with shorts paying (funding negative, percentile 35.6, OI -2.38%) - the one family that actively supports a long, at X4 Weak strength. Calendar: quiet by construction, no event inside the 3-day hold (X2 Moderate, timing not direction). Flows: the dominant negative, ETF outflows on both assets and a shrinking stablecoin float, but X1 (Moderate) makes same-day flow coincident, so it argues about the entry environment rather than predicting the next three days. Sentiment: fearGreed 56, neutral, no evidence in §2.2 for direction. News confirms the flow picture from the system's own features and confirms the hike is behind us; a price discrepancy between venues (CoinDesk ~2438 vs Coinbase ~2492 against the report's decision-time close 2446.5) is exactly what the gap rule exists for - the owner compares their own mark against the printed band before entering. Choice: take the rule plan rather than an idea of my own. It is the only sized plan today, it is paper at 1x, its thesis checklist is complete (catalyst, mechanism, timing, invalidation via the rule's invalidateWhenAny, evidence IDs, known gaps, gate status experimental), and a forward paper record is exactly how this rule earns its Gate D1 count. Caution, not support, because the flow backdrop is against it and the evidence ceiling here is Weak-to-Moderate."
+  },
+  "validation": {
+    "ok": true,
+    "rejections": [],
+    "unverifiedWebRefs": []
+  },
+  "plan": {
+    "kind": "plan",
+    "planId": "2026-09-18:persona-4b92ab52:ETH/USDT",
+    "ruleId": "persona-4b92ab52",
+    "ruleHash": "4b92ab52bb02e3190240c027de5587333dd77edd133bbd8d3a057f95d7f76418",
+    "origin": "persona",
+    "symbol": "ETH/USDT",
+    "side": "long",
+    "referencePrice": 2446.5,
+    "stopPrice": 2303.3839285714284,
+    "targetPrice": 2732.7321428571427,
+    "expiresAt": 1789733724034,
+    "quantity": 0.02,
+    "notionalUsd": 48.93,
+    "riskUsd": 2.8623214285714265,
+    "leverage": 1,
+    "marginUsd": 48.93,
+    "estLiquidationPrice": 12.2325,
+    "liqToStopRatio": 17.009043608459677,
+    "estRoundTripFeeUsd": 0.053822999999999996,
+    "venueIntent": "paper",
+    "maxHoldDays": 3,
+    "basedOnPlanId": "2026-09-18:pre-fomc-cpi-derisk:ETH/USDT",
+    "basedOnRuleKey": "pre-fomc-cpi-derisk@568b0787"
+  },
+  "personaRule": {
+    "id": "persona-4b92ab52",
+    "version": 1,
+    "description": "EXAMPLE — not a recommendation: format fixture for A10/X2. Encodes \"no new entries within 24h of a scheduled macro event\" as an entry gate rather than a separate blocking mechanism (this engine only expresses entry rules): entryWhenAll requires both hoursToNextFomc and hoursToNextCpi to exceed 24h, so the rule simply cannot trigger — and therefore proposes no new plan — inside that 24h pre-event window; a modest already-trending filter (return1d > 0) supplies the rest of the entry thesis so the example has a real signal, not just a calendar gate. Not backtested.",
+    "evidence": [],
+    "status": "experimental",
+    "symbols": [
+      "BTC/USDT",
+      "ETH/USDT"
+    ],
+    "side": "long",
+    "entryWhenAll": [],
+    "invalidateWhenAny": [
+      {
+        "feature": "hoursToNextFomc",
+        "op": "<",
+        "value": 24
+      },
+      {
+        "feature": "hoursToNextCpi",
+        "op": "<",
+        "value": 24
+      }
+    ],
+    "stopAtrMultiple": 1.5,
+    "targetRMultiple": 2,
+    "maxHoldDays": 3,
+    "forwardOnly": true,
+    "origin": "persona"
+  },
+  "basedOnPlanId": "2026-09-18:pre-fomc-cpi-derisk:ETH/USDT",
+  "basedOnRuleKey": "pre-fomc-cpi-derisk@568b0787",
+  "ownerProtocol": {
+    "decidedAt": 1789732415061,
+    "executeFrom": 1789732415061,
+    "executeUntil": 1789754015061,
+    "referencePrice": 2446.5,
+    "atr14d": 95.41071428571422,
+    "maxEntryGapAbs": 23.852678571428555,
+    "entryBand": [
+      2422.6473214285716,
+      2470.3526785714284
+    ],
+    "venueIntent": "paper",
+    "leverage": 1,
+    "marginMode": "isolated",
+    "orders": [
+      {
+        "slot": 1,
+        "kind": "entry",
+        "action": "buy",
+        "orderType": "market",
+        "price": null,
+        "quantity": 0.02,
+        "reduceOnly": false
+      },
+      {
+        "slot": 2,
+        "kind": "stop",
+        "action": "sell",
+        "orderType": "stop-market",
+        "price": 2303.3839285714284,
+        "quantity": 0.02,
+        "reduceOnly": true
+      },
+      {
+        "slot": 3,
+        "kind": "take-profit",
+        "action": "sell",
+        "orderType": "limit",
+        "price": 2732.7321428571427,
+        "quantity": 0.02,
+        "reduceOnly": true
+      }
+    ],
+    "recordVia": "paper-api",
+    "timeExitOnOrBefore": 1789991615061,
+    "nextReportAt": 1789776900000,
+    "ownerTimeZone": "America/Argentina/Buenos_Aires"
+  },
+  "ownerTimeZone": "America/Argentina/Buenos_Aires",
+  "disclaimer": "Generated analysis for the owner's review. Not investment advice."
+}

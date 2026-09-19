@@ -3,11 +3,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseDecideArgs, runDecide } from "../scripts/decide-daily.ts";
+import { parseDecideArgs, runDecide, STDIN_IS_A_TTY } from "../scripts/decide-daily.ts";
 import type { DecideArgs } from "../src/decision/types.ts";
 import type { DailyDecision, ManageDecision, ReviewDecision } from "../src/decision/types.ts";
 import { ruleHash } from "../src/research/rules.ts";
@@ -448,5 +448,21 @@ test("AC-114a: two trades reviewed the same day write two independent artifacts"
 
     const otherTrade = await reviewFor("review-B", computedB);
     assert.equal(otherTrade.exitCode, 0, otherTrade.message); // not shadowed by review-A's artifact
+  });
+});
+
+
+test("an interactive terminal with no --input exits 4 with a usage line, never waits for EOF", async () => {
+  await withTempDir(async (dir) => {
+    const { args } = setupFixtures(dir);
+    // defaultReadStdin resolves this sentinel when process.stdin.isTTY — otherwise the run just
+    // waits for an EOF the owner has no reason to send, showing no output at all.
+    const result = await runDecide(args, { now: () => NOW, readStdin: async () => STDIN_IS_A_TTY });
+
+    assert.equal(result.exitCode, 4);
+    assert.match(result.message, /no decision input/);
+    assert.match(result.message, /--input <file\.json>/);
+    assert.match(result.message, /decision-protocol\.md/);
+    assert.equal(existsSync(join(dir, "decisions", `${DATE}.json`)), false);
   });
 });
